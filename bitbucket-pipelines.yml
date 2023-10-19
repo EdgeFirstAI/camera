@@ -1,0 +1,55 @@
+image: deepview/rust:latest
+
+clone:
+  depth: full
+
+definitions:
+  caches:
+    apt-archives: /var/cache/apt/archives
+    cargo: /usr/local/cargo
+    rust-target: $BITBUCKET_CLONE_DIR/target
+  steps:
+    - step: &build
+        name: Build
+        caches:
+          - apt-archives
+          - cargo
+          - rust-target
+        script:
+          - rm /etc/apt/apt.conf.d/docker-clean
+          - cargo binstall -y cargo-sonar@0.19.0
+          - cargo build --target=aarch64-unknown-linux-gnu --config target.aarch64-unknown-linux-gnu.linker=\"aarch64-linux-gnu-gcc\" --release
+          - cargo clippy --message-format=json > clippy.json || true
+          - cargo audit --json > audit.json || true
+          - cargo outdated --depth 1 --format json > outdated.json || true
+          - cargo sonar --issues clippy,audit,outdated
+        artifacts:
+          - target/aarch64-unknown-linux-gnu/release/vslpub
+          - sonar-issues.json
+    - step: &sonar
+        name: Code Sonar
+        image: sonarsource/sonar-scanner-cli:latest
+        script:
+          - sonar-scanner
+pipelines:
+  default:
+    - step: *build
+    - step: *sonar
+  pull-requests:
+    '**':
+      - step: *build
+      - step: *sonar
+      - step:
+          name: Deploy
+          deployment: Test
+          script:
+            - echo "Deploy Pull-Request"
+  tags:
+    '*.*.*':
+      - step: *build
+      - step: *sonar
+      - step:
+          name: Deploy
+          deployment: Staging
+          script:
+            - echo "Deploy Release"
