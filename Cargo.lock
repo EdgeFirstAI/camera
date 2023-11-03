@@ -425,7 +425,6 @@ dependencies = [
  "turbojpeg",
  "videostream",
  "zenoh",
- "zenoh-ros-type",
 ]
 
 [[package]]
@@ -3531,15 +3530,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be195cbe1930507af3a43fb9f67fbb85a4cc1cf84fda347b8f2512683d5b975b"
 dependencies = [
  "anyhow",
-]
-
-[[package]]
-name = "zenoh-ros-type"
-version = "0.3.3"
-source = "git+https://github.com/evshary/zenoh-ros-type?branch=main#d185efc4840562f60409f71e007963a4b9036f98"
-dependencies = [
- "serde",
- "serde_derive",
 ]
 
 [[package]]
