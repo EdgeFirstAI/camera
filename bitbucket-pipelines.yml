@@ -24,7 +24,7 @@ definitions:
           - cargo outdated --depth 1 --format json > outdated.json || true
           - cargo sonar --issues clippy,audit,outdated
         artifacts:
-          - target/aarch64-unknown-linux-gnu/release/vslpub
+          - target/aarch64-unknown-linux-gnu/release/camera
           - sonar-issues.json
     - step: &sonar
         name: Code Sonar

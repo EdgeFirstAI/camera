@@ -1,11 +1,29 @@
 [package]
-name = "vslpub"
-description = "VideoStream ROS Publisher"
-repository = "https://bitbucket.org/au-zone/vslpub"
+name = "camera"
+description = "Maivin Camera Service"
+repository = "https://bitbucket.org/au-zone/maivin-camera"
 version = "0.1.0"
 edition = "2021"
 
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[workspace]
+members = ["g2d-sys"]
+
+[[bench]]
+name = "encode"
+harness = false
+
+[[bench]]
+name = "convert"
+harness = false
+
 [dependencies]
+g2d-sys = {version = "0.0.0", path = "g2d-sys"}
+turbojpeg = {version = "0.5", features = ["image"]}
 async-std = {version = "1.12.0", features = ["attributes"] }
 clap = { version = "4.4.6", features = ["derive"] }
 zenoh = "0.10.0-rc"
@@ -13,6 +31,11 @@ zenoh-ros-type = { git = "https://github.com/evshary/zenoh-ros-type", branch = "
 serde = "1.0.147"
 serde_derive = "1.0.147"
 cdr = "0.2.4"
-videostream = "0.5.2"
-vaal = "0.3.0"
-deepviewrt = "0.4.0"
+dma-buf = "0.3.0"
+dma-heap = "0.2.1"
+videostream = "0.6.3"
+
+[dev-dependencies]
+rand = "0.8.5"
+serial_test = "2.0"
+criterion = { version = "0.5", features = ["html_reports"] }
