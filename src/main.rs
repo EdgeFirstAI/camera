@@ -1,13 +1,8 @@
-
 use camera::image::{encode_jpeg, Image, ImageManager, RGBA};
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
 
-use std::{
-    error::Error,
-    str::FromStr,
-    time::{Instant},
-};
+use std::{error::Error, str::FromStr, time::Instant};
 use videostream::{
     camera::{create_camera, Mirror},
     fourcc::FourCC,
@@ -23,6 +18,26 @@ struct Args {
     /// camera capture device
     #[arg(short, long, default_value = "/dev/video3")]
     camera: String,
+
+    /// camera capture resolution
+    #[arg(
+        short,
+        long,
+        default_value = "3840 2160",
+        value_delimiter = ' ',
+        num_args = 2
+    )]
+    camera_size: Vec<i32>,
+
+    /// stream publishing resolution
+    #[arg(
+        short,
+        long,
+        default_value = "960 540",
+        value_delimiter = ' ',
+        num_args = 2
+    )]
+    stream_size: Vec<i32>,
 
     /// zenoh connection mode
     #[arg(short, long, default_value = "peer")]
@@ -54,11 +69,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let session = zenoh::open(config).res().await.unwrap();
 
-    let img = Image::new(960, 540, RGBA)?;
+    let img = Image::new(args.stream_size[0], args.stream_size[1], RGBA)?;
     let imgmgr = ImageManager::new()?;
 
     let cam = create_camera()
         .with_device(&args.camera)
+        .with_resolution(args.camera_size[0], args.camera_size[1])
         .with_format(FourCC(*b"YUYV"))
         .with_mirror(Mirror::Both)
         .open()?;
@@ -82,7 +98,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         if args.verbose {
             println!(
-                "image size: {}KB jpeg: {}KB capture: {:?} convert: {:?} encode: {:?}",
+                "camera {}x{} image {}x{} size: {}KB jpeg: {}KB capture: {:?} convert: {:?} encode: {:?}",
+                cam.width(),
+                cam.height(),
+                img.width(),
+                img.height(),
                 img.width() * img.height() * 4 / 1024,
                 jpeg.len() / 1024,
                 capture_time,
@@ -93,7 +113,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         let msg = CompressedImage {
             header: std_msgs::Header {
-                stamp: ROSTime { sec: ts.seconds() as i32, nanosec: ts.subsec(9) },
+                stamp: ROSTime {
+                    sec: ts.seconds() as i32,
+                    nanosec: ts.subsec(9),
+                },
                 frame_id: "".to_string(),
             },
             format: "jpeg".to_string(),

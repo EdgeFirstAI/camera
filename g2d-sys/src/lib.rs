@@ -7,7 +7,7 @@ include!("ffi.rs");
 use std::os::fd::AsRawFd;
 
 use dma_buf::DmaBuf;
-use nix::{ioctl_write_ptr};
+use nix::ioctl_write_ptr;
 
 use videostream::fourcc::FourCC;
 
