@@ -13,6 +13,9 @@ use videostream::{
     fourcc::FourCC,
 };
 use zenoh::{config::Config, prelude::r#async::*};
+use zenoh_ros_type::{
+    rcl_interfaces::builtin_interfaces::Time as ROSTime, sensor_msgs::CompressedImage, std_msgs,
+};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -30,8 +33,12 @@ struct Args {
     endpoint: Vec<String>,
 
     /// ros topic
-    #[arg(short, long, default_value = "rt/")]
+    #[arg(short, long, default_value = "rt/camera/compressed")]
     topic: String,
+
+    /// verbose logging
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 #[async_std::main]
@@ -39,16 +46,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("VideoStream ROS Publisher");
 
     let args = Args::parse();
-    // let mut config = Config::default();
+    let mut config = Config::default();
 
-    // let mode = WhatAmI::from_str(&args.mode).unwrap();
-    // config.set_mode(Some(mode)).unwrap();
-    // config.connect.endpoints = args.endpoint.iter().map(|v|
-    // v.parse().unwrap()).collect();
+    let mode = WhatAmI::from_str(&args.mode).unwrap();
+    config.set_mode(Some(mode)).unwrap();
+    config.connect.endpoints = args.endpoint.iter().map(|v| v.parse().unwrap()).collect();
 
-    // let session = zenoh::open(config).res().await.unwrap();
+    let session = zenoh::open(config).res().await.unwrap();
 
-    let mut img = Image::new(960, 540, RGBA)?;
+    let img = Image::new(960, 540, RGBA)?;
     let imgmgr = ImageManager::new()?;
 
     let cam = create_camera()
@@ -61,6 +67,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     loop {
         let mut now = Instant::now();
         let buf = cam.read()?;
+        let ts = buf.timestamp();
         let capture_time = now.elapsed();
 
         now = Instant::now();
@@ -73,12 +80,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let jpeg = mem.read(encode_jpeg, Some(&img))?;
         let encode_time = now.elapsed();
 
-        println!(
-            "jpeg size: {}KB capture: {:?} convert: {:?} encode: {:?}",
-            jpeg.len() / 1024,
-            capture_time,
-            convert_time,
-            encode_time
-        );
+        if args.verbose {
+            println!(
+                "image size: {}KB jpeg: {}KB capture: {:?} convert: {:?} encode: {:?}",
+                img.width() * img.height() * 4 / 1024,
+                jpeg.len() / 1024,
+                capture_time,
+                convert_time,
+                encode_time
+            );
+        }
+
+        let msg = CompressedImage {
+            header: std_msgs::Header {
+                stamp: ROSTime { sec: ts.seconds() as i32, nanosec: ts.subsec(9) },
+                frame_id: "".to_string(),
+            },
+            format: "jpeg".to_string(),
+            data: jpeg.to_vec(),
+        };
+
+        let encoded = cdr::serialize::<_, _, CdrLe>(&msg, Infinite)?;
+        session.put(&args.topic, encoded).res().await.unwrap();
     }
 }

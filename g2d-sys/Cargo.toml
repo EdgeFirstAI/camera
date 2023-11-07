@@ -15,4 +15,4 @@ libc = "^0.2"
 libloading = "0.8.1"
 dma-buf = "0.3.0"
 nix = { version = "0.27.1", features = ["ioctl"] }
-videostream = "0.6.3"
+videostream = "0.6.4"

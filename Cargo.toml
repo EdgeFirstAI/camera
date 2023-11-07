@@ -24,6 +24,7 @@ harness = false
 
 [dependencies]
 g2d-sys = {version = "0.0.0", path = "g2d-sys"}
+zenoh-ros-type = { path = "../zenoh-ros-type" }
 turbojpeg = {version = "0.5", features = ["image"]}
 async-std = {version = "1.12.0", features = ["attributes"] }
 clap = { version = "4.4.6", features = ["derive"] }
@@ -33,7 +34,7 @@ serde_derive = "1.0.147"
 cdr = "0.2.4"
 dma-buf = "0.3.0"
 dma-heap = "0.2.1"
-videostream = "0.6.3"
+videostream = "0.6.4"
 
 [dev-dependencies]
 rand = "0.8.5"

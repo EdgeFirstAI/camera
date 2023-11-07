@@ -425,6 +425,7 @@ dependencies = [
  "turbojpeg",
  "videostream",
  "zenoh",
+ "zenoh-ros-type",
 ]
 
 [[package]]
@@ -2050,6 +2051,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "readme-rustdocifier"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08ad765b21a08b1a8e5cdce052719188a23772bcbefb3c439f0baaf62c56ceac"
+
+[[package]]
 name = "redox_syscall"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2863,6 +2870,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f962df74c8c05a667b5ee8bcf162993134c104e96440b663c8daa176dc772d8c"
 
 [[package]]
+name = "unix-ts"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a4f7e2a0ec19e18b93b3801b5271311f8f924527df3775067e039a488e48965"
+dependencies = [
+ "readme-rustdocifier",
+ "unix-ts-macros",
+]
+
+[[package]]
+name = "unix-ts-macros"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "778a90a350e66d5df234e112037b7e67733e31db6d5cc280e7812a58b5088848"
+dependencies = [
+ "readme-rustdocifier",
+]
+
+[[package]]
 name = "unsafe-libyaml"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2961,20 +2987,21 @@ checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 
 [[package]]
 name = "videostream"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "554455bae67ee51c00428763b34a01bd20929de2140c8974297bf9bb655a9f20"
+checksum = "495781cc19730164ee9ffec17faee55f067ce7c25681a7b387fd5c99db3c29d9"
 dependencies = [
  "dma-buf",
  "nix 0.27.1",
+ "unix-ts",
  "videostream-sys",
 ]
 
 [[package]]
 name = "videostream-sys"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c6ada25e3185be0d3f858713832b39439bd4ff09c332ec311da118d7516c016"
+checksum = "cb1c44bc14b1931c2445675faa604b7c47708aea48efa9f76ad8c423ae0e8de1"
 dependencies = [
  "libc",
 ]
@@ -3530,6 +3557,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be195cbe1930507af3a43fb9f67fbb85a4cc1cf84fda347b8f2512683d5b975b"
 dependencies = [
  "anyhow",
+]
+
+[[package]]
+name = "zenoh-ros-type"
+version = "0.3.3"
+dependencies = [
+ "serde",
+ "serde_derive",
 ]
 
 [[package]]
