@@ -24,7 +24,7 @@ harness = false
 
 [dependencies]
 g2d-sys = {version = "0.0.0", path = "g2d-sys"}
-zenoh-ros-type = { path = "../zenoh-ros-type" }
+zenoh-ros-type = { git = "https://github.com/MaivinAI/zenoh-ros-type" }
 turbojpeg = {version = "0.5", features = ["image"]}
 async-std = {version = "1.12.0", features = ["attributes"] }
 clap = { version = "4.4.6", features = ["derive"] }
