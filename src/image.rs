@@ -7,7 +7,7 @@ use std::{
     ffi::c_void,
     io,
     os::{
-        fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd},
+        fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd},
         unix::io::OwnedFd,
     },
     ptr::null_mut,

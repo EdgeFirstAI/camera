@@ -1,12 +1,12 @@
-use async_std::task::sleep;
+
 use camera::image::{encode_jpeg, Image, ImageManager, RGBA};
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
-use serde_derive::{Deserialize, Serialize};
+
 use std::{
     error::Error,
     str::FromStr,
-    time::{Duration, Instant},
+    time::{Instant},
 };
 use videostream::{
     camera::{create_camera, Mirror},

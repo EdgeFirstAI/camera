@@ -1,4 +1,4 @@
-use camera::image::{self, encode_jpeg, Image, ImageManager};
+use camera::image::{self, Image, ImageManager};
 use criterion::{criterion_group, criterion_main, Criterion};
 
 pub fn benchmark_resize(c: &mut Criterion) {
