@@ -20,23 +20,11 @@ struct Args {
     camera: String,
 
     /// camera capture resolution
-    #[arg(
-        short,
-        long,
-        default_value = "3840 2160",
-        value_delimiter = ' ',
-        num_args = 2
-    )]
+    #[arg(long, default_value = "3840 2160", value_delimiter = ' ', num_args = 2)]
     camera_size: Vec<i32>,
 
     /// stream publishing resolution
-    #[arg(
-        short,
-        long,
-        default_value = "960 540",
-        value_delimiter = ' ',
-        num_args = 2
-    )]
+    #[arg(long, default_value = "960 540", value_delimiter = ' ', num_args = 2)]
     stream_size: Vec<i32>,
 
     /// zenoh connection mode
@@ -54,6 +42,18 @@ struct Args {
     /// verbose logging
     #[arg(short, long)]
     verbose: bool,
+}
+
+fn update_fps(prev: &mut Instant, history: &mut Vec<i64>, index: &mut usize) -> i64 {
+    let now = Instant::now();
+
+    let elapsed = now.duration_since(*prev);
+    *prev = Instant::now();
+
+    history[*index] = 1e9 as i64 / elapsed.as_nanos() as i64;
+    *index = (*index + 1) % history.len();
+
+    (history.iter().sum::<i64>() as f64 / history.len() as f64).round() as i64
 }
 
 #[async_std::main]
@@ -80,7 +80,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .open()?;
     cam.start()?;
 
+    let mut prev = Instant::now();
+    let mut history = vec![0; 30];
+    let mut index = 0;
+
     loop {
+        let fps = update_fps(&mut prev, &mut history, &mut index);
         let mut now = Instant::now();
         let buf = cam.read()?;
         let ts = buf.timestamp();
@@ -98,7 +103,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         if args.verbose {
             println!(
-                "camera {}x{} image {}x{} size: {}KB jpeg: {}KB capture: {:?} convert: {:?} encode: {:?}",
+                "camera {}x{} image {}x{} size: {}KB jpeg: {}KB capture: {:?} convert: {:?} encode: {:?} fps: {}",
                 cam.width(),
                 cam.height(),
                 img.width(),
@@ -107,7 +112,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 jpeg.len() / 1024,
                 capture_time,
                 convert_time,
-                encode_time
+                encode_time,
+                fps
             );
         }
 
