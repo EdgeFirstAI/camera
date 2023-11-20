@@ -18,8 +18,8 @@ mod video;
 
 #[derive(clap::ValueEnum, Clone, Debug)]
 enum StreamType {
-    Image,
-    Video,
+    Jpeg,
+    H264,
 }
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -53,8 +53,8 @@ struct Args {
     verbose: bool,
 
     /// stream type
-    #[arg(long, default_value = "video", value_enum)]
-    stream_type: StreamType,
+    #[arg(long, default_value = "h264", value_enum)]
+    codec: StreamType,
 }
 
 fn update_fps(prev: &mut Instant, history: &mut Vec<i64>, index: &mut usize) -> i64 {
@@ -95,8 +95,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut prev = Instant::now();
     let mut history = vec![0; 30];
     let mut index = 0;
-    match args.stream_type {
-        StreamType::Image => loop {
+    match args.codec {
+        StreamType::Jpeg => loop {
             let fps = update_fps(&mut prev, &mut history, &mut index);
             let mut now = Instant::now();
             let buf = cam.read()?;
@@ -144,7 +144,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let encoded = cdr::serialize::<_, _, CdrLe>(&msg, Infinite)?;
             session.put(&args.topic, encoded).res().await.unwrap();
         },
-        StreamType::Video => {
+        StreamType::H264 => {
             let mut vid =
                 VideoManager::new(FourCC(*b"H264"), args.stream_size[0], args.stream_size[1]);
             loop {
