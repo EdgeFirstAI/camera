@@ -29,11 +29,7 @@ struct Args {
     camera: String,
 
     /// camera capture resolution
-    #[arg(long, default_value = "3840 2160", value_delimiter = ' ', num_args = 2)]
-    camera_size: Vec<i32>,
-
-    /// stream publishing resolution
-    #[arg(long, default_value = "1920 1080", value_delimiter = ' ', num_args = 2)]
+    #[arg(long, default_value = "960 544", value_delimiter = ' ', num_args = 2)]
     stream_size: Vec<i32>,
 
     /// zenoh connection mode
@@ -53,7 +49,7 @@ struct Args {
     verbose: bool,
 
     /// stream type
-    #[arg(long, default_value = "h264", value_enum)]
+    #[arg(long, default_value = "jpeg", value_enum)]
     codec: StreamType,
 }
 
@@ -82,9 +78,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let session = zenoh::open(config).res().await.unwrap();
 
-    let img = Image::new(args.stream_size[0], args.stream_size[1], RGBA)?;
-    let imgmgr = ImageManager::new()?;
-
     let cam = create_camera()
         .with_device(&args.camera)
         .with_resolution(args.stream_size[0], args.stream_size[1])
@@ -92,6 +85,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_mirror(Mirror::Both)
         .open()?;
     cam.start()?;
+
+    if cam.width() != args.stream_size[0] || cam.height() != args.stream_size[1] {
+        eprintln!(
+            "WARNING: User requested {} {} resolution but camera set {} {} resolution",
+            args.stream_size[0],
+            args.stream_size[1],
+            cam.width(),
+            cam.height()
+        );
+    }
+
+    let img = Image::new(cam.width(), cam.height(), RGBA)?;
+    let imgmgr = ImageManager::new()?;
+
     let mut prev = Instant::now();
     let mut history = vec![0; 30];
     let mut index = 0;
@@ -145,8 +152,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             session.put(&args.topic, encoded).res().await.unwrap();
         },
         StreamType::H264 => {
-            let mut vid =
-                VideoManager::new(FourCC(*b"H264"), args.stream_size[0], args.stream_size[1]);
+            let mut vid = VideoManager::new(FourCC(*b"H264"), cam.width(), cam.height());
             loop {
                 let fps = update_fps(&mut prev, &mut history, &mut index);
                 let mut now = Instant::now();
@@ -164,12 +170,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let encode_time = now.elapsed();
                 if args.verbose {
                     println!(
-                        "camera {}x{} video {}x{} size: {}KB video_frame: {}KB capture: {:?} encode: {:?} fps: {}",
+                        "camera {}x{} size: {}KB video_frame: {}KB capture: {:?} encode: {:?} fps: {}",
                         cam.width(),
                         cam.height(),
-                        args.stream_size[0],
-                        args.stream_size[1],
-                        args.stream_size[0] * args.stream_size[1] * 4 / 1024,
+                        cam.width() * cam.height() * 4 / 1024,
                         data.len() / 1024,
                         capture_time,
                         encode_time,
