@@ -9,9 +9,8 @@ use videostream::{
 };
 use zenoh::{config::Config, prelude::r#async::*};
 use zenoh_ros_type::{
-    rcl_interfaces::builtin_interfaces::Time as ROSTime,
-    sensor_msgs::{CompressedImage, FoxgloveCompressedVideo},
-    std_msgs,
+    foxglove_msgs::FoxgloveCompressedVideo, rcl_interfaces::builtin_interfaces::Time as ROSTime,
+    sensor_msgs::CompressedImage, std_msgs,
 };
 
 mod video;
