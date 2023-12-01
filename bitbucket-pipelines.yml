@@ -19,7 +19,7 @@ definitions:
           - rm /etc/apt/apt.conf.d/docker-clean
           - apt-get update
           - apt-get upgrade -y
-          - cargo binstall -y cargo-sonar@0.19.0
+          - cargo binstall -y cargo-sonar@0.19.0 cargo-audit@0.18.2
           - cargo build --target=aarch64-unknown-linux-gnu --config target.aarch64-unknown-linux-gnu.linker=\"aarch64-linux-gnu-gcc\" --release
           - cargo clippy --message-format=json > clippy.json || true
           - cargo audit --json > audit.json || true
