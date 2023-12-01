@@ -1,29 +1,11 @@
-use std::{
-    error::Error,
-    os::{fd::AsRawFd, raw::c_int},
-};
+use std::{error::Error, os::raw::c_int};
 use videostream::{
     camera::CameraBuffer,
     encoder::{Encoder, VSLRect},
     fourcc::FourCC,
     frame::Frame,
 };
-pub fn cam_to_vslframe(buf: &CameraBuffer) -> Result<Frame, Box<dyn Error>> {
-    let frame = match Frame::new(
-        buf.width().try_into().unwrap(),
-        buf.height().try_into().unwrap(),
-        0,
-        buf.format().to_string().as_str(),
-    ) {
-        Ok(f) => f,
-        Err(e) => return Err(e),
-    };
-    match frame.attach(buf.fd().as_raw_fd(), 0, 0) {
-        Ok(_) => (),
-        Err(e) => return Err(e),
-    }
-    return Ok(frame);
-}
+
 pub struct VideoManager {
     encoder: Encoder,
     crop: VSLRect,
@@ -36,11 +18,8 @@ impl VideoManager {
         Self { encoder, crop }
     }
 
-    pub fn encode_and_save(
-        &mut self,
-        source: &CameraBuffer,
-    ) -> Result<(Vec<u8>, bool), Box<dyn Error>> {
-        let frame = match cam_to_vslframe(source) {
+    pub fn encode(&self, source: &CameraBuffer) -> Result<(Vec<u8>, bool), Box<dyn Error>> {
+        let frame: Frame = match source.try_into() {
             Ok(f) => f,
             Err(e) => {
                 return Err(e);
@@ -62,7 +41,7 @@ impl VideoManager {
         let mut key_frame: c_int = 0;
         let _ret = self
             .encoder
-            .frame(&frame, &encoded_frame, &mut self.crop, &mut key_frame);
+            .frame(&frame, &encoded_frame, &self.crop, &mut key_frame);
         let is_key = if key_frame != 0 { true } else { false };
         return Ok(((&encoded_frame.mmap()).unwrap().to_vec(), is_key));
     }

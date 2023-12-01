@@ -34,7 +34,7 @@ serde_derive = "1.0.147"
 cdr = "0.2.4"
 dma-buf = "0.3.0"
 dma-heap = "0.2.1"
-videostream = "0.6.4"
+videostream = "0.6.5"
 
 [dev-dependencies]
 rand = "0.8.5"

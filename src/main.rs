@@ -4,7 +4,7 @@ use clap::Parser;
 use std::{error::Error, str::FromStr, time::Instant};
 use video::VideoManager;
 use videostream::{
-    camera::{create_camera, Mirror},
+    camera::{create_camera, CameraReader, Mirror},
     fourcc::FourCC,
 };
 use zenoh::{config::Config, prelude::r#async::*};
@@ -95,104 +95,120 @@ async fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
+    match args.codec {
+        StreamType::Jpeg => stream_jpeg(cam, session, args).await,
+        StreamType::H264 => stream_h264(cam, session, args).await,
+    }
+}
+
+async fn stream_jpeg(
+    cam: CameraReader,
+    session: Session,
+    args: Args,
+) -> Result<(), Box<dyn Error>> {
     let img = Image::new(cam.width(), cam.height(), RGBA)?;
     let imgmgr = ImageManager::new()?;
-
     let mut prev = Instant::now();
     let mut history = vec![0; 30];
     let mut index = 0;
-    match args.codec {
-        StreamType::Jpeg => loop {
-            let fps = update_fps(&mut prev, &mut history, &mut index);
-            let mut now = Instant::now();
-            let buf = cam.read()?;
-            let ts = buf.timestamp();
-            let capture_time = now.elapsed();
+    loop {
+        let fps = update_fps(&mut prev, &mut history, &mut index);
+        let mut now = Instant::now();
+        let buf = cam.read()?;
+        let ts = buf.timestamp();
+        let capture_time = now.elapsed();
 
-            now = Instant::now();
-            imgmgr.convert(&Image::from_camera(buf)?, &img, None)?;
-            let convert_time = now.elapsed();
+        now = Instant::now();
+        imgmgr.convert(&Image::from_camera(buf)?, &img, None)?;
+        let convert_time = now.elapsed();
 
-            now = Instant::now();
-            let dma = img.dmabuf();
-            let mem = dma.memory_map()?;
-            let jpeg = mem.read(encode_jpeg, Some(&img))?;
-            let encode_time = now.elapsed();
+        now = Instant::now();
+        let dma = img.dmabuf();
+        let mem = dma.memory_map()?;
+        let jpeg = mem.read(encode_jpeg, Some(&img))?;
+        let encode_time = now.elapsed();
 
-            if args.verbose {
-                println!(
-                    "camera {}x{} image {}x{} size: {}KB jpeg: {}KB capture: {:?} convert: {:?} encode: {:?} fps: {}",
-                    cam.width(),
-                    cam.height(),
-                    img.width(),
-                    img.height(),
-                    img.width() * img.height() * 4 / 1024,
-                    jpeg.len() / 1024,
-                    capture_time,
-                    convert_time,
-                    encode_time,
-                    fps
-                );
-            }
-
-            let msg = CompressedImage {
-                header: std_msgs::Header {
-                    stamp: ROSTime {
-                        sec: ts.seconds() as i32,
-                        nanosec: ts.subsec(9),
-                    },
-                    frame_id: "".to_string(),
-                },
-                format: "jpeg".to_string(),
-                data: jpeg.to_vec(),
-            };
-
-            let encoded = cdr::serialize::<_, _, CdrLe>(&msg, Infinite)?;
-            session.put(&args.topic, encoded).res().await.unwrap();
-        },
-        StreamType::H264 => {
-            let mut vid = VideoManager::new(FourCC(*b"H264"), cam.width(), cam.height());
-            loop {
-                let fps = update_fps(&mut prev, &mut history, &mut index);
-                let mut now = Instant::now();
-                let buf = cam.read()?;
-                let ts = buf.timestamp();
-                let capture_time = now.elapsed();
-                now = Instant::now();
-                let data = match vid.encode_and_save(&buf) {
-                    Ok(d) => d.0,
-                    Err(e) => {
-                        eprintln!("{e:?}");
-                        continue;
-                    }
-                };
-                let encode_time = now.elapsed();
-                if args.verbose {
-                    println!(
-                        "camera {}x{} size: {}KB video_frame: {}KB capture: {:?} encode: {:?} fps: {}",
-                        cam.width(),
-                        cam.height(),
-                        cam.width() * cam.height() * 4 / 1024,
-                        data.len() / 1024,
-                        capture_time,
-                        encode_time,
-                        fps
-                    );
-                }
-                let msg = FoxgloveCompressedVideo {
-                    header: std_msgs::Header {
-                        stamp: ROSTime {
-                            sec: ts.seconds() as i32,
-                            nanosec: ts.subsec(9),
-                        },
-                        frame_id: "".to_string(),
-                    },
-                    format: "h264".to_string(),
-                    data,
-                };
-                let encoded = cdr::serialize::<_, _, CdrLe>(&msg, Infinite)?;
-                session.put(&args.topic, encoded).res().await.unwrap();
-            }
+        if args.verbose {
+            println!(
+                "camera {}x{} image {}x{} size: {}KB jpeg: {}KB capture: {:?} convert: {:?} encode: {:?} fps: {}",
+                cam.width(),
+                cam.height(),
+                img.width(),
+                img.height(),
+                img.width() * img.height() * 4 / 1024,
+                jpeg.len() / 1024,
+                capture_time,
+                convert_time,
+                encode_time,
+                fps
+            );
         }
+
+        let msg = CompressedImage {
+            header: std_msgs::Header {
+                stamp: ROSTime {
+                    sec: ts.seconds() as i32,
+                    nanosec: ts.subsec(9),
+                },
+                frame_id: "".to_string(),
+            },
+            format: "jpeg".to_string(),
+            data: jpeg.to_vec(),
+        };
+
+        let encoded = cdr::serialize::<_, _, CdrLe>(&msg, Infinite)?;
+        session.put(&args.topic, encoded).res().await.unwrap();
+    }
+}
+
+async fn stream_h264(
+    cam: CameraReader,
+    session: Session,
+    args: Args,
+) -> Result<(), Box<dyn Error>> {
+    let vid = VideoManager::new(FourCC(*b"H264"), cam.width(), cam.height());
+    let mut prev = Instant::now();
+    let mut history = vec![0; 30];
+    let mut index = 0;
+    loop {
+        let fps = update_fps(&mut prev, &mut history, &mut index);
+        let mut now = Instant::now();
+        let buf = cam.read()?;
+        let ts = buf.timestamp();
+        let capture_time = now.elapsed();
+        now = Instant::now();
+        let data = match vid.encode(&buf) {
+            Ok(d) => d.0,
+            Err(e) => {
+                eprintln!("{e:?}");
+                continue;
+            }
+        };
+        let encode_time = now.elapsed();
+        if args.verbose {
+            println!(
+                "camera {}x{} size: {}KB video_frame: {}KB capture: {:?} encode: {:?} fps: {}",
+                cam.width(),
+                cam.height(),
+                cam.width() * cam.height() * 4 / 1024,
+                data.len() / 1024,
+                capture_time,
+                encode_time,
+                fps
+            );
+        }
+        let msg = FoxgloveCompressedVideo {
+            header: std_msgs::Header {
+                stamp: ROSTime {
+                    sec: ts.seconds() as i32,
+                    nanosec: ts.subsec(9),
+                },
+                frame_id: "".to_string(),
+            },
+            format: "h264".to_string(),
+            data,
+        };
+        let encoded = cdr::serialize::<_, _, CdrLe>(&msg, Infinite)?;
+        session.put(&args.topic, encoded).res().await.unwrap();
     }
 }

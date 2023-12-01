@@ -3078,9 +3078,9 @@ checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 
 [[package]]
 name = "videostream"
-version = "0.6.4"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "495781cc19730164ee9ffec17faee55f067ce7c25681a7b387fd5c99db3c29d9"
+checksum = "394185ed27998e0dda7dc349fb94ba41faca83489efb5b3b67c02bdd63248705"
 dependencies = [
  "dma-buf",
  "nix 0.27.1",
@@ -3090,9 +3090,9 @@ dependencies = [
 
 [[package]]
 name = "videostream-sys"
-version = "0.6.4"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb1c44bc14b1931c2445675faa604b7c47708aea48efa9f76ad8c423ae0e8de1"
+checksum = "c8e324d293fb26d3133807ef33eed480b6a917684b79566300dd046f31356d86"
 dependencies = [
  "libc",
 ]
