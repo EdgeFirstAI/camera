@@ -1,24 +1,35 @@
 use camera::image::{encode_jpeg, Image, ImageManager, RGBA};
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
-use std::{error::Error, str::FromStr, time::Instant};
+use std::{
+    error::Error,
+    fs::File,
+    os::fd::AsRawFd,
+    path::PathBuf,
+    process,
+    str::FromStr,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 use video::VideoManager;
 use videostream::{
-    camera::{create_camera, CameraReader, Mirror},
+    camera::{create_camera, CameraBuffer, CameraReader, Mirror},
     fourcc::FourCC,
 };
 use zenoh::{config::Config, prelude::r#async::*};
 use zenoh_ros_type::{
-    foxglove_msgs::FoxgloveCompressedVideo, rcl_interfaces::builtin_interfaces::Time as ROSTime,
-    sensor_msgs::CompressedImage, std_msgs,
+    deepview_msgs::DeepviewDMABuf,
+    foxglove_msgs::FoxgloveCompressedVideo,
+    rcl_interfaces::builtin_interfaces::Time as ROSTime,
+    sensor_msgs::{CameraInfo, CompressedImage, RegionOfInterest},
+    std_msgs,
 };
-
 mod video;
 
-#[derive(clap::ValueEnum, Clone, Debug)]
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
 enum StreamType {
     Jpeg,
     H264,
+    RawOnly,
 }
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -39,9 +50,17 @@ struct Args {
     #[arg(short, long)]
     endpoint: Vec<String>,
 
-    /// ros topic
+    /// image ros topic
     #[arg(short, long, default_value = "rt/camera/compressed")]
-    topic: String,
+    image_topic: String,
+
+    /// raw dma topic
+    #[arg(short, long, default_value = "rt/camera/raw")]
+    dma_topic: String,
+
+    /// camera_info topic
+    #[arg(short, long, default_value = "rt/camera/camera_info")]
+    info_topic: String,
 
     /// verbose logging
     #[arg(short, long)]
@@ -50,6 +69,13 @@ struct Args {
     /// stream type
     #[arg(long, default_value = "jpeg", value_enum)]
     codec: StreamType,
+
+    /// isp-imx data location
+    #[arg(
+        long,
+        default_value = "/usr/share/imx8-isp/dewarp_config/sensor_dwe_os08a20_1080P_config.json"
+    )]
+    cam_info_path: PathBuf,
 }
 
 fn update_fps(prev: &mut Instant, history: &mut Vec<i64>, index: &mut usize) -> i64 {
@@ -95,9 +121,91 @@ async fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    match args.codec {
-        StreamType::Jpeg => stream_jpeg(cam, session, args).await,
-        StreamType::H264 => stream_h264(cam, session, args).await,
+    // match args.codec {
+    //     StreamType::Jpeg => stream_jpeg(cam, session, args).await,
+    //     StreamType::H264 => stream_h264(cam, session, args).await,
+    //     StreamType::RawOnly => stream_dma(cam, session, args).await,
+    // }
+    stream(cam, session, args).await
+}
+
+async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), Box<dyn Error>> {
+    let mut img = None;
+    let mut imgmgr = None;
+    let mut vid = None;
+    let stream_type = args.codec.clone();
+    match stream_type {
+        StreamType::Jpeg => {
+            img = Some(Image::new(cam.width(), cam.height(), RGBA)?);
+            imgmgr = Some(ImageManager::new()?);
+        }
+        StreamType::H264 => {
+            vid = Some(VideoManager::new(
+                FourCC(*b"H264"),
+                cam.width(),
+                cam.height(),
+            ));
+        }
+        StreamType::RawOnly => {}
+    }
+    let src_pid = process::id();
+
+    let mut prev = Instant::now();
+    let mut history = vec![0; 30];
+    let mut index = 0;
+    loop {
+        let fps = update_fps(&mut prev, &mut history, &mut index);
+        let now = Instant::now();
+        let buf = cam.read()?;
+        let capture_time = now.elapsed();
+
+        if args.verbose {
+            println!("camera capture: {:?} fps: {}", capture_time, fps);
+        }
+
+        let dma_msg = build_dma_msg(&buf, src_pid, &args);
+        match dma_msg {
+            Ok(m) => {
+                let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
+                session.put(&args.dma_topic, encoded).res().await.unwrap();
+            }
+            Err(e) => eprintln!("{e:?}"),
+        }
+
+        let info_msg = build_info_msg(&cam, &args);
+        match info_msg {
+            Ok(m) => {
+                let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
+                session.put(&args.info_topic, encoded).res().await.unwrap();
+            }
+            Err(e) => eprintln!("{e:?}"),
+        }
+        match stream_type {
+            StreamType::Jpeg => {
+                let imgmgr = imgmgr.as_ref().unwrap();
+                let img = img.as_ref().unwrap();
+                let msg = build_jpeg_msg(&buf, &imgmgr, &img, &args);
+                match msg {
+                    Ok(m) => {
+                        let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
+                        session.put(&args.image_topic, encoded).res().await.unwrap();
+                    }
+                    Err(e) => eprintln!("{e:?}"),
+                }
+            }
+            StreamType::H264 => {
+                let vid = vid.as_ref().unwrap();
+                let msg = build_video_msg(&buf, &vid, &args);
+                match msg {
+                    Ok(m) => {
+                        let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
+                        session.put(&args.image_topic, encoded).res().await.unwrap();
+                    }
+                    Err(e) => eprintln!("{e:?}"),
+                }
+            }
+            StreamType::RawOnly => {}
+        }
     }
 }
 
@@ -113,51 +221,22 @@ async fn stream_jpeg(
     let mut index = 0;
     loop {
         let fps = update_fps(&mut prev, &mut history, &mut index);
-        let mut now = Instant::now();
+        let now = Instant::now();
         let buf = cam.read()?;
-        let ts = buf.timestamp();
         let capture_time = now.elapsed();
 
-        now = Instant::now();
-        imgmgr.convert(&Image::from_camera(buf)?, &img, None)?;
-        let convert_time = now.elapsed();
-
-        now = Instant::now();
-        let dma = img.dmabuf();
-        let mem = dma.memory_map()?;
-        let jpeg = mem.read(encode_jpeg, Some(&img))?;
-        let encode_time = now.elapsed();
-
         if args.verbose {
-            println!(
-                "camera {}x{} image {}x{} size: {}KB jpeg: {}KB capture: {:?} convert: {:?} encode: {:?} fps: {}",
-                cam.width(),
-                cam.height(),
-                img.width(),
-                img.height(),
-                img.width() * img.height() * 4 / 1024,
-                jpeg.len() / 1024,
-                capture_time,
-                convert_time,
-                encode_time,
-                fps
-            );
+            println!("camera capture: {:?} fps: {}", capture_time, fps);
         }
 
-        let msg = CompressedImage {
-            header: std_msgs::Header {
-                stamp: ROSTime {
-                    sec: ts.seconds() as i32,
-                    nanosec: ts.subsec(9),
-                },
-                frame_id: "".to_string(),
-            },
-            format: "jpeg".to_string(),
-            data: jpeg.to_vec(),
-        };
-
-        let encoded = cdr::serialize::<_, _, CdrLe>(&msg, Infinite)?;
-        session.put(&args.topic, encoded).res().await.unwrap();
+        let msg = build_jpeg_msg(&buf, &imgmgr, &img, &args);
+        match msg {
+            Ok(m) => {
+                let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
+                session.put(&args.image_topic, encoded).res().await.unwrap();
+            }
+            Err(e) => eprintln!("{e:?}"),
+        }
     }
 }
 
@@ -172,43 +251,234 @@ async fn stream_h264(
     let mut index = 0;
     loop {
         let fps = update_fps(&mut prev, &mut history, &mut index);
-        let mut now = Instant::now();
+        let now = Instant::now();
         let buf = cam.read()?;
-        let ts = buf.timestamp();
+
         let capture_time = now.elapsed();
-        now = Instant::now();
-        let data = match vid.encode(&buf) {
-            Ok(d) => d.0,
-            Err(e) => {
-                eprintln!("{e:?}");
-                continue;
-            }
-        };
-        let encode_time = now.elapsed();
+
         if args.verbose {
-            println!(
-                "camera {}x{} size: {}KB video_frame: {}KB capture: {:?} encode: {:?} fps: {}",
-                cam.width(),
-                cam.height(),
-                cam.width() * cam.height() * 4 / 1024,
-                data.len() / 1024,
-                capture_time,
-                encode_time,
-                fps
-            );
+            println!("camera capture: {:?} fps: {}", capture_time, fps);
         }
-        let msg = FoxgloveCompressedVideo {
-            header: std_msgs::Header {
-                stamp: ROSTime {
-                    sec: ts.seconds() as i32,
-                    nanosec: ts.subsec(9),
-                },
-                frame_id: "".to_string(),
-            },
-            format: "h264".to_string(),
-            data,
-        };
-        let encoded = cdr::serialize::<_, _, CdrLe>(&msg, Infinite)?;
-        session.put(&args.topic, encoded).res().await.unwrap();
+        let msg = build_video_msg(&buf, &vid, &args);
+        match msg {
+            Ok(m) => {
+                let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
+                session.put(&args.image_topic, encoded).res().await.unwrap();
+            }
+            Err(e) => eprintln!("{e:?}"),
+        }
     }
+}
+
+async fn stream_dma(cam: CameraReader, session: Session, args: Args) -> Result<(), Box<dyn Error>> {
+    let mut prev = Instant::now();
+    let mut history = vec![0; 30];
+    let mut index = 0;
+    let src_pid = process::id();
+    loop {
+        let fps = update_fps(&mut prev, &mut history, &mut index);
+        let now = Instant::now();
+        let buf = cam.read()?;
+        let capture_time = now.elapsed();
+
+        if args.verbose {
+            println!("camera capture: {:?} fps: {}", capture_time, fps);
+        }
+        let dma_msg = build_dma_msg(&buf, src_pid, &args);
+        match dma_msg {
+            Ok(m) => {
+                let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
+                session.put(&args.dma_topic, encoded).res().await.unwrap();
+            }
+            Err(e) => eprintln!("{e:?}"),
+        }
+    }
+}
+
+fn build_jpeg_msg(
+    buf: &CameraBuffer<'_>,
+    imgmgr: &ImageManager,
+    img: &Image,
+    args: &Args,
+) -> Result<CompressedImage, Box<dyn Error>> {
+    let now = Instant::now();
+    let ts = buf.timestamp();
+    imgmgr.convert(&Image::from_camera(buf)?, img, None)?;
+    let convert_time = now.elapsed();
+
+    let now = Instant::now();
+    let dma = img.dmabuf();
+    let mem = dma.memory_map()?;
+    let jpeg = mem.read(encode_jpeg, Some(img))?;
+    let encode_time = now.elapsed();
+
+    if args.verbose {
+        println!(
+            "camera {}x{} image {}x{} size: {}KB jpeg: {}KB convert: {:?} encode: {:?}",
+            buf.width(),
+            buf.height(),
+            img.width(),
+            img.height(),
+            img.width() * img.height() * 4 / 1024,
+            jpeg.len() / 1024,
+            convert_time,
+            encode_time,
+        );
+    }
+
+    let msg = CompressedImage {
+        header: std_msgs::Header {
+            stamp: ROSTime {
+                sec: ts.seconds() as i32,
+                nanosec: ts.subsec(9),
+            },
+            frame_id: "".to_string(),
+        },
+        format: "jpeg".to_string(),
+        data: jpeg.to_vec(),
+    };
+    return Ok(msg);
+}
+
+fn build_video_msg(
+    buf: &CameraBuffer<'_>,
+    vid: &VideoManager,
+    args: &Args,
+) -> Result<FoxgloveCompressedVideo, Box<dyn Error>> {
+    let now = Instant::now();
+    let ts = buf.timestamp();
+    let data = match vid.encode(&buf) {
+        Ok(d) => d.0,
+        Err(e) => {
+            return Err(e);
+        }
+    };
+    let encode_time = now.elapsed();
+    if args.verbose {
+        println!(
+            "video h.264 {}x{} size: {}KB video_frame: {}KB encode: {:?} ",
+            buf.width(),
+            buf.height(),
+            buf.width() * buf.height() * 4 / 1024,
+            data.len() / 1024,
+            encode_time,
+        );
+    }
+    let msg = FoxgloveCompressedVideo {
+        header: std_msgs::Header {
+            stamp: ROSTime {
+                sec: ts.seconds() as i32,
+                nanosec: ts.subsec(9),
+            },
+            frame_id: "".to_string(),
+        },
+        format: "h264".to_string(),
+        data,
+    };
+    return Ok(msg);
+}
+
+fn build_dma_msg(
+    buf: &CameraBuffer<'_>,
+    src_pid: u32,
+    args: &Args,
+) -> Result<DeepviewDMABuf, Box<dyn Error>> {
+    let _ = args;
+
+    let ts = buf.timestamp();
+    let width = buf.width() as u32;
+    let height = buf.height() as u32;
+    let fourcc = buf.format().into();
+    let dma_buf = buf.fd().as_raw_fd();
+    let msg = DeepviewDMABuf {
+        header: std_msgs::Header {
+            stamp: ROSTime {
+                sec: ts.seconds() as i32,
+                nanosec: ts.subsec(9),
+            },
+            frame_id: "".to_string(),
+        },
+        src_pid,
+        dma_fd: dma_buf,
+        width,
+        height,
+        stride: width,
+        fourcc,
+    };
+    return Ok(msg);
+}
+
+fn build_info_msg(cam: &CameraReader, args: &Args) -> Result<CameraInfo, Box<dyn Error>> {
+    let file = File::open(args.cam_info_path.clone()).expect("file should open read only");
+    let json: serde_json::Value =
+        serde_json::from_reader(file).expect("file should be proper JSON");
+    let dewarp_configs = &json["dewarpConfigArray"];
+    if !dewarp_configs.is_array() {
+        return Err(Box::from("Did not find dewarpConfigArray as an array"));
+    }
+    let dewarp_config = &dewarp_configs[0];
+    let distortion_coeff = dewarp_config["distortion_coeff"].as_array();
+    let d: Vec<f64>;
+    match distortion_coeff {
+        Some(v) => {
+            d = v.into_iter().map(|x| x.as_f64().unwrap_or(0.0)).collect();
+        }
+        None => {
+            return Err(Box::from("Did not find distortion_coeff as an array"));
+        }
+    };
+
+    let camera_matrix = dewarp_config["camera_matrix"].as_array();
+    let k: Vec<f64>;
+    match camera_matrix {
+        Some(v) => {
+            k = v.into_iter().map(|x| x.as_f64().unwrap_or(0.0)).collect();
+        }
+        None => {
+            return Err(Box::from("Did not find camera_matrix as an array"));
+        }
+    }
+    if k.len() != 9 {
+        return Err(Box::from(format!(
+            "Expected exactly 9 elements in distortion_coeff array but found {}",
+            d.len()
+        )));
+    }
+    let p = [
+        k[0], k[1], k[2], 0.0, k[3], k[4], k[5], 0.0, k[6], k[7], k[8], 0.0,
+    ];
+    // TODO: Is there an easier way to do this conversion?
+    let k = [k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7], k[8]];
+
+    let width = cam.width() as u32;
+    let height = cam.height() as u32;
+    let r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let now = SystemTime::now();
+    let since_the_epoch = now.duration_since(UNIX_EPOCH).expect("Time went backwards");
+    let msg = CameraInfo {
+        header: std_msgs::Header {
+            stamp: ROSTime {
+                sec: since_the_epoch.as_secs() as i32,
+                nanosec: since_the_epoch.subsec_nanos(),
+            },
+            frame_id: "".to_string(),
+        },
+        width,
+        height,
+        distortion_model: String::from("plumb_bob"),
+        d,
+        k,
+        r,
+        p,
+        binning_x: 1,
+        binning_y: 1,
+        roi: RegionOfInterest {
+            x_offset: 0,
+            y_offset: 0,
+            height,
+            width,
+            do_rectify: false,
+        },
+    };
+    return Ok(msg);
 }

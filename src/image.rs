@@ -158,7 +158,7 @@ impl Image {
         })
     }
 
-    pub fn from_camera(buffer: CameraBuffer) -> Result<Self, Box<dyn Error>> {
+    pub fn from_camera(buffer: &CameraBuffer) -> Result<Self, Box<dyn Error>> {
         let fd = buffer.fd();
 
         Ok(Self {
