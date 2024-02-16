@@ -4,7 +4,6 @@ use clap::Parser;
 use std::{
     error::Error,
     fs::File,
-    os::fd::AsRawFd,
     path::PathBuf,
     process,
     str::FromStr,
@@ -39,8 +38,16 @@ struct Args {
     camera: String,
 
     /// camera capture resolution
-    #[arg(long, default_value = "960 544", value_delimiter = ' ', num_args = 2)]
-    stream_size: Vec<i32>,
+    #[arg(long, default_value = "3840 2160", value_delimiter = ' ', num_args = 2)]
+    raw_size: Vec<i32>,
+
+    /// camera capture resolution
+    #[arg(long, default_value = "960 540", value_delimiter = ' ', num_args = 2)]
+    jpeg_size: Vec<i32>,
+
+    /// camera capture resolution
+    #[arg(long, default_value = "1920 1080", value_delimiter = ' ', num_args = 2)]
+    h264_size: Vec<i32>,
 
     /// zenoh connection mode
     #[arg(short, long, default_value = "peer")]
@@ -73,7 +80,7 @@ struct Args {
     /// isp-imx data location
     #[arg(
         long,
-        default_value = "/usr/share/imx8-isp/dewarp_config/sensor_dwe_os08a20_1080P_config.json"
+        default_value = "/usr/share/imx8-isp/dewarp_config/sensor_dwe_os08a20_4K_config.json"
     )]
     cam_info_path: PathBuf,
 }
@@ -105,17 +112,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let cam = create_camera()
         .with_device(&args.camera)
-        .with_resolution(args.stream_size[0], args.stream_size[1])
+        .with_resolution(args.raw_size[0], args.raw_size[1])
         .with_format(FourCC(*b"YUYV"))
         .with_mirror(Mirror::Both)
         .open()?;
     cam.start()?;
 
-    if cam.width() != args.stream_size[0] || cam.height() != args.stream_size[1] {
+    if cam.width() != args.raw_size[0] || cam.height() != args.raw_size[1] {
         eprintln!(
             "WARNING: User requested {} {} resolution but camera set {} {} resolution",
-            args.stream_size[0],
-            args.stream_size[1],
+            args.raw_size[0],
+            args.raw_size[1],
             cam.width(),
             cam.height()
         );
@@ -130,23 +137,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), Box<dyn Error>> {
-    let mut img = None;
-    let mut imgmgr = None;
-    let mut vid = None;
+    let imgmgr = ImageManager::new()?;
+
+    let mut img_jpeg = None;
+    let mut img_h264 = None;
+    let mut vidmgr = None;
     let stream_type = args.codec.clone();
     match stream_type {
-        StreamType::Jpeg => {
-            img = Some(Image::new(cam.width(), cam.height(), RGBA)?);
-            imgmgr = Some(ImageManager::new()?);
-        }
         StreamType::H264 => {
-            vid = Some(VideoManager::new(
+            img_h264 = Some(Image::new(args.h264_size[0], args.h264_size[1], RGBA)?);
+            vidmgr = Some(VideoManager::new(
                 FourCC(*b"H264"),
-                cam.width(),
-                cam.height(),
+                args.h264_size[0],
+                args.h264_size[1],
             ));
         }
         StreamType::RawOnly => {}
+        StreamType::Jpeg => {
+            img_jpeg = Some(Image::new(args.jpeg_size[0], args.jpeg_size[1], RGBA)?);
+        }
     }
     let src_pid = process::id();
 
@@ -182,8 +191,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         }
         match stream_type {
             StreamType::Jpeg => {
-                let imgmgr = imgmgr.as_ref().unwrap();
-                let img = img.as_ref().unwrap();
+                let img = img_jpeg.as_ref().unwrap();
                 let msg = build_jpeg_msg(&buf, &imgmgr, &img, &args);
                 match msg {
                     Ok(m) => {
@@ -194,8 +202,9 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                 }
             }
             StreamType::H264 => {
-                let vid = vid.as_ref().unwrap();
-                let msg = build_video_msg(&buf, &vid, &args);
+                let vid = vidmgr.as_ref().unwrap();
+                let img = img_h264.as_ref().unwrap();
+                let msg = build_video_msg(&buf, &vid, &imgmgr, &img, &args);
                 match msg {
                     Ok(m) => {
                         let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
@@ -205,92 +214,6 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                 }
             }
             StreamType::RawOnly => {}
-        }
-    }
-}
-
-async fn stream_jpeg(
-    cam: CameraReader,
-    session: Session,
-    args: Args,
-) -> Result<(), Box<dyn Error>> {
-    let img = Image::new(cam.width(), cam.height(), RGBA)?;
-    let imgmgr = ImageManager::new()?;
-    let mut prev = Instant::now();
-    let mut history = vec![0; 30];
-    let mut index = 0;
-    loop {
-        let fps = update_fps(&mut prev, &mut history, &mut index);
-        let now = Instant::now();
-        let buf = cam.read()?;
-        let capture_time = now.elapsed();
-
-        if args.verbose {
-            println!("camera capture: {:?} fps: {}", capture_time, fps);
-        }
-
-        let msg = build_jpeg_msg(&buf, &imgmgr, &img, &args);
-        match msg {
-            Ok(m) => {
-                let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
-                session.put(&args.image_topic, encoded).res().await.unwrap();
-            }
-            Err(e) => eprintln!("{e:?}"),
-        }
-    }
-}
-
-async fn stream_h264(
-    cam: CameraReader,
-    session: Session,
-    args: Args,
-) -> Result<(), Box<dyn Error>> {
-    let vid = VideoManager::new(FourCC(*b"H264"), cam.width(), cam.height());
-    let mut prev = Instant::now();
-    let mut history = vec![0; 30];
-    let mut index = 0;
-    loop {
-        let fps = update_fps(&mut prev, &mut history, &mut index);
-        let now = Instant::now();
-        let buf = cam.read()?;
-
-        let capture_time = now.elapsed();
-
-        if args.verbose {
-            println!("camera capture: {:?} fps: {}", capture_time, fps);
-        }
-        let msg = build_video_msg(&buf, &vid, &args);
-        match msg {
-            Ok(m) => {
-                let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
-                session.put(&args.image_topic, encoded).res().await.unwrap();
-            }
-            Err(e) => eprintln!("{e:?}"),
-        }
-    }
-}
-
-async fn stream_dma(cam: CameraReader, session: Session, args: Args) -> Result<(), Box<dyn Error>> {
-    let mut prev = Instant::now();
-    let mut history = vec![0; 30];
-    let mut index = 0;
-    let src_pid = process::id();
-    loop {
-        let fps = update_fps(&mut prev, &mut history, &mut index);
-        let now = Instant::now();
-        let buf = cam.read()?;
-        let capture_time = now.elapsed();
-
-        if args.verbose {
-            println!("camera capture: {:?} fps: {}", capture_time, fps);
-        }
-        let dma_msg = build_dma_msg(&buf, src_pid, &args);
-        match dma_msg {
-            Ok(m) => {
-                let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
-                session.put(&args.dma_topic, encoded).res().await.unwrap();
-            }
-            Err(e) => eprintln!("{e:?}"),
         }
     }
 }
@@ -343,11 +266,13 @@ fn build_jpeg_msg(
 fn build_video_msg(
     buf: &CameraBuffer<'_>,
     vid: &VideoManager,
+    imgmgr: &ImageManager,
+    img: &Image,
     args: &Args,
 ) -> Result<FoxgloveCompressedVideo, Box<dyn Error>> {
     let now = Instant::now();
     let ts = buf.timestamp();
-    let data = match vid.encode(&buf) {
+    let data = match vid.resize_and_encode(&buf, &imgmgr, &img) {
         Ok(d) => d.0,
         Err(e) => {
             return Err(e);
@@ -389,7 +314,9 @@ fn build_dma_msg(
     let width = buf.width() as u32;
     let height = buf.height() as u32;
     let fourcc = buf.format().into();
-    let dma_buf = buf.fd().as_raw_fd();
+    let dma_buf = buf.rawfd();
+    // let dma_buf = buf.original_fd;
+    let length = buf.length() as u32;
     let msg = DeepviewDMABuf {
         header: std_msgs::Header {
             stamp: ROSTime {
@@ -404,7 +331,14 @@ fn build_dma_msg(
         height,
         stride: width,
         fourcc,
+        length,
     };
+    if args.verbose {
+        println!(
+            "dmabuf dma_buf: {} src_pid: {} length: {}",
+            dma_buf, src_pid, length,
+        );
+    }
     return Ok(msg);
 }
 
