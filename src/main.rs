@@ -7,14 +7,20 @@ use std::{
     path::PathBuf,
     process,
     str::FromStr,
+    sync::mpsc::{self, RecvError},
+    thread,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
+use unix_ts::Timestamp;
 use video::VideoManager;
 use videostream::{
     camera::{create_camera, CameraBuffer, CameraReader, Mirror},
     fourcc::FourCC,
 };
-use zenoh::{config::Config, prelude::r#async::*};
+use zenoh::{
+    config::Config,
+    prelude::{r#async::*, sync::SyncResolve},
+};
 use zenoh_ros_type::{
     deepview_msgs::DeepviewDMABuf,
     foxglove_msgs::FoxgloveCompressedVideo,
@@ -25,12 +31,13 @@ use zenoh_ros_type::{
 mod video;
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
-enum StreamType {
-    Jpeg,
-    H264,
-    RawOnly,
+enum MirrorSetting {
+    None,
+    Horizontal,
+    Vertical,
+    Both,
 }
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// camera capture device
@@ -39,15 +46,19 @@ struct Args {
 
     /// camera capture resolution
     #[arg(long, default_value = "3840 2160", value_delimiter = ' ', num_args = 2)]
-    raw_size: Vec<i32>,
+    camera_size: Vec<i32>,
 
-    /// camera capture resolution
-    #[arg(long, default_value = "960 540", value_delimiter = ' ', num_args = 2)]
-    jpeg_size: Vec<i32>,
+    /// camera mirror
+    #[arg(long, default_value = "both", value_enum)]
+    mirror: MirrorSetting,
 
-    /// camera capture resolution
-    #[arg(long, default_value = "1920 1080", value_delimiter = ' ', num_args = 2)]
-    h264_size: Vec<i32>,
+    /// raw dma topic
+    #[arg(long, default_value = "rt/camera/raw")]
+    dma_topic: String,
+
+    /// camera_info topic
+    #[arg(long, default_value = "rt/camera/camera_info")]
+    info_topic: String,
 
     /// zenoh connection mode
     #[arg(short, long, default_value = "peer")]
@@ -57,25 +68,33 @@ struct Args {
     #[arg(short, long)]
     endpoint: Vec<String>,
 
-    /// image ros topic
-    #[arg(short, long, default_value = "rt/camera/compressed")]
-    image_topic: String,
+    /// stream JPEGs
+    #[arg(long)]
+    jpeg: bool,
 
-    /// raw dma topic
-    #[arg(short, long, default_value = "rt/camera/raw")]
-    dma_topic: String,
+    /// jpeg ros topic
+    #[arg(long, default_value = "rt/camera/image")]
+    jpeg_topic: String,
 
-    /// camera_info topic
-    #[arg(short, long, default_value = "rt/camera/camera_info")]
-    info_topic: String,
+    /// jpeg streaming resolution
+    #[arg(long, default_value = "960 540", value_delimiter = ' ', num_args = 2)]
+    jpeg_size: Vec<i32>,
+
+    /// stream H264
+    #[arg(long)]
+    h264: bool,
+
+    /// h264 foxglove topic
+    #[arg(long, default_value = "rt/camera/compressed")]
+    h264_topic: String,
+
+    /// h264 streaming resolution
+    #[arg(long, default_value = "1920 1080", value_delimiter = ' ', num_args = 2)]
+    h264_size: Vec<i32>,
 
     /// verbose logging
     #[arg(short, long)]
     verbose: bool,
-
-    /// stream type
-    #[arg(long, default_value = "jpeg", value_enum)]
-    codec: StreamType,
 
     /// isp-imx data location
     #[arg(
@@ -108,55 +127,96 @@ async fn main() -> Result<(), Box<dyn Error>> {
     config.set_mode(Some(mode)).unwrap();
     config.connect.endpoints = args.endpoint.iter().map(|v| v.parse().unwrap()).collect();
 
-    let session = zenoh::open(config).res().await.unwrap();
+    let session = zenoh::open(config).res_async().await.unwrap();
+
+    let mirror = match args.mirror {
+        MirrorSetting::None => Mirror::None,
+        MirrorSetting::Horizontal => Mirror::Horizontal,
+        MirrorSetting::Vertical => Mirror::Vertical,
+        MirrorSetting::Both => Mirror::Both,
+    };
 
     let cam = create_camera()
         .with_device(&args.camera)
-        .with_resolution(args.raw_size[0], args.raw_size[1])
+        .with_resolution(args.camera_size[0], args.camera_size[1])
         .with_format(FourCC(*b"YUYV"))
-        .with_mirror(Mirror::Both)
+        .with_mirror(mirror)
         .open()?;
     cam.start()?;
 
-    if cam.width() != args.raw_size[0] || cam.height() != args.raw_size[1] {
+    if cam.width() != args.camera_size[0] || cam.height() != args.camera_size[1] {
         eprintln!(
             "WARNING: User requested {} {} resolution but camera set {} {} resolution",
-            args.raw_size[0],
-            args.raw_size[1],
+            args.camera_size[0],
+            args.camera_size[1],
             cam.width(),
             cam.height()
         );
     }
 
-    // match args.codec {
-    //     StreamType::Jpeg => stream_jpeg(cam, session, args).await,
-    //     StreamType::H264 => stream_h264(cam, session, args).await,
-    //     StreamType::RawOnly => stream_dma(cam, session, args).await,
-    // }
     stream(cam, session, args).await
 }
 
 async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), Box<dyn Error>> {
     let imgmgr = ImageManager::new()?;
 
-    let mut img_jpeg = None;
     let mut img_h264 = None;
     let mut vidmgr = None;
-    let stream_type = args.codec.clone();
-    match stream_type {
-        StreamType::H264 => {
-            img_h264 = Some(Image::new(args.h264_size[0], args.h264_size[1], RGBA)?);
-            vidmgr = Some(VideoManager::new(
-                FourCC(*b"H264"),
-                args.h264_size[0],
-                args.h264_size[1],
-            ));
-        }
-        StreamType::RawOnly => {}
-        StreamType::Jpeg => {
-            img_jpeg = Some(Image::new(args.jpeg_size[0], args.jpeg_size[1], RGBA)?);
-        }
+    let (tx, rx) = mpsc::channel();
+    if args.h264 {
+        img_h264 = Some(Image::new(args.h264_size[0], args.h264_size[1], RGBA)?);
+        vidmgr = Some(VideoManager::new(
+            FourCC(*b"H264"),
+            args.h264_size[0],
+            args.h264_size[1],
+        ));
     }
+    if args.jpeg {
+        // JPEG encoding will live in a thread since it's possible to for it to be
+        // significantly slower than the camera's frame rate
+        let args = args.clone();
+
+        let jpeg_func = move || {
+            let imgmgr = ImageManager::new().unwrap();
+            let img_jpeg = Image::new(args.jpeg_size[0], args.jpeg_size[1], RGBA).unwrap();
+            let mut config = Config::default();
+
+            let mode = WhatAmI::from_str(&args.mode).unwrap();
+            config.set_mode(Some(mode)).unwrap();
+            config.connect.endpoints = args.endpoint.iter().map(|v| v.parse().unwrap()).collect();
+
+            let session = zenoh::open(config.clone()).res_sync().unwrap();
+            loop {
+                while rx.try_recv().is_ok() {}
+                let (msg, ts) = match rx.recv() {
+                    Ok(v) => v,
+                    Err(RecvError) => {
+                        // main thread exited
+                        return;
+                    }
+                };
+                let msg = build_jpeg_msg(&msg, &ts, &imgmgr, &img_jpeg, &args);
+                match msg {
+                    Ok(m) => {
+                        let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite).unwrap();
+                        session.put(&args.jpeg_topic, encoded).res_sync().unwrap();
+                    }
+                    Err(e) => eprintln!("{e:?}"),
+                }
+            }
+        };
+        thread::spawn(jpeg_func);
+    }
+    // TODO: Decide if the H264 encode/decode should also live in a thread
+    let info_msg = build_info_msg(&cam, &args);
+    let info_msg = match info_msg {
+        Ok(m) => Some(cdr::serialize::<_, _, CdrLe>(&m, Infinite)?),
+        Err(e) => {
+            eprintln!("{e:?}");
+            None
+        }
+    };
+
     let src_pid = process::id();
 
     let mut prev = Instant::now();
@@ -176,57 +236,67 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         match dma_msg {
             Ok(m) => {
                 let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
-                session.put(&args.dma_topic, encoded).res().await.unwrap();
+                session
+                    .put(&args.dma_topic, encoded)
+                    .res_async()
+                    .await
+                    .unwrap();
             }
             Err(e) => eprintln!("{e:?}"),
         }
 
-        let info_msg = build_info_msg(&cam, &args);
         match info_msg {
-            Ok(m) => {
-                let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
-                session.put(&args.info_topic, encoded).res().await.unwrap();
+            Some(ref msg) => {
+                session
+                    .put(&args.info_topic, msg.clone())
+                    .res_async()
+                    .await
+                    .unwrap();
             }
-            Err(e) => eprintln!("{e:?}"),
+            None => {}
         }
-        match stream_type {
-            StreamType::Jpeg => {
-                let img = img_jpeg.as_ref().unwrap();
-                let msg = build_jpeg_msg(&buf, &imgmgr, &img, &args);
-                match msg {
-                    Ok(m) => {
-                        let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
-                        session.put(&args.image_topic, encoded).res().await.unwrap();
-                    }
-                    Err(e) => eprintln!("{e:?}"),
+
+        if args.jpeg {
+            let ts = buf.timestamp();
+            let src_img = Image::from_camera(&buf)?;
+            match tx.send((src_img, ts)) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("Jpeg send error: {:?}", e);
                 }
             }
-            StreamType::H264 => {
-                let vid = vidmgr.as_ref().unwrap();
-                let img = img_h264.as_ref().unwrap();
-                let msg = build_video_msg(&buf, &vid, &imgmgr, &img, &args);
-                match msg {
-                    Ok(m) => {
-                        let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
-                        session.put(&args.image_topic, encoded).res().await.unwrap();
-                    }
-                    Err(e) => eprintln!("{e:?}"),
+        }
+
+        if args.h264 {
+            let vid = vidmgr.as_ref().unwrap();
+            let img = img_h264.as_ref().unwrap();
+            let ts = buf.timestamp();
+            let src_img = Image::from_camera(&buf)?;
+            let msg = build_video_msg(&src_img, &ts, &vid, &imgmgr, &img, &args);
+            match msg {
+                Ok(m) => {
+                    let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
+                    session
+                        .put(&args.h264_topic, encoded)
+                        .res_async()
+                        .await
+                        .unwrap();
                 }
+                Err(e) => eprintln!("{e:?}"),
             }
-            StreamType::RawOnly => {}
         }
     }
 }
 
 fn build_jpeg_msg(
-    buf: &CameraBuffer<'_>,
+    buf: &Image,
+    ts: &Timestamp,
     imgmgr: &ImageManager,
     img: &Image,
     args: &Args,
 ) -> Result<CompressedImage, Box<dyn Error>> {
     let now = Instant::now();
-    let ts = buf.timestamp();
-    imgmgr.convert(&Image::from_camera(buf)?, img, None)?;
+    imgmgr.convert(&buf, &img, None)?;
     let convert_time = now.elapsed();
 
     let now = Instant::now();
@@ -264,14 +334,14 @@ fn build_jpeg_msg(
 }
 
 fn build_video_msg(
-    buf: &CameraBuffer<'_>,
+    buf: &Image,
+    ts: &Timestamp,
     vid: &VideoManager,
     imgmgr: &ImageManager,
     img: &Image,
     args: &Args,
 ) -> Result<FoxgloveCompressedVideo, Box<dyn Error>> {
     let now = Instant::now();
-    let ts = buf.timestamp();
     let data = match vid.resize_and_encode(&buf, &imgmgr, &img) {
         Ok(d) => d.0,
         Err(e) => {

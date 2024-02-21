@@ -1,7 +1,6 @@
 use camera::image::{Image, ImageManager};
 use std::{error::Error, os::raw::c_int};
 use videostream::{
-    camera::CameraBuffer,
     encoder::{Encoder, VSLRect},
     fourcc::FourCC,
     frame::Frame,
@@ -21,11 +20,11 @@ impl VideoManager {
 
     pub fn resize_and_encode(
         &self,
-        source: &CameraBuffer,
+        source: &Image,
         imgmgr: &ImageManager,
         img: &Image,
     ) -> Result<(Vec<u8>, bool), Box<dyn Error>> {
-        imgmgr.convert(&Image::from_camera(source)?, img, None)?;
+        imgmgr.convert(source, img, None)?;
         let frame: Frame = match img.try_into() {
             Ok(f) => f,
             Err(e) => {
@@ -35,7 +34,7 @@ impl VideoManager {
         return self.encode_from_vsl(&frame);
     }
 
-    pub fn encode(&self, source: &CameraBuffer) -> Result<(Vec<u8>, bool), Box<dyn Error>> {
+    pub fn encode(&self, source: &Image) -> Result<(Vec<u8>, bool), Box<dyn Error>> {
         let frame: Frame = match source.try_into() {
             Ok(f) => f,
             Err(e) => {
