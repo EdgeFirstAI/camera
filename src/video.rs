@@ -34,16 +34,6 @@ impl VideoManager {
         return self.encode_from_vsl(&frame);
     }
 
-    pub fn encode(&self, source: &Image) -> Result<(Vec<u8>, bool), Box<dyn Error>> {
-        let frame: Frame = match source.try_into() {
-            Ok(f) => f,
-            Err(e) => {
-                return Err(e);
-            }
-        };
-        return self.encode_from_vsl(&frame);
-    }
-
     fn encode_from_vsl(&self, source: &Frame) -> Result<(Vec<u8>, bool), Box<dyn Error>> {
         let encoded_frame = match self.encoder.new_output_frame(
             self.crop.get_width(),
