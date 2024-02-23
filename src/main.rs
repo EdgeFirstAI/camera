@@ -118,7 +118,7 @@ fn update_fps(prev: &mut Instant, history: &mut Vec<i64>, index: &mut usize) -> 
 
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    println!("VideoStream ROS Publisher");
+    println!("Maivin Camera Publisher");
 
     let args = Args::parse();
     let mut config = Config::default();
