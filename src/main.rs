@@ -76,10 +76,6 @@ struct Args {
     #[arg(long, default_value = "rt/camera/image")]
     jpeg_topic: String,
 
-    /// jpeg streaming resolution
-    #[arg(long, default_value = "960 540", value_delimiter = ' ', num_args = 2)]
-    jpeg_size: Vec<i32>,
-
     /// stream H264
     #[arg(long)]
     h264: bool,
@@ -88,9 +84,15 @@ struct Args {
     #[arg(long, default_value = "rt/camera/compressed")]
     h264_topic: String,
 
-    /// h264 streaming resolution
-    #[arg(long, default_value = "1920 1080", value_delimiter = ' ', num_args = 2)]
-    h264_size: Vec<i32>,
+    /// streaming resolution
+    #[arg(
+        short,
+        long,
+        default_value = "1920 1080",
+        value_delimiter = ' ',
+        num_args = 2
+    )]
+    stream_size: Vec<i32>,
 
     /// verbose logging
     #[arg(short, long)]
@@ -164,11 +166,11 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     let mut vidmgr = None;
     let (tx, rx) = mpsc::channel();
     if args.h264 {
-        img_h264 = Some(Image::new(args.h264_size[0], args.h264_size[1], RGBA)?);
+        img_h264 = Some(Image::new(args.stream_size[0], args.stream_size[1], RGBA)?);
         vidmgr = Some(VideoManager::new(
             FourCC(*b"H264"),
-            args.h264_size[0],
-            args.h264_size[1],
+            args.stream_size[0],
+            args.stream_size[1],
         ));
     }
     if args.jpeg {
@@ -178,7 +180,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
 
         let jpeg_func = move || {
             let imgmgr = ImageManager::new().unwrap();
-            let img_jpeg = Image::new(args.jpeg_size[0], args.jpeg_size[1], RGBA).unwrap();
+            let img_jpeg = Image::new(args.stream_size[0], args.stream_size[1], RGBA).unwrap();
             let mut config = Config::default();
 
             let mode = WhatAmI::from_str(&args.mode).unwrap();
