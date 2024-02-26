@@ -60,6 +60,10 @@ struct Args {
     #[arg(long, default_value = "rt/camera/camera_info")]
     info_topic: String,
 
+    /// resolution info topic
+    #[arg(long, default_value = "rt/camera/stream_info")]
+    res_topic: String,
+
     /// zenoh connection mode
     #[arg(short, long, default_value = "peer")]
     mode: String,
@@ -160,8 +164,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), Box<dyn Error>> {
-    let imgmgr = ImageManager::new()?;
+    let res_topic: Vec<OwnedKeyExpr> = vec!["width", "width"]
+        .into_iter()
+        .map(|x| keyexpr::new(&args.res_topic).unwrap().join(x).unwrap())
+        .collect();
 
+    let imgmgr = ImageManager::new()?;
     let mut img_h264 = None;
     let mut vidmgr = None;
     let (tx, rx) = mpsc::channel();
@@ -177,6 +185,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         // JPEG encoding will live in a thread since it's possible to for it to be
         // significantly slower than the camera's frame rate
         let args = args.clone();
+        let res_topic = res_topic.clone();
 
         let jpeg_func = move || {
             let imgmgr = ImageManager::new().unwrap();
@@ -202,6 +211,13 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                     Ok(m) => {
                         let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite).unwrap();
                         session.put(&args.jpeg_topic, encoded).res_sync().unwrap();
+                        for i in 0..1 {
+                            session
+                                .put(&res_topic[i], args.stream_size[i])
+                                .encoding(Encoding::APP_INTEGER)
+                                .res_sync()
+                                .unwrap();
+                        }
                     }
                     Err(e) => eprintln!("{e:?}"),
                 }
@@ -224,6 +240,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     let mut prev = Instant::now();
     let mut history = vec![0; 30];
     let mut index = 0;
+
     loop {
         let fps = update_fps(&mut prev, &mut history, &mut index);
         let now = Instant::now();
@@ -286,6 +303,14 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                 }
                 Err(e) => eprintln!("{e:?}"),
             }
+        }
+        for i in 0..1 {
+            session
+                .put(&res_topic[i], args.stream_size[i])
+                .encoding(Encoding::APP_INTEGER)
+                .res_async()
+                .await
+                .unwrap();
         }
     }
 }
