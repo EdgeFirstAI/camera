@@ -164,7 +164,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), Box<dyn Error>> {
-    let res_topic: Vec<OwnedKeyExpr> = vec!["width", "width"]
+    let res_topic: Vec<OwnedKeyExpr> = vec!["width", "height"]
         .into_iter()
         .map(|x| keyexpr::new(&args.res_topic).unwrap().join(x).unwrap())
         .collect();
@@ -211,7 +211,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                     Ok(m) => {
                         let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite).unwrap();
                         session.put(&args.jpeg_topic, encoded).res_sync().unwrap();
-                        for i in 0..1 {
+                        for i in 0..2 {
                             session
                                 .put(&res_topic[i], args.stream_size[i])
                                 .encoding(Encoding::APP_INTEGER)
