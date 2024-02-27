@@ -134,7 +134,7 @@ fn test_capture() -> Result<(), Box<dyn Error>> {
     cam.start()?;
 
     let buf = cam.read()?;
-    let src = Image::from_camera(buf)?;
+    let src = Image::from_camera(&buf)?;
     let dst = Image::new(1920, 1080, image::RGBA)?;
 
     let mgr = ImageManager::new()?;

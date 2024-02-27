@@ -185,7 +185,6 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         // JPEG encoding will live in a thread since it's possible to for it to be
         // significantly slower than the camera's frame rate
         let args = args.clone();
-        let res_topic = res_topic.clone();
 
         let jpeg_func = move || {
             let imgmgr = ImageManager::new().unwrap();
@@ -211,13 +210,6 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                     Ok(m) => {
                         let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite).unwrap();
                         session.put(&args.jpeg_topic, encoded).res_sync().unwrap();
-                        for i in 0..2 {
-                            session
-                                .put(&res_topic[i], args.stream_size[i])
-                                .encoding(Encoding::APP_INTEGER)
-                                .res_sync()
-                                .unwrap();
-                        }
                     }
                     Err(e) => eprintln!("{e:?}"),
                 }
@@ -304,7 +296,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                 Err(e) => eprintln!("{e:?}"),
             }
         }
-        for i in 0..1 {
+        for i in 0..2 {
             session
                 .put(&res_topic[i], args.stream_size[i])
                 .encoding(Encoding::APP_INTEGER)
