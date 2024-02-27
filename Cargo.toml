@@ -24,17 +24,17 @@ harness = false
 
 [dependencies]
 g2d-sys = {version = "0.0.0", path = "g2d-sys"}
-zenoh-ros-type = { git = "https://github.com/MaivinAI/zenoh-ros-type", branch = "RVN-185"}
+zenoh-ros-type = { git = "https://github.com/MaivinAI/zenoh-ros-type" }
 turbojpeg = {version = "0.5", features = ["image"]}
 async-std = {version = "1.12.0", features = ["attributes"] }
-clap = { version = "4.4.18", features = ["derive"] }
+clap = { version = "=4.4.18", features = ["derive"] }
 zenoh = "0.10.0-rc"
 serde = "1.0.147"
 serde_derive = "1.0.147"
 cdr = "0.2.4"
 dma-buf = "0.3.0"
 dma-heap = "0.2.1"
-videostream = {git = "https://github.com/Charlie-AuZone/videostream-rs", branch = "RVN-189-original-dmabuf" }
+videostream = { version = "0.7.1" }
 serde_json = "1.0.113"
 unix-ts = "0.6.0"
 
