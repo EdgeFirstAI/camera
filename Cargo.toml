@@ -34,7 +34,7 @@ serde_derive = "1.0.147"
 cdr = "0.2.4"
 dma-buf = "0.3.0"
 dma-heap = "0.2.1"
-videostream = { version = "0.7.1" }
+videostream = { version = "=0.7.0" }
 serde_json = "1.0.113"
 unix-ts = "0.6.0"
 

@@ -459,7 +459,7 @@ dependencies = [
  "cdr",
  "clap 4.4.18",
  "criterion",
- "dma-buf 0.3.0",
+ "dma-buf",
  "dma-heap",
  "g2d-sys",
  "rand",
@@ -501,12 +501,6 @@ name = "cfg-if"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
-
-[[package]]
-name = "cfg_aliases"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd16c4719339c4530435d38e511904438d07cce7950afa3718a84ac36c10e89e"
 
 [[package]]
 name = "ciborium"
@@ -844,17 +838,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dma-buf"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26d22ffee04765190bdf0cf3f86f488dd5c0fce20f74906df8413c38c099090f"
-dependencies = [
- "log",
- "rustix 0.38.31",
- "thiserror",
-]
-
-[[package]]
 name = "dma-heap"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1136,7 +1119,7 @@ dependencies = [
 name = "g2d-sys"
 version = "0.0.0"
 dependencies = [
- "dma-buf 0.3.0",
+ "dma-buf",
  "libc",
  "libloading",
  "nix 0.27.1",
@@ -1622,18 +1605,6 @@ checksum = "2eb04e9c688eff1c89d72b407f168cf79bb9e867a9d3323ed6c01519eb9cc053"
 dependencies = [
  "bitflags 2.4.2",
  "cfg-if",
- "libc",
-]
-
-[[package]]
-name = "nix"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab2156c4fce2f8df6c499cc1c763e4394b7482525bf2a9701c9d79d215f519e4"
-dependencies = [
- "bitflags 2.4.2",
- "cfg-if",
- "cfg_aliases",
  "libc",
 ]
 
@@ -3121,12 +3092,12 @@ checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 
 [[package]]
 name = "videostream"
-version = "0.7.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc854c03e9ba78a8b69f8035885b4e04460e37c378f82e15affd4565c6ce3948"
+checksum = "c2363fe939b08f5b2742d3108da3961958df94e916fa9595261614e2c2198bf5"
 dependencies = [
- "dma-buf 0.4.0",
- "nix 0.28.0",
+ "dma-buf",
+ "nix 0.27.1",
  "unix-ts",
  "videostream-sys",
 ]
