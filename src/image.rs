@@ -13,7 +13,7 @@ use std::{
     ptr::null_mut,
 };
 use turbojpeg::{libc::dup, OwnedBuf};
-use videostream::{camera::CameraBuffer, fourcc::FourCC};
+use videostream::{camera::CameraBuffer, fourcc::FourCC, frame::Frame};
 
 pub const RGB3: FourCC = FourCC(*b"RGB3");
 pub const RGBX: FourCC = FourCC(*b"RGBX");
@@ -158,7 +158,7 @@ impl Image {
         })
     }
 
-    pub fn from_camera(buffer: CameraBuffer) -> Result<Self, Box<dyn Error>> {
+    pub fn from_camera(buffer: &CameraBuffer) -> Result<Self, Box<dyn Error>> {
         let fd = buffer.fd();
 
         Ok(Self {
@@ -191,6 +191,27 @@ impl Image {
 
     pub fn size(&self) -> usize {
         format_row_stride(self.format, self.width) * self.height as usize
+    }
+}
+
+impl TryFrom<&Image> for Frame {
+    type Error = Box<dyn Error>;
+
+    fn try_from(img: &Image) -> Result<Self, Self::Error> {
+        let frame = match Frame::new(
+            img.width().try_into().unwrap(),
+            img.height().try_into().unwrap(),
+            0,
+            img.format().to_string().as_str(),
+        ) {
+            Ok(f) => f,
+            Err(e) => return Err(e),
+        };
+        match frame.attach(img.fd().as_raw_fd(), 0, 0) {
+            Ok(_) => (),
+            Err(e) => return Err(e),
+        }
+        return Ok(frame);
     }
 }
 
