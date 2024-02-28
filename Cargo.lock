@@ -453,7 +453,7 @@ checksum = "981520c98f422fcc584dc1a95c334e6953900b9106bc47a9839b81790009eb21"
 
 [[package]]
 name = "camera"
-version = "2.0.2"
+version = "0.0.0"
 dependencies = [
  "async-std",
  "cdr",
