@@ -51,17 +51,17 @@ pipelines:
       - step: *build
       - step: *sonar
       - step:
-        name: Deploy to Production
-        deployment: Production
-        script:
-          - cp target/aarch64-unknown-linux-gnu/release/camera maivin-camera-$BITBUCKET_TAG
-          - pipe: atlassian/bitbucket-upload-file:0.7.1
-            variables:
-              FILENAME: "maivin-camera-$BITBUCKET_TAG"
-          - pipe: atlassian/aws-s3-deploy:1.6.0
-            variables:
-              AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
-              AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
-              AWS_DEFAULT_REGION: 'us-west-2'
-              S3_BUCKET: "maivin/services/camera/$BITBUCKET_TAG"
-              EXTRA_ARGS: "--exclude=* --include=maivin-camera-$BITBUCKET_TAG"
+          name: Deploy to Production
+          deployment: Production
+          script:
+            - cp target/aarch64-unknown-linux-gnu/release/camera maivin-camera-$BITBUCKET_TAG
+            - pipe: atlassian/bitbucket-upload-file:0.7.1
+              variables:
+                FILENAME: "maivin-camera-$BITBUCKET_TAG"
+            - pipe: atlassian/aws-s3-deploy:1.6.0
+              variables:
+                AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+                AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+                AWS_DEFAULT_REGION: 'us-west-2'
+                S3_BUCKET: "maivin/services/camera/$BITBUCKET_TAG"
+                EXTRA_ARGS: "--exclude=* --include=maivin-camera-$BITBUCKET_TAG"
