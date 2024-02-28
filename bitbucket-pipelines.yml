@@ -19,7 +19,7 @@ definitions:
           - |
             if [ -z "$BITBUCKET_TAG" ] ; then
               export BRANCH=$(echo ${BITBUCKET_BRANCH} | sed 's,/,-,g')
-              export VERSION=-${BRANCH}-${BITBUCKET_BUILD_NUMBER}
+              export VERSION=0.0.0-${BRANCH}-${BITBUCKET_BUILD_NUMBER}
             else
               export VERSION=${BITBUCKET_TAG}
             fi
