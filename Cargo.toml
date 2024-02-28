@@ -23,7 +23,7 @@ name = "convert"
 harness = false
 
 [dependencies]
-g2d-sys = {version = "0.0.0", path = "g2d-sys"}
+g2d-sys = {version = "1.0.0", path = "g2d-sys"}
 zenoh-ros-type = { git = "https://github.com/MaivinAI/zenoh-ros-type" }
 turbojpeg = {version = "0.5", features = ["image"]}
 async-std = {version = "1.12.0", features = ["attributes"] }

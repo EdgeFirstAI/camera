@@ -11,6 +11,8 @@ definitions:
   steps:
     - step: &build
         name: Build
+        runs-on:
+          - 'self.hosted'
         caches:
           - apt-archives
           - cargo
@@ -38,6 +40,8 @@ definitions:
           - sonar-issues.json
     - step: &sonar
         name: Code Sonar
+        runs-on:
+          - 'self.hosted'
         image: sonarsource/sonar-scanner-cli:latest
         script:
           - sonar-scanner
