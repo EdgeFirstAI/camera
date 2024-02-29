@@ -1,6 +1,6 @@
 [package]
 name = "camera"
-description = "Maivin Camera Service"
+description = "Maivin Camera Publisher"
 repository = "https://bitbucket.org/au-zone/maivin-camera"
 license = "CLOSED"
 version = "0.0.0"
