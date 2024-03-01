@@ -461,7 +461,9 @@ dependencies = [
  "criterion",
  "dma-buf",
  "dma-heap",
+ "env_logger 0.9.3",
  "g2d-sys",
+ "log",
  "rand",
  "serde",
  "serde_derive",
@@ -861,6 +863,19 @@ name = "either"
 version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11157ac094ffbdde99aa67b23417ebdd801842852b500e395a45a9c0aac03e4a"
+
+[[package]]
+name = "env_logger"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a12e6657c4c97ebab115a42dcee77225f7f482cdd841cf7088c657a42e9e00e7"
+dependencies = [
+ "atty",
+ "humantime",
+ "log",
+ "regex",
+ "termcolor",
+]
 
 [[package]]
 name = "env_logger"
@@ -3388,7 +3403,7 @@ dependencies = [
  "async-std",
  "async-trait",
  "base64",
- "env_logger",
+ "env_logger 0.10.2",
  "event-listener 2.5.3",
  "flume",
  "form_urlencoded",
