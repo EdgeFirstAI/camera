@@ -222,16 +222,12 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                 match msg {
                     Ok(m) => {
                         let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite).unwrap();
-                        session.put(&args.jpeg_topic, encoded).res_sync().unwrap();
                         session
-                            .put(
-                                keyexpr::new(&args.h264_topic)
-                                    .unwrap()
-                                    .join("schema")
-                                    .unwrap(),
-                                "sensor_msgs/msg/CompressedImage",
-                            )
-                            .encoding(Encoding::TEXT_PLAIN)
+                            .put(&args.jpeg_topic, encoded)
+                            .encoding(Encoding::WithSuffix(
+                                KnownEncoding::AppOctetStream,
+                                "sensor_msgs/msg/CompressedImage".into(),
+                            ))
                             .res_sync()
                             .unwrap();
                     }
@@ -311,18 +307,10 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                     let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
                     session
                         .put(&args.h264_topic, encoded)
-                        .res_async()
-                        .await
-                        .unwrap();
-                    session
-                        .put(
-                            keyexpr::new(&args.h264_topic)
-                                .unwrap()
-                                .join("schema")
-                                .unwrap(),
-                            "foxglove_msgs/msg/CompressedVideo",
-                        )
-                        .encoding(Encoding::TEXT_PLAIN)
+                        .encoding(Encoding::WithSuffix(
+                            KnownEncoding::AppOctetStream,
+                            "foxglove_msgs/msg/CompressedVideo".into(),
+                        ))
                         .res_async()
                         .await
                         .unwrap();
