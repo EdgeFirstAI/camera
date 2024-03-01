@@ -140,7 +140,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mode = WhatAmI::from_str(&args.mode).unwrap();
     config.set_mode(Some(mode)).unwrap();
     config.connect.endpoints = args.endpoint.iter().map(|v| v.parse().unwrap()).collect();
-
+    info!("Opened Zenoh session");
     let session = zenoh::open(config).res_async().await.unwrap();
 
     let mirror = match args.mirror {
@@ -150,11 +150,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         MirrorSetting::Both => Mirror::Both,
     };
 
-    info!(
-        "Opening camera: {} resolution: {:?} stream: {:?} mirror: {}",
-        args.camera, args.camera_size, args.stream_size, mirror
-    );
-
     let cam = create_camera()
         .with_device(&args.camera)
         .with_resolution(args.camera_size[0], args.camera_size[1])
@@ -162,16 +157,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_mirror(mirror)
         .open()?;
     cam.start()?;
-
     if cam.width() != args.camera_size[0] || cam.height() != args.camera_size[1] {
         warn!(
-            "User requested {} {} resolution but camera set {} {} resolution",
+            "User requested {}x{} resolution but camera set {}x{} resolution",
             args.camera_size[0],
             args.camera_size[1],
             cam.width(),
             cam.height()
         );
     }
+    info!(
+        "Opened camera: {} resolution: {}x{} stream: {}x{} mirror: {}",
+        args.camera,
+        args.camera_size[0],
+        args.camera_size[1],
+        args.stream_size[0],
+        args.stream_size[1],
+        mirror
+    );
 
     stream(cam, session, args).await
 }
