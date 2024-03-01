@@ -79,7 +79,7 @@ struct Args {
     endpoint: Vec<String>,
 
     /// stream JPEGs
-    #[arg(long)]
+    #[arg(long, env)]
     jpeg: bool,
 
     /// jpeg ros topic
@@ -87,7 +87,7 @@ struct Args {
     jpeg_topic: String,
 
     /// stream H264
-    #[arg(long)]
+    #[arg(long, env)]
     h264: bool,
 
     /// h264 foxglove topic
