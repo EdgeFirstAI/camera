@@ -41,15 +41,21 @@ enum MirrorSetting {
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// camera capture device
-    #[arg(short, long, default_value = "/dev/video3")]
+    #[arg(short, long, env, default_value = "/dev/video3")]
     camera: String,
 
     /// camera capture resolution
-    #[arg(long, default_value = "3840 2160", value_delimiter = ' ', num_args = 2)]
+    #[arg(
+        long,
+        env,
+        default_value = "3840 2160",
+        value_delimiter = ' ',
+        num_args = 2
+    )]
     camera_size: Vec<i32>,
 
     /// camera mirror
-    #[arg(long, default_value = "both", value_enum)]
+    #[arg(long, env, default_value = "both", value_enum)]
     mirror: MirrorSetting,
 
     /// raw dma topic
@@ -92,6 +98,7 @@ struct Args {
     #[arg(
         short,
         long,
+        env,
         default_value = "1920 1080",
         value_delimiter = ' ',
         num_args = 2
@@ -141,6 +148,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         MirrorSetting::Vertical => Mirror::Vertical,
         MirrorSetting::Both => Mirror::Both,
     };
+
+    if args.verbose {
+        println!(
+            "Opening camera: {} resolution: {:?} stream: {:?} mirror: {}",
+            args.camera, args.camera_size, args.stream_size, mirror
+        );
+    }
 
     let cam = create_camera()
         .with_device(&args.camera)
