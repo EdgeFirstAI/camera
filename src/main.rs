@@ -67,10 +67,6 @@ struct Args {
     #[arg(long, default_value = "rt/camera/info")]
     info_topic: String,
 
-    /// resolution info topic
-    #[arg(long, default_value = "rt/camera/stream_info")]
-    res_topic: String,
-
     /// zenoh connection mode
     #[arg(short, long, default_value = "client")]
     mode: String,
@@ -179,11 +175,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), Box<dyn Error>> {
-    let res_topic: Vec<OwnedKeyExpr> = vec!["width", "height"]
-        .into_iter()
-        .map(|x| keyexpr::new(&args.res_topic).unwrap().join(x).unwrap())
-        .collect();
-    info!("Publishing stream resolution on {res_topic:?}");
     let imgmgr = ImageManager::new()?;
     let mut img_h264 = None;
     let mut vidmgr = None;
@@ -283,9 +274,14 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             Some(ref msg) => {
                 session
                     .put(&args.info_topic, msg.clone())
+                    .encoding(Encoding::WithSuffix(
+                        KnownEncoding::AppOctetStream,
+                        "sensor_msgs/msg/CameraInfo".into(),
+                    ))
                     .res_async()
                     .await
                     .unwrap();
+                trace!("Send to info topic {:?}", args.info_topic);
             }
             None => {}
         }
@@ -327,15 +323,6 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                 Err(e) => error!("Error when building video message: {e:?}"),
             }
         }
-        for i in 0..2 {
-            session
-                .put(&res_topic[i], args.stream_size[i])
-                .encoding(Encoding::APP_INTEGER)
-                .res_async()
-                .await
-                .unwrap();
-        }
-        trace!("Send to resolution topic {:?}", res_topic);
     }
 }
 
