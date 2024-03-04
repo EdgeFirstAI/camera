@@ -1,6 +1,6 @@
 [package]
 name = "camera"
-description = "Maivin Camera Service"
+description = "Maivin Camera Publisher"
 repository = "https://bitbucket.org/au-zone/maivin-camera"
 license = "CLOSED"
 version = "0.0.0"
@@ -37,6 +37,8 @@ dma-heap = "0.2.1"
 videostream = { version = "=0.7.0" }
 serde_json = "1.0.113"
 unix-ts = "0.6.0"
+log = "0.4.21"
+env_logger = "0.11.2"
 
 [dev-dependencies]
 rand = "0.8.5"
