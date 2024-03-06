@@ -183,6 +183,8 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     let session = session.into_arc();
     let publ_dma = match session
         .declare_publisher(args.dma_topic.clone())
+        .priority(Priority::RealTime)
+        .congestion_control(CongestionControl::Drop)
         .res_async()
         .await
     {
@@ -198,6 +200,8 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
 
     let publ_info = match session
         .declare_publisher(args.info_topic.clone())
+        .priority(Priority::Background)
+        .congestion_control(CongestionControl::Drop)
         .res_async()
         .await
     {
@@ -220,6 +224,8 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     if args.h264 {
         publ_h264 = match session
             .declare_publisher(args.h264_topic.clone())
+            .priority(Priority::Data)
+            .congestion_control(CongestionControl::Block)
             .res_async()
             .await
         {
@@ -248,6 +254,8 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         let args = args.clone();
         let publ_jpeg = match session
             .declare_publisher(args.jpeg_topic.clone())
+            .priority(Priority::Data)
+            .congestion_control(CongestionControl::Block)
             .res_async()
             .await
         {
