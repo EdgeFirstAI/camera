@@ -21,6 +21,7 @@ use videostream::{
 use zenoh::{
     config::Config,
     prelude::{r#async::*, sync::SyncResolve},
+    publication::Publisher,
 };
 use zenoh_ros_type::{
     deepview_msgs::DeepviewDMABuf,
@@ -75,6 +76,10 @@ struct Args {
     #[arg(short, long, default_value = "tcp/127.0.0.1:7447")]
     endpoints: Vec<String>,
 
+    /// listen to zenoh endpoints
+    #[arg(long)]
+    listen: Vec<String>,
+
     /// stream JPEGs
     #[arg(long, env)]
     jpeg: bool,
@@ -114,7 +119,7 @@ struct Args {
     cam_info_path: PathBuf,
 }
 
-fn update_fps(prev: &mut Instant, history: &mut Vec<i64>, index: &mut usize) -> i64 {
+fn update_fps(prev: &mut Instant, history: &mut [i64], index: &mut usize) -> i64 {
     let now = Instant::now();
 
     let elapsed = now.duration_since(*prev);
@@ -168,40 +173,107 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mode = WhatAmI::from_str(&args.mode).unwrap();
     config.set_mode(Some(mode)).unwrap();
     config.connect.endpoints = args.endpoints.iter().map(|v| v.parse().unwrap()).collect();
+    config.listen.endpoints = args.listen.iter().map(|v| v.parse().unwrap()).collect();
     let _ = config.scouting.multicast.set_enabled(Some(false));
+    let _ = config.scouting.gossip.set_enabled(Some(true));
     let session = zenoh::open(config.clone()).res_async().await.unwrap();
     info!("Opened Zenoh session");
     stream(cam, session, args).await
 }
 
 async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), Box<dyn Error>> {
+    let session = session.into_arc();
+    let publ_dma = match session
+        .declare_publisher(args.dma_topic.clone())
+        .priority(Priority::RealTime)
+        .congestion_control(CongestionControl::Drop)
+        .res_async()
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+                "Error while declaring DMA publisher {}: {:?}",
+                args.dma_topic, e
+            );
+            return Err(e);
+        }
+    };
+
+    let publ_info = match session
+        .declare_publisher(args.info_topic.clone())
+        .priority(Priority::Background)
+        .congestion_control(CongestionControl::Drop)
+        .res_async()
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+                "Error while declaring camera info publisher {}: {:?}",
+                args.info_topic, e
+            );
+            return Err(e);
+        }
+    };
+
+    let publ_h264: Option<Publisher<'_>>;
+
     let imgmgr = ImageManager::new()?;
     let mut img_h264 = None;
     let mut vidmgr = None;
-    let (tx, rx) = mpsc::channel();
+
     if args.h264 {
+        publ_h264 = match session
+            .declare_publisher(args.h264_topic.clone())
+            .priority(Priority::Data)
+            .congestion_control(CongestionControl::Block)
+            .res_async()
+            .await
+        {
+            Ok(v) => Some(v),
+            Err(e) => {
+                error!(
+                    "Error while declaring H264 publisher {}: {:?}",
+                    args.h264_topic, e
+                );
+                return Err(e);
+            }
+        };
         img_h264 = Some(Image::new(args.stream_size[0], args.stream_size[1], RGBA)?);
         vidmgr = Some(VideoManager::new(
             FourCC(*b"H264"),
             args.stream_size[0],
             args.stream_size[1],
         ));
+    } else {
+        publ_h264 = None;
     }
+    let (tx, rx) = mpsc::channel();
     if args.jpeg {
         // JPEG encoding will live in a thread since it's possible to for it to be
         // significantly slower than the camera's frame rate
         let args = args.clone();
-
+        let publ_jpeg = match session
+            .declare_publisher(args.jpeg_topic.clone())
+            .priority(Priority::Data)
+            .congestion_control(CongestionControl::Block)
+            .res_async()
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                    "Error while declaring JPEG publisher {}: {:?}",
+                    args.jpeg_topic, e
+                );
+                return Err(e);
+            }
+        };
         let jpeg_func = move || {
             let imgmgr = ImageManager::new().unwrap();
             let img_jpeg = Image::new(args.stream_size[0], args.stream_size[1], RGBA).unwrap();
-            let mut config = Config::default();
 
-            let mode = WhatAmI::from_str(&args.mode).unwrap();
-            config.set_mode(Some(mode)).unwrap();
-            config.connect.endpoints = args.endpoints.iter().map(|v| v.parse().unwrap()).collect();
-            let _ = config.scouting.multicast.set_enabled(Some(false));
-            let session = zenoh::open(config.clone()).res_sync().unwrap();
             loop {
                 while rx.try_recv().is_ok() {}
                 let (msg, ts) = match rx.recv() {
@@ -214,16 +286,14 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                 let msg = build_jpeg_msg(&msg, &ts, &imgmgr, &img_jpeg, &args);
                 match msg {
                     Ok(m) => {
-                        let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite).unwrap();
-                        session
-                            .put(&args.jpeg_topic, encoded)
-                            .encoding(Encoding::WithSuffix(
-                                KnownEncoding::AppOctetStream,
-                                "sensor_msgs/msg/CompressedImage".into(),
-                            ))
-                            .res_sync()
-                            .unwrap();
-                        trace!("Pushed JPEG message to {:?}", args.jpeg_topic);
+                        let encoded =
+                            Value::from(cdr::serialize::<_, _, CdrLe>(&m, Infinite).unwrap())
+                                .encoding(Encoding::WithSuffix(
+                                    KnownEncoding::AppOctetStream,
+                                    "sensor_msgs/msg/CompressedImage".into(),
+                                ));
+                        publ_jpeg.put(encoded).res_sync().unwrap();
+                        trace!("Pushed JPEG message to {:?}", publ_jpeg.key_expr());
                     }
                     Err(e) => error!("Error when building JPEG message {e:?}"),
                 }
@@ -234,7 +304,14 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     // TODO: Decide if the H264 encode/decode should also live in a thread
     let info_msg = build_info_msg(&cam, &args);
     let info_msg = match info_msg {
-        Ok(m) => Some(cdr::serialize::<_, _, CdrLe>(&m, Infinite)?),
+        Ok(m) => Some(
+            Value::from(cdr::serialize::<_, _, CdrLe>(&m, Infinite)?).encoding(
+                Encoding::WithSuffix(
+                    KnownEncoding::AppOctetStream,
+                    "sensor_msgs/msg/CameraInfo".into(),
+                ),
+            ),
+        ),
         Err(e) => {
             error!("Error when building camera info message: {e:?}");
             None
@@ -260,30 +337,15 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             Ok(m) => {
                 let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
                 trace!("Encoded DMA message to CDR");
-                session
-                    .put(&args.dma_topic, encoded)
-                    .res_async()
-                    .await
-                    .unwrap();
+                publ_dma.put(encoded).res_async().await.unwrap();
                 trace!("Send to DMA topic {:?}", args.dma_topic);
             }
             Err(e) => error!("Error when building DMA message: {e:?}"),
         }
 
-        match info_msg {
-            Some(ref msg) => {
-                session
-                    .put(&args.info_topic, msg.clone())
-                    .encoding(Encoding::WithSuffix(
-                        KnownEncoding::AppOctetStream,
-                        "sensor_msgs/msg/CameraInfo".into(),
-                    ))
-                    .res_async()
-                    .await
-                    .unwrap();
-                trace!("Send to info topic {:?}", args.info_topic);
-            }
-            None => {}
+        if let Some(ref msg) = info_msg {
+            publ_info.put(msg.clone()).res_async().await.unwrap();
+            trace!("Send to info topic {:?}", args.info_topic);
         }
 
         if args.jpeg {
@@ -303,21 +365,19 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             let img = img_h264.as_ref().unwrap();
             let ts = buf.timestamp();
             let src_img = Image::from_camera(&buf)?;
-            let msg = build_video_msg(&src_img, &ts, &vid, &imgmgr, &img, &args);
+            let msg = build_video_msg(&src_img, &ts, vid, &imgmgr, img, &args);
             trace!("Converted to h264");
             match msg {
                 Ok(m) => {
-                    let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
-                    trace!("Encoded H264 message to CDR");
-                    session
-                        .put(&args.h264_topic, encoded)
+                    let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&m, Infinite)?)
                         .encoding(Encoding::WithSuffix(
                             KnownEncoding::AppOctetStream,
                             "foxglove_msgs/msg/CompressedVideo".into(),
-                        ))
-                        .res_async()
-                        .await
-                        .unwrap();
+                        ));
+                    trace!("Encoded H264 message to CDR");
+                    if let Some(publ) = publ_h264.as_ref() {
+                        publ.put(encoded).res_async().await.unwrap();
+                    }
                     trace!("Send to H264 topic {:?}", args.h264_topic);
                 }
                 Err(e) => error!("Error when building video message: {e:?}"),
@@ -334,7 +394,7 @@ fn build_jpeg_msg(
     _: &Args,
 ) -> Result<CompressedImage, Box<dyn Error>> {
     let now = Instant::now();
-    imgmgr.convert(&buf, &img, None)?;
+    imgmgr.convert(buf, img, None)?;
     let convert_time = now.elapsed();
 
     let now = Instant::now();
@@ -366,7 +426,7 @@ fn build_jpeg_msg(
         format: "jpeg".to_string(),
         data: jpeg.to_vec(),
     };
-    return Ok(msg);
+    Ok(msg)
 }
 
 fn build_video_msg(
@@ -378,7 +438,7 @@ fn build_video_msg(
     _: &Args,
 ) -> Result<FoxgloveCompressedVideo, Box<dyn Error>> {
     let now = Instant::now();
-    let data = match vid.resize_and_encode(&buf, &imgmgr, &img) {
+    let data = match vid.resize_and_encode(buf, imgmgr, img) {
         Ok(d) => d.0,
         Err(e) => {
             return Err(e);
@@ -405,7 +465,7 @@ fn build_video_msg(
         format: "h264".to_string(),
         data,
     };
-    return Ok(msg);
+    Ok(msg)
 }
 
 fn build_dma_msg(
@@ -444,7 +504,7 @@ fn build_dma_msg(
         src_pid,
         length,
     );
-    return Ok(msg);
+    Ok(msg)
 }
 
 fn build_info_msg(cam: &CameraReader, args: &Args) -> Result<CameraInfo, Box<dyn Error>> {
@@ -465,26 +525,16 @@ fn build_info_msg(cam: &CameraReader, args: &Args) -> Result<CameraInfo, Box<dyn
     }
     let dewarp_config = &dewarp_configs[0];
     let distortion_coeff = dewarp_config["distortion_coeff"].as_array();
-    let d: Vec<f64>;
-    match distortion_coeff {
-        Some(v) => {
-            d = v.into_iter().map(|x| x.as_f64().unwrap_or(0.0)).collect();
-        }
-        None => {
-            return Err(Box::from("Did not find distortion_coeff as an array"));
-        }
+    let d: Vec<f64> = match distortion_coeff {
+        Some(v) => v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect(),
+        None => return Err(Box::from("Did not find distortion_coeff as an array")),
     };
 
     let camera_matrix = dewarp_config["camera_matrix"].as_array();
-    let k: Vec<f64>;
-    match camera_matrix {
-        Some(v) => {
-            k = v.into_iter().map(|x| x.as_f64().unwrap_or(0.0)).collect();
-        }
-        None => {
-            return Err(Box::from("Did not find camera_matrix as an array"));
-        }
-    }
+    let k: Vec<f64> = match camera_matrix {
+        Some(v) => v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect(),
+        None => return Err(Box::from("Did not find camera_matrix as an array")),
+    };
     if k.len() != 9 {
         return Err(Box::from(format!(
             "Expected exactly 9 elements in distortion_coeff array but found {}",
@@ -527,5 +577,5 @@ fn build_info_msg(cam: &CameraReader, args: &Args) -> Result<CameraInfo, Box<dyn
             do_rectify: false,
         },
     };
-    return Ok(msg);
+    Ok(msg)
 }
