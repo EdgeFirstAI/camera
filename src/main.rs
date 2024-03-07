@@ -173,6 +173,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mode = WhatAmI::from_str(&args.mode).unwrap();
     config.set_mode(Some(mode)).unwrap();
     config.connect.endpoints = args.endpoints.iter().map(|v| v.parse().unwrap()).collect();
+    config.listen.endpoints = args.listen.iter().map(|v| v.parse().unwrap()).collect();
     let _ = config.scouting.multicast.set_enabled(Some(false));
     let _ = config.scouting.gossip.set_enabled(Some(true));
     let session = zenoh::open(config.clone()).res_async().await.unwrap();
