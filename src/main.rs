@@ -368,7 +368,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             let img = img_h264.as_ref().unwrap();
             let ts = buf.timestamp();
             let src_img = Image::from_camera(&buf)?;
-            let msg = build_video_msg(&src_img, &ts, &vid, &imgmgr, &img, &args);
+            let msg = build_video_msg(&src_img, &ts, vid, &imgmgr, img, &args);
             trace!("Converted to h264");
             match msg {
                 Ok(m) => {
@@ -398,7 +398,7 @@ fn build_jpeg_msg(
     _: &Args,
 ) -> Result<CompressedImage, Box<dyn Error>> {
     let now = Instant::now();
-    imgmgr.convert(&buf, &img, None)?;
+    imgmgr.convert(buf, img, None)?;
     let convert_time = now.elapsed();
 
     let now = Instant::now();
@@ -430,7 +430,7 @@ fn build_jpeg_msg(
         format: "jpeg".to_string(),
         data: jpeg.to_vec(),
     };
-    return Ok(msg);
+    Ok(msg)
 }
 
 fn build_video_msg(
@@ -442,7 +442,7 @@ fn build_video_msg(
     _: &Args,
 ) -> Result<FoxgloveCompressedVideo, Box<dyn Error>> {
     let now = Instant::now();
-    let data = match vid.resize_and_encode(&buf, &imgmgr, &img) {
+    let data = match vid.resize_and_encode(buf, imgmgr, img) {
         Ok(d) => d.0,
         Err(e) => {
             return Err(e);
@@ -469,7 +469,7 @@ fn build_video_msg(
         format: "h264".to_string(),
         data,
     };
-    return Ok(msg);
+    Ok(msg)
 }
 
 fn build_dma_msg(
@@ -508,7 +508,7 @@ fn build_dma_msg(
         src_pid,
         length,
     );
-    return Ok(msg);
+    Ok(msg)
 }
 
 fn build_info_msg(cam: &CameraReader, args: &Args) -> Result<CameraInfo, Box<dyn Error>> {
@@ -532,7 +532,7 @@ fn build_info_msg(cam: &CameraReader, args: &Args) -> Result<CameraInfo, Box<dyn
     let d: Vec<f64>;
     match distortion_coeff {
         Some(v) => {
-            d = v.into_iter().map(|x| x.as_f64().unwrap_or(0.0)).collect();
+            d = v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect();
         }
         None => {
             return Err(Box::from("Did not find distortion_coeff as an array"));
@@ -543,7 +543,7 @@ fn build_info_msg(cam: &CameraReader, args: &Args) -> Result<CameraInfo, Box<dyn
     let k: Vec<f64>;
     match camera_matrix {
         Some(v) => {
-            k = v.into_iter().map(|x| x.as_f64().unwrap_or(0.0)).collect();
+            k = v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect();
         }
         None => {
             return Err(Box::from("Did not find camera_matrix as an array"));
@@ -591,5 +591,5 @@ fn build_info_msg(cam: &CameraReader, args: &Args) -> Result<CameraInfo, Box<dyn
             do_rectify: false,
         },
     };
-    return Ok(msg);
+    Ok(msg)
 }

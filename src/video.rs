@@ -31,7 +31,7 @@ impl VideoManager {
                 return Err(e);
             }
         };
-        return self.encode_from_vsl(&frame);
+        self.encode_from_vsl(&frame)
     }
 
     fn encode_from_vsl(&self, source: &Frame) -> Result<(Vec<u8>, bool), Box<dyn Error>> {
@@ -51,8 +51,8 @@ impl VideoManager {
         let mut key_frame: c_int = 0;
         let _ret = self
             .encoder
-            .frame(&source, &encoded_frame, &self.crop, &mut key_frame);
-        let is_key = if key_frame != 0 { true } else { false };
-        return Ok(((&encoded_frame.mmap()).unwrap().to_vec(), is_key));
+            .frame(source, &encoded_frame, &self.crop, &mut key_frame);
+        let is_key = key_frame != 0;
+        return Ok((encoded_frame.mmap().unwrap().to_vec(), is_key));
     }
 }

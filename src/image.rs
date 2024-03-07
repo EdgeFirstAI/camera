@@ -211,7 +211,7 @@ impl TryFrom<&Image> for Frame {
             Ok(_) => (),
             Err(e) => return Err(e),
         }
-        return Ok(frame);
+        Ok(frame)
     }
 }
 
