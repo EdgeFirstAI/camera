@@ -119,7 +119,7 @@ struct Args {
     cam_info_path: PathBuf,
 }
 
-fn update_fps(prev: &mut Instant, history: &mut Vec<i64>, index: &mut usize) -> i64 {
+fn update_fps(prev: &mut Instant, history: &mut [i64], index: &mut usize) -> i64 {
     let now = Instant::now();
 
     let elapsed = now.duration_since(*prev);
@@ -343,12 +343,9 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             Err(e) => error!("Error when building DMA message: {e:?}"),
         }
 
-        match info_msg {
-            Some(ref msg) => {
-                publ_info.put(msg.clone()).res_async().await.unwrap();
-                trace!("Send to info topic {:?}", args.info_topic);
-            }
-            None => {}
+        if let Some(ref msg) = info_msg {
+            publ_info.put(msg.clone()).res_async().await.unwrap();
+            trace!("Send to info topic {:?}", args.info_topic);
         }
 
         if args.jpeg {
@@ -378,9 +375,8 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                             "foxglove_msgs/msg/CompressedVideo".into(),
                         ));
                     trace!("Encoded H264 message to CDR");
-                    match publ_h264.as_ref() {
-                        Some(publ) => publ.put(encoded).res_async().await.unwrap(),
-                        None => (), /* This cannot occur */
+                    if let Some(publ) = publ_h264.as_ref() {
+                        publ.put(encoded).res_async().await.unwrap();
                     }
                     trace!("Send to H264 topic {:?}", args.h264_topic);
                 }
@@ -529,26 +525,16 @@ fn build_info_msg(cam: &CameraReader, args: &Args) -> Result<CameraInfo, Box<dyn
     }
     let dewarp_config = &dewarp_configs[0];
     let distortion_coeff = dewarp_config["distortion_coeff"].as_array();
-    let d: Vec<f64>;
-    match distortion_coeff {
-        Some(v) => {
-            d = v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect();
-        }
-        None => {
-            return Err(Box::from("Did not find distortion_coeff as an array"));
-        }
+    let d: Vec<f64> = match distortion_coeff {
+        Some(v) => v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect(),
+        None => return Err(Box::from("Did not find distortion_coeff as an array")),
     };
 
     let camera_matrix = dewarp_config["camera_matrix"].as_array();
-    let k: Vec<f64>;
-    match camera_matrix {
-        Some(v) => {
-            k = v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect();
-        }
-        None => {
-            return Err(Box::from("Did not find camera_matrix as an array"));
-        }
-    }
+    let k: Vec<f64> = match camera_matrix {
+        Some(v) => v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect(),
+        None => return Err(Box::from("Did not find camera_matrix as an array")),
+    };
     if k.len() != 9 {
         return Err(Box::from(format!(
             "Expected exactly 9 elements in distortion_coeff array but found {}",
