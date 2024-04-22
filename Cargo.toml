@@ -24,7 +24,7 @@ harness = false
 
 [dependencies]
 g2d-sys = {version = "1.0.0", path = "g2d-sys"}
-zenoh-ros-type = { git = "https://github.com/MaivinAI/zenoh-ros-type" }
+edgefirst-schemas = { version = "1.1" }
 turbojpeg = {version = "1.0.0", features = ["image", "require-simd"]}
 async-std = {version = "1.12.0", features = ["attributes"] }
 clap = { version = "4.5.1", features = ["derive", "env"] }

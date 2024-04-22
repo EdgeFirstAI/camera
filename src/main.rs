@@ -1,6 +1,13 @@
 use camera::image::{encode_jpeg, Image, ImageManager, RGBA};
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
+use edgefirst_schemas::{
+    builtin_interfaces::Time as ROSTime,
+    edgefirst_msgs::DmaBuf,
+    foxglove_msgs::FoxgloveCompressedVideo,
+    sensor_msgs::{CameraInfo, CompressedImage, RegionOfInterest},
+    std_msgs,
+};
 use log::{error, info, trace, warn};
 use std::{
     error::Error,
@@ -22,13 +29,6 @@ use zenoh::{
     config::Config,
     prelude::{r#async::*, sync::SyncResolve},
     publication::Publisher,
-};
-use zenoh_ros_type::{
-    deepview_msgs::DeepviewDMABuf,
-    foxglove_msgs::FoxgloveCompressedVideo,
-    rcl_interfaces::builtin_interfaces::Time as ROSTime,
-    sensor_msgs::{CameraInfo, CompressedImage, RegionOfInterest},
-    std_msgs,
 };
 mod video;
 
@@ -292,8 +292,21 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                                     KnownEncoding::AppOctetStream,
                                     "sensor_msgs/msg/CompressedImage".into(),
                                 ));
+                        trace!("Encoded JPEG message to CDR");
+                        let now = Instant::now();
                         publ_jpeg.put(encoded).res_sync().unwrap();
-                        trace!("Pushed JPEG message to {:?}", publ_jpeg.key_expr());
+                        let elapsed = now.elapsed().as_secs_f64() * 1000.0;
+                        if elapsed > 33.3 {
+                            warn!(
+                                "Send to JPEG topic {:?} ({elapsed:.2} ms)",
+                                publ_jpeg.key_expr()
+                            );
+                        } else {
+                            trace!(
+                                "Send to JPEG topic {:?} ({elapsed:.2} ms)",
+                                publ_jpeg.key_expr()
+                            );
+                        }
                     }
                     Err(e) => error!("Error when building JPEG message {e:?}"),
                 }
@@ -335,7 +348,12 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         let dma_msg = build_dma_msg(&buf, src_pid, &args);
         match dma_msg {
             Ok(m) => {
-                let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
+                let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&m, Infinite)?).encoding(
+                    Encoding::WithSuffix(
+                        KnownEncoding::AppOctetStream,
+                        "edgefirst_msgs/msg/DmaBuffer".into(),
+                    ),
+                );
                 trace!("Encoded DMA message to CDR");
                 publ_dma.put(encoded).res_async().await.unwrap();
                 trace!("Send to DMA topic {:?}", args.dma_topic);
@@ -468,11 +486,7 @@ fn build_video_msg(
     Ok(msg)
 }
 
-fn build_dma_msg(
-    buf: &CameraBuffer<'_>,
-    src_pid: u32,
-    args: &Args,
-) -> Result<DeepviewDMABuf, Box<dyn Error>> {
+fn build_dma_msg(buf: &CameraBuffer<'_>, pid: u32, args: &Args) -> Result<DmaBuf, Box<dyn Error>> {
     let _ = args;
 
     let ts = buf.timestamp();
@@ -482,7 +496,7 @@ fn build_dma_msg(
     let dma_buf = buf.rawfd();
     // let dma_buf = buf.original_fd;
     let length = buf.length() as u32;
-    let msg = DeepviewDMABuf {
+    let msg = DmaBuf {
         header: std_msgs::Header {
             stamp: ROSTime {
                 sec: ts.seconds() as i32,
@@ -490,8 +504,8 @@ fn build_dma_msg(
             },
             frame_id: "".to_string(),
         },
-        src_pid,
-        dma_fd: dma_buf,
+        pid,
+        fd: dma_buf,
         width,
         height,
         stride: width,
@@ -499,9 +513,9 @@ fn build_dma_msg(
         length,
     };
     trace!(
-        "dmabuf dma_buf: {} src_pid: {} length: {}",
+        "dmabuf dma_buf: {} pid: {} length: {}",
         dma_buf,
-        src_pid,
+        pid,
         length,
     );
     Ok(msg)
