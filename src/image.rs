@@ -242,7 +242,7 @@ pub fn encode_jpeg(pix: &[u8], img: Option<&Image>) -> Result<OwnedBuf, Box<dyn 
         }
     };
 
-    let res = turbojpeg::compress(img2, 90, turbojpeg::Subsamp::Sub2x2);
+    let res = turbojpeg::compress(img2, 100, turbojpeg::Subsamp::Sub2x2);
     match res {
         Ok(buf) => Ok(buf),
         Err(e) => Err(Box::new(e)),
