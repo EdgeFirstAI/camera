@@ -1,5 +1,5 @@
 use camera::image::{Image, ImageManager};
-use log::{trace, warn};
+use log::{debug, trace, warn};
 use std::{
     error::Error,
     os::raw::c_int,
@@ -17,6 +17,7 @@ pub struct VideoManager {
     encoder: Encoder,
     crop: VSLRect,
     output_frame: Frame,
+    pub bits: usize,
 }
 // Time limit is 8ms for 1080p frame.
 // 8ms / [(1920x1080)/1_000_000] = 3.848 ms per megapixel
@@ -34,17 +35,10 @@ impl VideoManager {
     ) -> Result<VideoManager, Box<dyn Error>> {
         let profile = match bitrate {
             H264Bitrate::Auto => VSLEncoderProfileEnum::Auto,
-            H264Bitrate::Kbps1000 => VSLEncoderProfileEnum::Kbps1000,
-            H264Bitrate::Kbps2000 => VSLEncoderProfileEnum::Kbps2000,
-            H264Bitrate::Kbps4000 => VSLEncoderProfileEnum::Kbps4000,
-            H264Bitrate::Kbps8000 => VSLEncoderProfileEnum::Kbps8000,
-            H264Bitrate::Kbps10000 => VSLEncoderProfileEnum::Kbps10000,
-            H264Bitrate::Kbps20000 => VSLEncoderProfileEnum::Kbps20000,
-            H264Bitrate::Kbps40000 => VSLEncoderProfileEnum::Kbps40000,
-            H264Bitrate::Kbps80000 => VSLEncoderProfileEnum::Kbps80000,
-            H264Bitrate::Kbps100000 => VSLEncoderProfileEnum::Kbps100000,
-            H264Bitrate::Kbps200000 => VSLEncoderProfileEnum::Kbps200000,
-            H264Bitrate::Kbps400000 => VSLEncoderProfileEnum::Kbps400000,
+            H264Bitrate::Mbps5 => VSLEncoderProfileEnum::Kbps5000,
+            H264Bitrate::Mbps25 => VSLEncoderProfileEnum::Kbps25000,
+            H264Bitrate::Mbps50 => VSLEncoderProfileEnum::Kbps50000,
+            H264Bitrate::Mbps100 => VSLEncoderProfileEnum::Kbps100000,
         };
         let encoder = Encoder::create(profile as u32, u32::from(video_fmt), 30);
         let crop = VSLRect::new(0, 0, width, height);
@@ -58,11 +52,12 @@ impl VideoManager {
             encoder,
             crop,
             output_frame,
+            bits: 0,
         })
     }
 
     pub fn resize_and_encode(
-        &self,
+        &mut self,
         source: &Image,
         imgmgr: &ImageManager,
         img: &Image,
@@ -93,7 +88,7 @@ impl VideoManager {
         self.encode_from_vsl(&frame)
     }
 
-    fn encode_from_vsl(&self, source: &Frame) -> Result<(Vec<u8>, bool), Box<dyn Error>> {
+    fn encode_from_vsl(&mut self, source: &Frame) -> Result<(Vec<u8>, bool), Box<dyn Error>> {
         let mut key_frame: c_int = 0;
         let now = Instant::now();
         let _ret = self
@@ -120,6 +115,15 @@ impl VideoManager {
         } else {
             trace!("h264 encode mmap time: {:?}", mmap_time)
         }
+
+        if is_key && self.bits > 1000 {
+            debug!(
+                "estimated bitrate: {:.2} mbps",
+                self.bits as f32 * 8.0 / 1000000.0
+            );
+            self.bits = 0;
+        }
+        self.bits += ret.len();
         Ok((ret, is_key))
     }
 }

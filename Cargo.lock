@@ -3104,7 +3104,7 @@ checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 [[package]]
 name = "videostream"
 version = "0.0.0"
-source = "git+https://github.com/Charlie-AuZone/videostream-rs.git?branch=RVN-221#8315fa72ecfb7ddc5bf435e2f027a937add6c915"
+source = "git+https://github.com/Charlie-AuZone/videostream-rs.git?branch=RVN-221#2bfbf8892fd9b9eeef344915055edbb24a8ec59f"
 dependencies = [
  "dma-buf",
  "nix 0.28.0",
@@ -3115,7 +3115,7 @@ dependencies = [
 [[package]]
 name = "videostream-sys"
 version = "0.0.0"
-source = "git+https://github.com/Charlie-AuZone/videostream-rs.git?branch=RVN-221#8315fa72ecfb7ddc5bf435e2f027a937add6c915"
+source = "git+https://github.com/Charlie-AuZone/videostream-rs.git?branch=RVN-221#2bfbf8892fd9b9eeef344915055edbb24a8ec59f"
 dependencies = [
  "libc",
 ]

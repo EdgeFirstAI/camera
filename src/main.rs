@@ -8,7 +8,7 @@ use edgefirst_schemas::{
     sensor_msgs::{CameraInfo, CompressedImage, RegionOfInterest},
     std_msgs,
 };
-use log::{debug, error, info, trace, warn};
+use log::{error, info, trace, warn};
 use std::{
     error::Error,
     fs::File,
@@ -43,17 +43,10 @@ enum MirrorSetting {
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
 enum H264Bitrate {
     Auto,
-    Kbps1000,
-    Kbps2000,
-    Kbps4000,
-    Kbps8000,
-    Kbps10000,
-    Kbps20000,
-    Kbps40000,
-    Kbps80000,
-    Kbps100000,
-    Kbps200000,
-    Kbps400000,
+    Mbps5,
+    Mbps25,
+    Mbps50,
+    Mbps100,
 }
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -439,7 +432,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
 
         if args.h264 {
             trace!("Start h264");
-            let vid = vidmgr.as_ref().unwrap();
+            let vid = vidmgr.as_mut().unwrap();
             let img = img_h264.as_ref().unwrap();
             let ts = buf.timestamp();
             let src_img = Image::from_camera(&buf)?;
@@ -518,7 +511,7 @@ fn build_jpeg_msg(
 fn build_video_msg(
     buf: &Image,
     ts: &Timestamp,
-    vid: &VideoManager,
+    vid: &mut VideoManager,
     imgmgr: &ImageManager,
     img: &Image,
     _: &Args,
