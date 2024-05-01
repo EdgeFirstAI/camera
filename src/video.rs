@@ -75,6 +75,6 @@ impl VideoManager {
         if mmap_time.as_nanos() > TIME_LIMIT {
             warn!("h264 encode mmap time: {:?} exceeds 33ms", mmap_time)
         }
-        return Ok((ret, is_key));
+        Ok((ret, is_key))
     }
 }
