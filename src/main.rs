@@ -32,6 +32,8 @@ use zenoh::{
 };
 mod video;
 
+const TIME_LIMIT: u128 = 33000000; // at most 33ms between current step and previous step
+
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
 enum MirrorSetting {
     None,
@@ -261,12 +263,19 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             }
         };
         img_h264 = Some(Image::new(args.stream_size[0], args.stream_size[1], RGBA)?);
-        vidmgr = Some(VideoManager::new(
+
+        vidmgr = match VideoManager::new(
             FourCC(*b"H264"),
             args.stream_size[0],
             args.stream_size[1],
             args.h264_bitrate,
-        ));
+        ) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                error!("Could not create Video Manager for H264 encoding: {:?}", e);
+                return Err(e);
+            }
+        }
     } else {
         publ_h264 = None;
     }
@@ -360,12 +369,17 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
 
     loop {
         let fps = update_fps(&mut prev, &mut history, &mut index);
+        if fps < 29 {
+            warn!("camera FPS is {}", fps);
+        }
         let now = Instant::now();
         let buf = cam.read()?;
         let capture_time = now.elapsed();
-
+        let now = Instant::now();
         trace!("camera capture: {:?} fps: {}", capture_time, fps);
-
+        if capture_time.as_nanos() > TIME_LIMIT {
+            warn!("camera capture: {:?} exceeds 33ms", capture_time);
+        }
         let dma_msg = build_dma_msg(&buf, src_pid, &args);
         match dma_msg {
             Ok(m) => {
@@ -381,12 +395,21 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             }
             Err(e) => error!("Error when building DMA message: {e:?}"),
         }
+        let dma_msg_time = now.elapsed();
+        let now = Instant::now();
+        if dma_msg_time.as_nanos() > TIME_LIMIT {
+            warn!("dma msg time: {:?} exceeds 33ms", dma_msg_time);
+        }
 
         if let Some(ref msg) = info_msg {
             publ_info.put(msg.clone()).res_async().await.unwrap();
             trace!("Send to info topic {:?}", args.info_topic);
         }
-
+        let dma_zenoh_time = now.elapsed();
+        // let now = Instant::now();
+        if dma_zenoh_time.as_nanos() > TIME_LIMIT {
+            warn!("dma zenoh time: {:?} exceeds 33ms", dma_zenoh_time);
+        }
         if args.jpeg {
             let ts = buf.timestamp();
             let src_img = Image::from_camera(&buf)?;
@@ -406,6 +429,11 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             let src_img = Image::from_camera(&buf)?;
             let msg = build_video_msg(&src_img, &ts, vid, &imgmgr, img, &args);
             trace!("Converted to h264");
+            // let h264_time = now.elapsed();
+            let now = Instant::now();
+            // if h264_time.as_nanos() > TIME_LIMIT {
+            //     warn!("h264 encode time: {:?} exceeds 33ms", h264_time);
+            // }
             match msg {
                 Ok(m) => {
                     let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&m, Infinite)?)
@@ -420,6 +448,10 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                     trace!("Send to H264 topic {:?}", args.h264_topic);
                 }
                 Err(e) => error!("Error when building video message: {e:?}"),
+            }
+            let h264_zenoh_time = now.elapsed();
+            if h264_zenoh_time.as_nanos() > TIME_LIMIT {
+                warn!("h264 zenoh time: {:?} exceeds 33ms", h264_zenoh_time);
             }
         }
     }
