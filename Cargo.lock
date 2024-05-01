@@ -2152,12 +2152,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "readme-rustdocifier"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08ad765b21a08b1a8e5cdce052719188a23772bcbefb3c439f0baaf62c56ceac"
-
-[[package]]
 name = "redox_syscall"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2991,22 +2985,18 @@ checksum = "f962df74c8c05a667b5ee8bcf162993134c104e96440b663c8daa176dc772d8c"
 
 [[package]]
 name = "unix-ts"
-version = "0.6.0"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a4f7e2a0ec19e18b93b3801b5271311f8f924527df3775067e039a488e48965"
+checksum = "2e88bab2be9575823c160e1ca9869179a5b9381e23e1013fdbe4c75fd8705e1a"
 dependencies = [
- "readme-rustdocifier",
  "unix-ts-macros",
 ]
 
 [[package]]
 name = "unix-ts-macros"
-version = "0.4.0"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "778a90a350e66d5df234e112037b7e67733e31db6d5cc280e7812a58b5088848"
-dependencies = [
- "readme-rustdocifier",
-]
+checksum = "4cf5fd32fe602f27c0db508ffab4a845120fdb7474ea78c01e5c483ac1b09951"
 
 [[package]]
 name = "unsafe-libyaml"
@@ -3113,9 +3103,8 @@ checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 
 [[package]]
 name = "videostream"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc854c03e9ba78a8b69f8035885b4e04460e37c378f82e15affd4565c6ce3948"
+version = "0.0.0"
+source = "git+https://github.com/Charlie-AuZone/videostream-rs.git?branch=RVN-221#8315fa72ecfb7ddc5bf435e2f027a937add6c915"
 dependencies = [
  "dma-buf",
  "nix 0.28.0",
@@ -3125,9 +3114,8 @@ dependencies = [
 
 [[package]]
 name = "videostream-sys"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1baa5f961b4571bc0fa57162243b068598089c7bf6d4f4c1245557616f1fded2"
+version = "0.0.0"
+source = "git+https://github.com/Charlie-AuZone/videostream-rs.git?branch=RVN-221#8315fa72ecfb7ddc5bf435e2f027a937add6c915"
 dependencies = [
  "libc",
 ]
