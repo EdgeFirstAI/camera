@@ -15,4 +15,4 @@ libc = "^0.2"
 libloading = "0.8.1"
 dma-buf = "0.4.0"
 nix = { version = "0.28.0", features = ["ioctl"] }
-videostream = { version = "0.7.1" }
+videostream = { git = "https://github.com/Charlie-AuZone/videostream-rs.git" , branch = "RVN-221" }

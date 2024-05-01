@@ -1,10 +1,13 @@
 use camera::image::{Image, ImageManager};
-use std::{error::Error, os::raw::c_int};
+use log::warn;
+use std::{error::Error, os::raw::c_int, time::Instant};
 use videostream::{
-    encoder::{Encoder, VSLRect},
+    encoder::{Encoder, VSLEncoderProfileEnum, VSLRect},
     fourcc::FourCC,
     frame::Frame,
 };
+
+use crate::H264Bitrate;
 
 pub struct VideoManager {
     encoder: Encoder,
@@ -12,8 +15,27 @@ pub struct VideoManager {
 }
 
 impl VideoManager {
-    pub fn new(video_fmt: FourCC, width: i32, height: i32) -> Self {
-        let encoder = Encoder::create(0, u32::from(video_fmt), 30);
+    pub fn new(
+        video_fmt: FourCC,
+        width: i32,
+        height: i32,
+        bitrate: H264Bitrate,
+    ) -> Result<Self, Box<dyn Error>> {
+        let profile = match bitrate {
+            H264Bitrate::Auto => VSLEncoderProfileEnum::Auto,
+            H264Bitrate::Kbps1000 => VSLEncoderProfileEnum::Kbps1000,
+            H264Bitrate::Kbps2000 => VSLEncoderProfileEnum::Kbps2000,
+            H264Bitrate::Kbps4000 => VSLEncoderProfileEnum::Kbps4000,
+            H264Bitrate::Kbps8000 => VSLEncoderProfileEnum::Kbps8000,
+            H264Bitrate::Kbps10000 => VSLEncoderProfileEnum::Kbps10000,
+            H264Bitrate::Kbps20000 => VSLEncoderProfileEnum::Kbps20000,
+            H264Bitrate::Kbps40000 => VSLEncoderProfileEnum::Kbps40000,
+            H264Bitrate::Kbps80000 => VSLEncoderProfileEnum::Kbps80000,
+            H264Bitrate::Kbps100000 => VSLEncoderProfileEnum::Kbps100000,
+            H264Bitrate::Kbps200000 => VSLEncoderProfileEnum::Kbps200000,
+            H264Bitrate::Kbps400000 => VSLEncoderProfileEnum::Kbps400000,
+        };
+        let encoder = Encoder::create(profile as u32, u32::from(video_fmt), 30);
         let crop = VSLRect::new(0, 0, width, height);
         Self { encoder, crop }
     }

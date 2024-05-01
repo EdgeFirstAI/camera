@@ -32,12 +32,28 @@ use zenoh::{
 };
 mod video;
 
-#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
 enum MirrorSetting {
     None,
     Horizontal,
     Vertical,
     Both,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
+enum H264Bitrate {
+    Auto,
+    Kbps1000,
+    Kbps2000,
+    Kbps4000,
+    Kbps8000,
+    Kbps10000,
+    Kbps20000,
+    Kbps40000,
+    Kbps80000,
+    Kbps100000,
+    Kbps200000,
+    Kbps400000,
 }
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -95,6 +111,10 @@ struct Args {
     /// h264 foxglove topic
     #[arg(long, default_value = "rt/camera/h264")]
     h264_topic: String,
+
+    /// h264 bitrate setting
+    #[arg(long, default_value = "auto")]
+    h264_bitrate: H264Bitrate,
 
     /// streaming resolution
     #[arg(
@@ -245,6 +265,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             FourCC(*b"H264"),
             args.stream_size[0],
             args.stream_size[1],
+            args.h264_bitrate,
         ));
     } else {
         publ_h264 = None;

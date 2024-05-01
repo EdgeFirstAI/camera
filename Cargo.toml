@@ -34,7 +34,7 @@ serde_derive = "1.0.199"
 cdr = "0.2.4"
 dma-buf = "0.4.0"
 dma-heap = "0.4.0"
-videostream = { version = "0.7.1" }
+videostream = { git = "https://github.com/Charlie-AuZone/videostream-rs.git" , branch = "RVN-221" }
 serde_json = "1.0.116"
 unix-ts = "0.6.0"
 log = "0.4.21"
