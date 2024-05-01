@@ -1,6 +1,5 @@
 use camera::image::{Image, ImageManager};
-use log::warn;
-use std::{error::Error, os::raw::c_int, time::Instant};
+use std::{error::Error, os::raw::c_int};
 use videostream::{
     encoder::{Encoder, VSLEncoderProfileEnum, VSLRect},
     fourcc::FourCC,
@@ -15,12 +14,7 @@ pub struct VideoManager {
 }
 
 impl VideoManager {
-    pub fn new(
-        video_fmt: FourCC,
-        width: i32,
-        height: i32,
-        bitrate: H264Bitrate,
-    ) -> Result<Self, Box<dyn Error>> {
+    pub fn new(video_fmt: FourCC, width: i32, height: i32, bitrate: H264Bitrate) -> VideoManager {
         let profile = match bitrate {
             H264Bitrate::Auto => VSLEncoderProfileEnum::Auto,
             H264Bitrate::Kbps1000 => VSLEncoderProfileEnum::Kbps1000,
