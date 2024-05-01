@@ -248,11 +248,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         {
             Ok(v) => Some(v),
             Err(e) => {
-                error!(
-                    "Could not create Video Manager for H264 encoding:
-        {:?}",
-                    e
-                );
+                error!("Could not create Video Manager for H264 encoding: {:?}", e);
                 return Err(e);
             }
         }
