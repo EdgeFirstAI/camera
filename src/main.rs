@@ -203,8 +203,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 const CAPTURE_TIME_LIMIT: Duration = Duration::from_millis(33);
 const DMA_MSG_TIME_LIMIT: Duration = Duration::from_millis(1);
 const DMA_ZENOH_TIME_LIMIT: Duration = Duration::from_millis(1);
-// TODO: varies by bitrate
-const H264_ZENOH_TIME_LIMIT: Duration = Duration::from_millis(3);
+const H264_ZENOH_TIME_LIMIT: Duration = Duration::from_millis(4);
 async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), Box<dyn Error>> {
     let session = session.into_arc();
     let publ_dma = match session
@@ -525,8 +524,8 @@ fn build_video_msg(
     _: &Args,
 ) -> Result<FoxgloveCompressedVideo, Box<dyn Error>> {
     let now = Instant::now();
-    let (data, isKey) = match vid.resize_and_encode(buf, imgmgr, img) {
-        Ok(d) => d,
+    let data = match vid.resize_and_encode(buf, imgmgr, img) {
+        Ok(d) => d.0,
         Err(e) => {
             return Err(e);
         }
