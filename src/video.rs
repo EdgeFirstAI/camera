@@ -1,7 +1,10 @@
-use crate::TIME_LIMIT;
 use camera::image::{Image, ImageManager};
 use log::{trace, warn};
-use std::{error::Error, os::raw::c_int, time::Instant};
+use std::{
+    error::Error,
+    os::raw::c_int,
+    time::{Duration, Instant},
+};
 use videostream::{
     encoder::{Encoder, VSLEncoderProfileEnum, VSLRect},
     fourcc::FourCC,
@@ -15,6 +18,13 @@ pub struct VideoManager {
     crop: VSLRect,
     output_frame: Frame,
 }
+// Time limit is 8ms for 1080p frame.
+// 8ms / [(1920x1080)/1_000_000] = 3.848 ms per megapixel
+const H264_CONVERT_TIME_LIMIT_PER_MPIX: Duration = Duration::from_micros(3858);
+// Seems like bitrate does not affect h264 encode time
+const H264_ENCODE_TIME_LIMIT: Duration = Duration::from_millis(8);
+// Varies by bitrate, but appears to max out at 2.7 ms at maximum bitrate
+const H264_MMAP_TIME_LIMIT: Duration = Duration::from_millis(3);
 impl VideoManager {
     pub fn new(
         video_fmt: FourCC,
@@ -66,10 +76,12 @@ impl VideoManager {
             }
         };
         let convert_and_resize_time = now.elapsed();
-        if convert_and_resize_time > TIME_LIMIT {
+        let mpix = (source.width() * source.height()) as f64 / 1_000_000.0;
+        if convert_and_resize_time > H264_CONVERT_TIME_LIMIT_PER_MPIX.mul_f64(mpix) {
             warn!(
                 "h264 convert and resize time: {:?} exceeds {:?}",
-                convert_and_resize_time, TIME_LIMIT
+                convert_and_resize_time,
+                H264_CONVERT_TIME_LIMIT_PER_MPIX.mul_f64(mpix)
             )
         } else {
             trace!(
@@ -89,10 +101,10 @@ impl VideoManager {
             .frame(source, &self.output_frame, &self.crop, &mut key_frame);
         let is_key = key_frame != 0;
         let encode_time = now.elapsed();
-        if encode_time > TIME_LIMIT {
+        if encode_time > H264_ENCODE_TIME_LIMIT {
             warn!(
                 "h264 encode encode frame time: {:?} exceeds {:?}",
-                encode_time, TIME_LIMIT
+                encode_time, H264_ENCODE_TIME_LIMIT
             )
         } else {
             trace!("h264 encode encode frame time: {:?}", encode_time)
@@ -100,10 +112,10 @@ impl VideoManager {
         let now = Instant::now();
         let ret = self.output_frame.mmap().unwrap().to_vec();
         let mmap_time = now.elapsed();
-        if mmap_time > TIME_LIMIT {
+        if mmap_time > H264_MMAP_TIME_LIMIT {
             warn!(
                 "h264 encode mmap time: {:?} exceeds {:?}",
-                mmap_time, TIME_LIMIT
+                mmap_time, H264_MMAP_TIME_LIMIT
             )
         } else {
             trace!("h264 encode mmap time: {:?}", mmap_time)

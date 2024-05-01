@@ -8,7 +8,7 @@ use edgefirst_schemas::{
     sensor_msgs::{CameraInfo, CompressedImage, RegionOfInterest},
     std_msgs,
 };
-use log::{error, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use std::{
     error::Error,
     fs::File,
@@ -31,8 +31,6 @@ use zenoh::{
     publication::Publisher,
 };
 mod video;
-
-const TIME_LIMIT: Duration = Duration::from_millis(33); // at most 33ms between current step and previous step
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
 enum MirrorSetting {
@@ -202,7 +200,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("Opened Zenoh session");
     stream(cam, session, args).await
 }
-
+const CAPTURE_TIME_LIMIT: Duration = Duration::from_millis(33);
+const DMA_MSG_TIME_LIMIT: Duration = Duration::from_millis(1);
+const DMA_ZENOH_TIME_LIMIT: Duration = Duration::from_millis(1);
+// TODO: varies by bitrate
+const H264_ZENOH_TIME_LIMIT: Duration = Duration::from_millis(3);
 async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), Box<dyn Error>> {
     let session = session.into_arc();
     let publ_dma = match session
@@ -377,10 +379,10 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         let capture_time = now.elapsed();
         let now = Instant::now();
         trace!("camera capture: {:?} fps: {}", capture_time, fps);
-        if capture_time > TIME_LIMIT {
+        if capture_time > CAPTURE_TIME_LIMIT {
             warn!(
                 "camera capture: {:?} exceeds {:?}",
-                capture_time, TIME_LIMIT
+                capture_time, CAPTURE_TIME_LIMIT
             );
         } else {
             trace!("camera capture: {:?}", capture_time);
@@ -402,8 +404,11 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         }
         let dma_msg_time = now.elapsed();
         let now = Instant::now();
-        if dma_msg_time > TIME_LIMIT {
-            warn!("dma msg time: {:?} exceeds {:?}", dma_msg_time, TIME_LIMIT);
+        if dma_msg_time > DMA_MSG_TIME_LIMIT {
+            warn!(
+                "dma msg time: {:?} exceeds {:?}",
+                dma_msg_time, DMA_MSG_TIME_LIMIT
+            );
         } else {
             trace!("dma msg time: {:?}", dma_msg_time);
         }
@@ -414,10 +419,10 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         }
         let dma_zenoh_time = now.elapsed();
         // let now = Instant::now();
-        if dma_zenoh_time > TIME_LIMIT {
+        if dma_zenoh_time > DMA_ZENOH_TIME_LIMIT {
             warn!(
                 "dma zenoh time: {:?} exceeds {:?}",
-                dma_zenoh_time, TIME_LIMIT
+                dma_zenoh_time, DMA_ZENOH_TIME_LIMIT
             );
         } else {
             trace!("dma zenoh time: {:?}", dma_zenoh_time)
@@ -456,10 +461,10 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                 Err(e) => error!("Error when building video message: {e:?}"),
             }
             let h264_zenoh_time = now.elapsed();
-            if h264_zenoh_time > TIME_LIMIT {
+            if h264_zenoh_time > H264_ZENOH_TIME_LIMIT {
                 warn!(
                     "h264 zenoh time: {:?} exceeds {:?}",
-                    h264_zenoh_time, TIME_LIMIT
+                    h264_zenoh_time, H264_ZENOH_TIME_LIMIT
                 );
             } else {
                 trace!("h264 zenoh time: {:?}", h264_zenoh_time)
@@ -520,8 +525,8 @@ fn build_video_msg(
     _: &Args,
 ) -> Result<FoxgloveCompressedVideo, Box<dyn Error>> {
     let now = Instant::now();
-    let data = match vid.resize_and_encode(buf, imgmgr, img) {
-        Ok(d) => d.0,
+    let (data, isKey) = match vid.resize_and_encode(buf, imgmgr, img) {
+        Ok(d) => d,
         Err(e) => {
             return Err(e);
         }
