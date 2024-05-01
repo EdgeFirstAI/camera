@@ -2,6 +2,7 @@ use core::fmt;
 use dma_buf::DmaBuf;
 use dma_heap::{Heap, HeapKind};
 use g2d_sys::{g2d as g2d_library, g2d_surface, G2DFormat, G2DPhysical};
+use log::trace;
 use std::{
     error::Error,
     ffi::c_void,
@@ -11,6 +12,7 @@ use std::{
         unix::io::OwnedFd,
     },
     ptr::null_mut,
+    time::Instant,
 };
 use turbojpeg::{libc::dup, OwnedBuf};
 use videostream::{camera::CameraBuffer, fourcc::FourCC, frame::Frame};
@@ -103,14 +105,12 @@ impl ImageManager {
                 "g2d_blit failed",
             )));
         }
-
         if unsafe { self.lib.g2d_finish(self.handle) } != 0 {
             return Err(Box::new(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "g2d_finish failed",
             )));
         }
-
         // FIXME: A cache invalidation is required here, currently missing!
 
         Ok(())

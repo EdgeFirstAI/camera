@@ -17,7 +17,7 @@ use std::{
     str::FromStr,
     sync::mpsc::{self, RecvError},
     thread,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use unix_ts::Timestamp;
 use video::VideoManager;
@@ -32,7 +32,7 @@ use zenoh::{
 };
 mod video;
 
-const TIME_LIMIT: u128 = 33000000; // at most 33ms between current step and previous step
+const TIME_LIMIT: Duration = Duration::from_millis(33); // at most 33ms between current step and previous step
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
 enum MirrorSetting {
@@ -353,8 +353,13 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         let capture_time = now.elapsed();
         let now = Instant::now();
         trace!("camera capture: {:?} fps: {}", capture_time, fps);
-        if capture_time.as_nanos() > TIME_LIMIT {
-            warn!("camera capture: {:?} exceeds 33ms", capture_time);
+        if capture_time > TIME_LIMIT {
+            warn!(
+                "camera capture: {:?} exceeds {:?}",
+                capture_time, TIME_LIMIT
+            );
+        } else {
+            trace!("camera capture: {:?}", capture_time);
         }
         let dma_msg = build_dma_msg(&buf, src_pid, &args);
         match dma_msg {
@@ -373,8 +378,10 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         }
         let dma_msg_time = now.elapsed();
         let now = Instant::now();
-        if dma_msg_time.as_nanos() > TIME_LIMIT {
-            warn!("dma msg time: {:?} exceeds 33ms", dma_msg_time);
+        if dma_msg_time > TIME_LIMIT {
+            warn!("dma msg time: {:?} exceeds {:?}", dma_msg_time, TIME_LIMIT);
+        } else {
+            trace!("dma msg time: {:?}", dma_msg_time);
         }
 
         if let Some(ref msg) = info_msg {
@@ -383,8 +390,13 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         }
         let dma_zenoh_time = now.elapsed();
         // let now = Instant::now();
-        if dma_zenoh_time.as_nanos() > TIME_LIMIT {
-            warn!("dma zenoh time: {:?} exceeds 33ms", dma_zenoh_time);
+        if dma_zenoh_time > TIME_LIMIT {
+            warn!(
+                "dma zenoh time: {:?} exceeds {:?}",
+                dma_zenoh_time, TIME_LIMIT
+            );
+        } else {
+            trace!("dma zenoh time: {:?}", dma_zenoh_time)
         }
         if args.jpeg {
             let ts = buf.timestamp();
@@ -404,12 +416,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             let ts = buf.timestamp();
             let src_img = Image::from_camera(&buf)?;
             let msg = build_video_msg(&src_img, &ts, vid, &imgmgr, img, &args);
-            trace!("Converted to h264");
-            // let h264_time = now.elapsed();
             let now = Instant::now();
-            // if h264_time.as_nanos() > TIME_LIMIT {
-            //     warn!("h264 encode time: {:?} exceeds 33ms", h264_time);
-            // }
             match msg {
                 Ok(m) => {
                     let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&m, Infinite)?)
@@ -417,7 +424,6 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                             KnownEncoding::AppOctetStream,
                             "foxglove_msgs/msg/CompressedVideo".into(),
                         ));
-                    trace!("Encoded H264 message to CDR");
                     if let Some(publ) = publ_h264.as_ref() {
                         publ.put(encoded).res_async().await.unwrap();
                     }
@@ -426,8 +432,13 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                 Err(e) => error!("Error when building video message: {e:?}"),
             }
             let h264_zenoh_time = now.elapsed();
-            if h264_zenoh_time.as_nanos() > TIME_LIMIT {
-                warn!("h264 zenoh time: {:?} exceeds 33ms", h264_zenoh_time);
+            if h264_zenoh_time > TIME_LIMIT {
+                warn!(
+                    "h264 zenoh time: {:?} exceeds {:?}",
+                    h264_zenoh_time, TIME_LIMIT
+                );
+            } else {
+                trace!("h264 zenoh time: {:?}", h264_zenoh_time)
             }
         }
     }

@@ -1,6 +1,6 @@
 use crate::TIME_LIMIT;
 use camera::image::{Image, ImageManager};
-use log::warn;
+use log::{trace, warn};
 use std::{error::Error, os::raw::c_int, time::Instant};
 use videostream::{
     encoder::{Encoder, VSLRect},
@@ -45,9 +45,14 @@ impl VideoManager {
             }
         };
         let convert_and_resize_time = now.elapsed();
-        if convert_and_resize_time.as_nanos() > TIME_LIMIT {
+        if convert_and_resize_time > TIME_LIMIT {
             warn!(
-                "h264 convert and resize time: {:?} exceeds 33ms",
+                "h264 convert and resize time: {:?} exceeds {:?}",
+                convert_and_resize_time, TIME_LIMIT
+            )
+        } else {
+            trace!(
+                "h264 convert and resize time: {:?}",
                 convert_and_resize_time
             )
         }
@@ -63,17 +68,24 @@ impl VideoManager {
             .frame(source, &self.output_frame, &self.crop, &mut key_frame);
         let is_key = key_frame != 0;
         let encode_time = now.elapsed();
-        if encode_time.as_nanos() > TIME_LIMIT {
+        if encode_time > TIME_LIMIT {
             warn!(
-                "h264 encode encode frame time: {:?} exceeds 33ms",
-                encode_time
+                "h264 encode encode frame time: {:?} exceeds {:?}",
+                encode_time, TIME_LIMIT
             )
+        } else {
+            trace!("h264 encode encode frame time: {:?}", encode_time)
         }
         let now = Instant::now();
         let ret = self.output_frame.mmap().unwrap().to_vec();
         let mmap_time = now.elapsed();
-        if mmap_time.as_nanos() > TIME_LIMIT {
-            warn!("h264 encode mmap time: {:?} exceeds 33ms", mmap_time)
+        if mmap_time > TIME_LIMIT {
+            warn!(
+                "h264 encode mmap time: {:?} exceeds {:?}",
+                mmap_time, TIME_LIMIT
+            )
+        } else {
+            trace!("h264 encode mmap time: {:?}", mmap_time)
         }
         Ok((ret, is_key))
     }
