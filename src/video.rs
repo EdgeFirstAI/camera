@@ -11,7 +11,7 @@ use videostream::{
     frame::Frame,
 };
 
-use crate::H264Bitrate;
+use crate::{H264Bitrate, TARGET_FPS};
 
 pub struct VideoManager {
     encoder: Encoder,
@@ -40,7 +40,7 @@ impl VideoManager {
             H264Bitrate::Mbps50 => VSLEncoderProfileEnum::Kbps50000,
             H264Bitrate::Mbps100 => VSLEncoderProfileEnum::Kbps100000,
         };
-        let encoder = Encoder::create(profile as u32, u32::from(video_fmt), 30);
+        let encoder = Encoder::create(profile as u32, u32::from(video_fmt), TARGET_FPS);
         let crop = VSLRect::new(0, 0, width, height);
         let output_frame = match encoder.new_output_frame(width, height, -1, -1, -1) {
             Ok(f) => f,

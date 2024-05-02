@@ -8,7 +8,7 @@ use edgefirst_schemas::{
     sensor_msgs::{CameraInfo, CompressedImage, RegionOfInterest},
     std_msgs,
 };
-use log::{error, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use std::{
     error::Error,
     fs::File,
@@ -131,6 +131,9 @@ struct Args {
     )]
     cam_info_path: PathBuf,
 }
+
+// TODO: Add setting target FPS
+const TARGET_FPS: i32 = 30;
 
 fn update_fps(prev: &mut Instant, history: &mut [i64], index: &mut usize) -> i64 {
     let now = Instant::now();
@@ -297,7 +300,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         let jpeg_func = move || {
             let imgmgr = ImageManager::new().unwrap();
             let img_jpeg = Image::new(args.stream_size[0], args.stream_size[1], RGBA).unwrap();
-
+            let mut log_warning = true;
             loop {
                 while rx.try_recv().is_ok() {}
                 let (msg, ts) = match rx.recv() {
@@ -307,6 +310,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                         return;
                     }
                 };
+                let now = Instant::now();
                 let msg = build_jpeg_msg(&msg, &ts, &imgmgr, &img_jpeg, &args);
                 match msg {
                     Ok(m) => {
@@ -317,18 +321,22 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                                     "sensor_msgs/msg/CompressedImage".into(),
                                 ));
                         trace!("Encoded JPEG message to CDR");
-                        let now = Instant::now();
                         publ_jpeg.put(encoded).res_sync().unwrap();
-                        let elapsed = now.elapsed().as_secs_f64() * 1000.0;
-                        if elapsed > 33.3 {
+                        let elapsed = now.elapsed();
+                        if elapsed > Duration::from_secs_f64(1.0 / TARGET_FPS as f64) && log_warning
+                        {
                             warn!(
-                                "Send to JPEG topic {:?} ({elapsed:.2} ms)",
-                                publ_jpeg.key_expr()
+                                "Encode and Send to JPEG topic {:?} {:?} is slow. This will cause JPEG framerate to drop below target {} FPS",
+                                publ_jpeg.key_expr(),
+                                elapsed,
+                                TARGET_FPS
                             );
+                            log_warning = false;
                         } else {
                             trace!(
-                                "Send to JPEG topic {:?} ({elapsed:.2} ms)",
-                                publ_jpeg.key_expr()
+                                "Encode and Send to JPEG topic {:?} {:?}",
+                                publ_jpeg.key_expr(),
+                                elapsed
                             );
                         }
                     }
