@@ -3103,8 +3103,9 @@ checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 
 [[package]]
 name = "videostream"
-version = "0.0.0"
-source = "git+https://github.com/Charlie-AuZone/videostream-rs.git?branch=RVN-221#2bfbf8892fd9b9eeef344915055edbb24a8ec59f"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb88dee610cb6c02ee767a375164a989cf8a15e2042cfb2b012068cf6a815aed"
 dependencies = [
  "dma-buf",
  "nix 0.28.0",
@@ -3114,8 +3115,9 @@ dependencies = [
 
 [[package]]
 name = "videostream-sys"
-version = "0.0.0"
-source = "git+https://github.com/Charlie-AuZone/videostream-rs.git?branch=RVN-221#2bfbf8892fd9b9eeef344915055edbb24a8ec59f"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87ef5e0901d17604c96062d84a993718ef6afa5812584a14a85e397d5b962f99"
 dependencies = [
  "libc",
 ]
