@@ -8,7 +8,7 @@ use edgefirst_schemas::{
     sensor_msgs::{CameraInfo, CompressedImage, RegionOfInterest},
     std_msgs,
 };
-use log::{debug, error, info, trace, warn};
+use log::{error, info, trace, warn};
 use std::{
     error::Error,
     fs::File,
