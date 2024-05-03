@@ -141,7 +141,7 @@ fn update_fps(prev: &mut Instant, history: &mut [f64], index: &mut usize) -> f64
     let elapsed = now.duration_since(*prev);
     *prev = now;
 
-    history[*index] = 1e9 as f64 / elapsed.as_nanos() as f64;
+    history[*index] = 1e9_f64 / elapsed.as_nanos() as f64;
     *index = (*index + 1) % history.len();
 
     history.iter().sum::<f64>() / history.len() as f64
