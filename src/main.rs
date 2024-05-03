@@ -1,6 +1,13 @@
 use camera::image::{encode_jpeg, Image, ImageManager, RGBA};
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
+use edgefirst_schemas::{
+    builtin_interfaces::Time as ROSTime,
+    edgefirst_msgs::DmaBuf,
+    foxglove_msgs::FoxgloveCompressedVideo,
+    sensor_msgs::{CameraInfo, CompressedImage, RegionOfInterest},
+    std_msgs,
+};
 use log::{error, info, trace, warn};
 use std::{
     error::Error,
@@ -10,7 +17,7 @@ use std::{
     str::FromStr,
     sync::mpsc::{self, RecvError},
     thread,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use unix_ts::Timestamp;
 use video::VideoManager;
@@ -23,21 +30,23 @@ use zenoh::{
     prelude::{r#async::*, sync::SyncResolve},
     publication::Publisher,
 };
-use zenoh_ros_type::{
-    deepview_msgs::DeepviewDMABuf,
-    foxglove_msgs::FoxgloveCompressedVideo,
-    rcl_interfaces::builtin_interfaces::Time as ROSTime,
-    sensor_msgs::{CameraInfo, CompressedImage, RegionOfInterest},
-    std_msgs,
-};
 mod video;
 
-#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
 enum MirrorSetting {
     None,
     Horizontal,
     Vertical,
     Both,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
+enum H264Bitrate {
+    Auto,
+    Mbps5,
+    Mbps25,
+    Mbps50,
+    Mbps100,
 }
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -96,6 +105,10 @@ struct Args {
     #[arg(long, default_value = "rt/camera/h264")]
     h264_topic: String,
 
+    /// h264 bitrate setting
+    #[arg(long, default_value = "auto")]
+    h264_bitrate: H264Bitrate,
+
     /// streaming resolution
     #[arg(
         short,
@@ -119,16 +132,19 @@ struct Args {
     cam_info_path: PathBuf,
 }
 
-fn update_fps(prev: &mut Instant, history: &mut [i64], index: &mut usize) -> i64 {
+// TODO: Add setting target FPS
+const TARGET_FPS: i32 = 30;
+
+fn update_fps(prev: &mut Instant, history: &mut [f64], index: &mut usize) -> f64 {
     let now = Instant::now();
 
     let elapsed = now.duration_since(*prev);
-    *prev = Instant::now();
+    *prev = now;
 
-    history[*index] = 1e9 as i64 / elapsed.as_nanos() as i64;
+    history[*index] = 1e9 as f64 / elapsed.as_nanos() as f64;
     *index = (*index + 1) % history.len();
 
-    (history.iter().sum::<i64>() as f64 / history.len() as f64).round() as i64
+    history.iter().sum::<f64>() / history.len() as f64
 }
 
 #[async_std::main]
@@ -180,7 +196,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("Opened Zenoh session");
     stream(cam, session, args).await
 }
-
+const CAPTURE_TIME_LIMIT: Duration = Duration::from_millis(33);
+const DMA_MSG_TIME_LIMIT: Duration = Duration::from_millis(1);
+const DMA_ZENOH_TIME_LIMIT: Duration = Duration::from_millis(1);
+const H264_ZENOH_TIME_LIMIT: Duration = Duration::from_millis(4);
 async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), Box<dyn Error>> {
     let session = session.into_arc();
     let publ_dma = match session
@@ -241,11 +260,19 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             }
         };
         img_h264 = Some(Image::new(args.stream_size[0], args.stream_size[1], RGBA)?);
-        vidmgr = Some(VideoManager::new(
+
+        vidmgr = match VideoManager::new(
             FourCC(*b"H264"),
             args.stream_size[0],
             args.stream_size[1],
-        ));
+            args.h264_bitrate,
+        ) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                error!("Could not create Video Manager for H264 encoding: {:?}", e);
+                return Err(e);
+            }
+        }
     } else {
         publ_h264 = None;
     }
@@ -273,7 +300,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         let jpeg_func = move || {
             let imgmgr = ImageManager::new().unwrap();
             let img_jpeg = Image::new(args.stream_size[0], args.stream_size[1], RGBA).unwrap();
-
+            let mut log_warning = true;
             loop {
                 while rx.try_recv().is_ok() {}
                 let (msg, ts) = match rx.recv() {
@@ -283,6 +310,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                         return;
                     }
                 };
+                let now = Instant::now();
                 let msg = build_jpeg_msg(&msg, &ts, &imgmgr, &img_jpeg, &args);
                 match msg {
                     Ok(m) => {
@@ -292,8 +320,25 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                                     KnownEncoding::AppOctetStream,
                                     "sensor_msgs/msg/CompressedImage".into(),
                                 ));
+                        trace!("Encoded JPEG message to CDR");
                         publ_jpeg.put(encoded).res_sync().unwrap();
-                        trace!("Pushed JPEG message to {:?}", publ_jpeg.key_expr());
+                        let elapsed = now.elapsed();
+                        if elapsed > Duration::from_secs_f64(1.0 / TARGET_FPS as f64) && log_warning
+                        {
+                            warn!(
+                                "Encode and Send to JPEG topic {:?} {:?} is slow. This will cause JPEG framerate to drop below target {} FPS",
+                                publ_jpeg.key_expr(),
+                                elapsed,
+                                TARGET_FPS
+                            );
+                            log_warning = false;
+                        } else {
+                            trace!(
+                                "Encode and Send to JPEG topic {:?} {:?}",
+                                publ_jpeg.key_expr(),
+                                elapsed
+                            );
+                        }
                     }
                     Err(e) => error!("Error when building JPEG message {e:?}"),
                 }
@@ -321,33 +366,67 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     let src_pid = process::id();
 
     let mut prev = Instant::now();
-    let mut history = vec![0; 30];
+    let mut history = vec![0.0; 30];
     let mut index = 0;
 
     loop {
         let fps = update_fps(&mut prev, &mut history, &mut index);
+        if fps < TARGET_FPS as f64 * 0.99 {
+            warn!("camera FPS is {}", fps);
+        }
         let now = Instant::now();
         let buf = cam.read()?;
         let capture_time = now.elapsed();
-
+        let now = Instant::now();
         trace!("camera capture: {:?} fps: {}", capture_time, fps);
-
+        if capture_time > CAPTURE_TIME_LIMIT {
+            warn!(
+                "camera capture: {:?} exceeds {:?}",
+                capture_time, CAPTURE_TIME_LIMIT
+            );
+        } else {
+            trace!("camera capture: {:?}", capture_time);
+        }
         let dma_msg = build_dma_msg(&buf, src_pid, &args);
         match dma_msg {
             Ok(m) => {
-                let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite)?;
+                let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&m, Infinite)?).encoding(
+                    Encoding::WithSuffix(
+                        KnownEncoding::AppOctetStream,
+                        "edgefirst_msgs/msg/DmaBuffer".into(),
+                    ),
+                );
                 trace!("Encoded DMA message to CDR");
                 publ_dma.put(encoded).res_async().await.unwrap();
                 trace!("Send to DMA topic {:?}", args.dma_topic);
             }
             Err(e) => error!("Error when building DMA message: {e:?}"),
         }
+        let dma_msg_time = now.elapsed();
+        let now = Instant::now();
+        if dma_msg_time > DMA_MSG_TIME_LIMIT {
+            warn!(
+                "dma msg time: {:?} exceeds {:?}",
+                dma_msg_time, DMA_MSG_TIME_LIMIT
+            );
+        } else {
+            trace!("dma msg time: {:?}", dma_msg_time);
+        }
 
         if let Some(ref msg) = info_msg {
             publ_info.put(msg.clone()).res_async().await.unwrap();
             trace!("Send to info topic {:?}", args.info_topic);
         }
-
+        let dma_zenoh_time = now.elapsed();
+        // let now = Instant::now();
+        if dma_zenoh_time > DMA_ZENOH_TIME_LIMIT {
+            warn!(
+                "dma zenoh time: {:?} exceeds {:?}",
+                dma_zenoh_time, DMA_ZENOH_TIME_LIMIT
+            );
+        } else {
+            trace!("dma zenoh time: {:?}", dma_zenoh_time)
+        }
         if args.jpeg {
             let ts = buf.timestamp();
             let src_img = Image::from_camera(&buf)?;
@@ -361,12 +440,12 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
 
         if args.h264 {
             trace!("Start h264");
-            let vid = vidmgr.as_ref().unwrap();
+            let vid = vidmgr.as_mut().unwrap();
             let img = img_h264.as_ref().unwrap();
             let ts = buf.timestamp();
             let src_img = Image::from_camera(&buf)?;
             let msg = build_video_msg(&src_img, &ts, vid, &imgmgr, img, &args);
-            trace!("Converted to h264");
+            let now = Instant::now();
             match msg {
                 Ok(m) => {
                     let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&m, Infinite)?)
@@ -374,13 +453,21 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                             KnownEncoding::AppOctetStream,
                             "foxglove_msgs/msg/CompressedVideo".into(),
                         ));
-                    trace!("Encoded H264 message to CDR");
                     if let Some(publ) = publ_h264.as_ref() {
                         publ.put(encoded).res_async().await.unwrap();
                     }
                     trace!("Send to H264 topic {:?}", args.h264_topic);
                 }
                 Err(e) => error!("Error when building video message: {e:?}"),
+            }
+            let h264_zenoh_time = now.elapsed();
+            if h264_zenoh_time > H264_ZENOH_TIME_LIMIT {
+                warn!(
+                    "h264 zenoh time: {:?} exceeds {:?}",
+                    h264_zenoh_time, H264_ZENOH_TIME_LIMIT
+                );
+            } else {
+                trace!("h264 zenoh time: {:?}", h264_zenoh_time)
             }
         }
     }
@@ -432,7 +519,7 @@ fn build_jpeg_msg(
 fn build_video_msg(
     buf: &Image,
     ts: &Timestamp,
-    vid: &VideoManager,
+    vid: &mut VideoManager,
     imgmgr: &ImageManager,
     img: &Image,
     _: &Args,
@@ -468,11 +555,7 @@ fn build_video_msg(
     Ok(msg)
 }
 
-fn build_dma_msg(
-    buf: &CameraBuffer<'_>,
-    src_pid: u32,
-    args: &Args,
-) -> Result<DeepviewDMABuf, Box<dyn Error>> {
+fn build_dma_msg(buf: &CameraBuffer<'_>, pid: u32, args: &Args) -> Result<DmaBuf, Box<dyn Error>> {
     let _ = args;
 
     let ts = buf.timestamp();
@@ -482,7 +565,7 @@ fn build_dma_msg(
     let dma_buf = buf.rawfd();
     // let dma_buf = buf.original_fd;
     let length = buf.length() as u32;
-    let msg = DeepviewDMABuf {
+    let msg = DmaBuf {
         header: std_msgs::Header {
             stamp: ROSTime {
                 sec: ts.seconds() as i32,
@@ -490,8 +573,8 @@ fn build_dma_msg(
             },
             frame_id: "".to_string(),
         },
-        src_pid,
-        dma_fd: dma_buf,
+        pid,
+        fd: dma_buf,
         width,
         height,
         stride: width,
@@ -499,9 +582,9 @@ fn build_dma_msg(
         length,
     };
     trace!(
-        "dmabuf dma_buf: {} src_pid: {} length: {}",
+        "dmabuf dma_buf: {} pid: {} length: {}",
         dma_buf,
-        src_pid,
+        pid,
         length,
     );
     Ok(msg)

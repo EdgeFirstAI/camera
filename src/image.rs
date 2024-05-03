@@ -103,14 +103,12 @@ impl ImageManager {
                 "g2d_blit failed",
             )));
         }
-
         if unsafe { self.lib.g2d_finish(self.handle) } != 0 {
             return Err(Box::new(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "g2d_finish failed",
             )));
         }
-
         // FIXME: A cache invalidation is required here, currently missing!
 
         Ok(())
@@ -242,7 +240,7 @@ pub fn encode_jpeg(pix: &[u8], img: Option<&Image>) -> Result<OwnedBuf, Box<dyn 
         }
     };
 
-    let res = turbojpeg::compress(img2, 90, turbojpeg::Subsamp::Sub2x2);
+    let res = turbojpeg::compress(img2, 100, turbojpeg::Subsamp::Sub2x2);
     match res {
         Ok(buf) => Ok(buf),
         Err(e) => Err(Box::new(e)),
