@@ -135,16 +135,16 @@ struct Args {
 // TODO: Add setting target FPS
 const TARGET_FPS: i32 = 30;
 
-fn update_fps(prev: &mut Instant, history: &mut [i64], index: &mut usize) -> i64 {
+fn update_fps(prev: &mut Instant, history: &mut [f64], index: &mut usize) -> f64 {
     let now = Instant::now();
 
     let elapsed = now.duration_since(*prev);
-    *prev = Instant::now();
+    *prev = now;
 
-    history[*index] = 1e9 as i64 / elapsed.as_nanos() as i64;
+    history[*index] = 1e9 as f64 / elapsed.as_nanos() as f64;
     *index = (*index + 1) % history.len();
 
-    (history.iter().sum::<i64>() as f64 / history.len() as f64).round() as i64
+    history.iter().sum::<f64>() / history.len() as f64
 }
 
 #[async_std::main]
@@ -366,12 +366,12 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     let src_pid = process::id();
 
     let mut prev = Instant::now();
-    let mut history = vec![0; 30];
+    let mut history = vec![0.0; 30];
     let mut index = 0;
 
     loop {
         let fps = update_fps(&mut prev, &mut history, &mut index);
-        if fps < 29 {
+        if fps < TARGET_FPS as f64 * 0.99 {
             warn!("camera FPS is {}", fps);
         }
         let now = Instant::now();
