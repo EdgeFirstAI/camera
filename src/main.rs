@@ -106,7 +106,7 @@ struct Args {
     h264_topic: String,
 
     /// h264 bitrate setting
-    #[arg(long, default_value = "auto")]
+    #[arg(long, env, default_value = "auto")]
     h264_bitrate: H264Bitrate,
 
     /// streaming resolution
