@@ -2,7 +2,7 @@ use camera::image::{encode_jpeg, Image, ImageManager, RGBA};
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
 use edgefirst_schemas::{
-    builtin_interfaces::Time as ROSTime,
+    builtin_interfaces,
     edgefirst_msgs::DmaBuf,
     foxglove_msgs::FoxgloveCompressedVideo,
     sensor_msgs::{CameraInfo, CompressedImage, RegionOfInterest},
@@ -17,7 +17,7 @@ use std::{
     str::FromStr,
     sync::mpsc::{self, RecvError},
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use unix_ts::Timestamp;
 use video::VideoManager;
@@ -30,6 +30,7 @@ use zenoh::{
     prelude::{r#async::*, sync::SyncResolve},
     publication::Publisher,
 };
+
 mod video;
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
@@ -504,7 +505,7 @@ fn build_jpeg_msg(
 
     let msg = CompressedImage {
         header: std_msgs::Header {
-            stamp: ROSTime {
+            stamp: builtin_interfaces::Time {
                 sec: ts.seconds() as i32,
                 nanosec: ts.subsec(9),
             },
@@ -543,7 +544,7 @@ fn build_video_msg(
 
     let msg = FoxgloveCompressedVideo {
         header: std_msgs::Header {
-            stamp: ROSTime {
+            stamp: builtin_interfaces::Time {
                 sec: ts.seconds() as i32,
                 nanosec: ts.subsec(9),
             },
@@ -567,7 +568,7 @@ fn build_dma_msg(buf: &CameraBuffer<'_>, pid: u32, args: &Args) -> Result<DmaBuf
     let length = buf.length() as u32;
     let msg = DmaBuf {
         header: std_msgs::Header {
-            stamp: ROSTime {
+            stamp: builtin_interfaces::Time {
                 sec: ts.seconds() as i32,
                 nanosec: ts.subsec(9),
             },
@@ -633,14 +634,10 @@ fn build_info_msg(cam: &CameraReader, args: &Args) -> Result<CameraInfo, Box<dyn
     let width = cam.width() as u32;
     let height = cam.height() as u32;
     let r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-    let now = SystemTime::now();
-    let since_the_epoch = now.duration_since(UNIX_EPOCH).expect("Time went backwards");
+
     let msg = CameraInfo {
         header: std_msgs::Header {
-            stamp: ROSTime {
-                sec: since_the_epoch.as_secs() as i32,
-                nanosec: since_the_epoch.subsec_nanos(),
-            },
+            stamp: timestamp()?,
             frame_id: "".to_string(),
         },
         width,
@@ -661,4 +658,20 @@ fn build_info_msg(cam: &CameraReader, args: &Args) -> Result<CameraInfo, Box<dyn
         },
     };
     Ok(msg)
+}
+
+fn timestamp() -> Result<builtin_interfaces::Time, std::io::Error> {
+    let mut tp = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let err = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_RAW, &mut tp) };
+    if err != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    Ok(builtin_interfaces::Time {
+        sec: tp.tv_sec as i32,
+        nanosec: tp.tv_nsec as u32,
+    })
 }
