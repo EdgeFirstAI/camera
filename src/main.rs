@@ -17,7 +17,7 @@ use std::{
     process,
     str::FromStr,
     sync::mpsc::{self, RecvError},
-    thread,
+    thread::{self, sleep},
     time::{Duration, Instant},
 };
 use unix_ts::Timestamp;
@@ -155,11 +155,11 @@ struct Args {
 
     /// The name of the base frame
     #[arg(long, default_value = "base_link")]
-    base_frame: String,
+    base_frame_id: String,
 
     /// The name of the camera optical frame
     #[arg(long, default_value = "camera_optical")]
-    cam_tf_frame_name: String,
+    camera_frame_id: String,
 }
 
 // TODO: Add setting target FPS
@@ -261,23 +261,6 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             error!(
                 "Error while declaring camera info publisher {}: {:?}",
                 args.info_topic, e
-            );
-            return Err(e);
-        }
-    };
-
-    let publ_tf = match session
-        .declare_publisher("rt/tf_static".to_string())
-        .priority(Priority::Background)
-        .congestion_control(CongestionControl::Drop)
-        .res_async()
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            error!(
-                "Error while declaring tf_static publisher rt/tf_static: {:?}",
-                e
             );
             return Err(e);
         }
@@ -410,6 +393,23 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         }
     };
 
+    let publ_tf = match session
+        .declare_publisher("rt/tf_static".to_string())
+        .priority(Priority::Background)
+        .congestion_control(CongestionControl::Drop)
+        .res_async()
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+                "Error while declaring tf_static publisher rt/tf_static: {:?}",
+                e
+            );
+            return Err(e);
+        }
+    };
+
     let tf_msg = build_tf_msg(&args);
     let tf_msg = Value::from(cdr::serialize::<_, _, CdrLe>(&tf_msg, Infinite)?).encoding(
         Encoding::WithSuffix(
@@ -417,7 +417,16 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             "geometry_msgs/msg/TransformStamped".into(),
         ),
     );
-
+    thread::spawn(move || {
+        let interval = Duration::from_secs(1);
+        let mut target_time = Instant::now() + interval;
+        loop {
+            publ_tf.put(tf_msg.clone()).res_sync().unwrap();
+            trace!("Send to tf topic rt/tf_static");
+            sleep(target_time.duration_since(Instant::now()));
+            target_time += interval
+        }
+    });
     let src_pid = process::id();
 
     let mut prev = Instant::now();
@@ -525,9 +534,6 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             publ_info.put(msg.clone()).res_async().await.unwrap();
             trace!("Send to info topic {:?}", args.info_topic);
         }
-
-        publ_tf.put(tf_msg.clone()).res_async().await.unwrap();
-        trace!("Send to tf topic rt/tf_static");
     }
 }
 
@@ -566,7 +572,7 @@ fn build_jpeg_msg(
                 sec: ts.seconds() as i32,
                 nanosec: ts.subsec(9),
             },
-            frame_id: args.cam_tf_frame_name.clone(),
+            frame_id: args.camera_frame_id.clone(),
         },
         format: "jpeg".to_string(),
         data: jpeg.to_vec(),
@@ -605,7 +611,7 @@ fn build_video_msg(
                 sec: ts.seconds() as i32,
                 nanosec: ts.subsec(9),
             },
-            frame_id: args.cam_tf_frame_name.to_string(),
+            frame_id: args.camera_frame_id.to_string(),
         },
         format: "h264".to_string(),
         data,
@@ -627,7 +633,7 @@ fn build_dma_msg(buf: &CameraBuffer<'_>, pid: u32, args: &Args) -> Result<DmaBuf
                 sec: ts.seconds() as i32,
                 nanosec: ts.subsec(9),
             },
-            frame_id: args.cam_tf_frame_name.to_string(),
+            frame_id: args.camera_frame_id.to_string(),
         },
         pid,
         fd: dma_buf,
@@ -691,7 +697,7 @@ fn build_info_msg(cam: &CameraReader, args: &Args) -> Result<CameraInfo, Box<dyn
     let msg = CameraInfo {
         header: std_msgs::Header {
             stamp: timestamp()?,
-            frame_id: args.cam_tf_frame_name.clone(),
+            frame_id: args.camera_frame_id.clone(),
         },
         width,
         height,
@@ -716,10 +722,10 @@ fn build_info_msg(cam: &CameraReader, args: &Args) -> Result<CameraInfo, Box<dyn
 fn build_tf_msg(args: &Args) -> TransformStamped {
     TransformStamped {
         header: Header {
-            frame_id: args.base_frame.clone(),
+            frame_id: args.base_frame_id.clone(),
             stamp: timestamp().unwrap_or(Time { sec: 0, nanosec: 0 }),
         },
-        child_frame_id: args.cam_tf_frame_name.clone(),
+        child_frame_id: args.camera_frame_id.clone(),
         transform: Transform {
             translation: Vector3 {
                 x: args.cam_tf_vec[0],
