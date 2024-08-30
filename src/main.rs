@@ -2,11 +2,12 @@ use camera::image::{encode_jpeg, Image, ImageManager, RGBA};
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
 use edgefirst_schemas::{
-    builtin_interfaces,
+    builtin_interfaces::{self, Time},
     edgefirst_msgs::DmaBuf,
     foxglove_msgs::FoxgloveCompressedVideo,
+    geometry_msgs::{Quaternion, Transform, TransformStamped, Vector3},
     sensor_msgs::{CameraInfo, CompressedImage, RegionOfInterest},
-    std_msgs,
+    std_msgs::{self, Header},
 };
 use log::{error, info, trace, warn};
 use std::{
@@ -16,7 +17,7 @@ use std::{
     process,
     str::FromStr,
     sync::mpsc::{self, RecvError},
-    thread,
+    thread::{self, sleep},
     time::{Duration, Instant},
 };
 use unix_ts::Timestamp;
@@ -131,6 +132,34 @@ struct Args {
         default_value = "/usr/share/imx8-isp/dewarp_config/sensor_dwe_os08a20_1080P_config.json"
     )]
     cam_info_path: PathBuf,
+
+    /// camera optical frame transform vector from base_link
+    #[arg(
+        long,
+        env,
+        default_value = "0 0 0",
+        value_delimiter = ' ',
+        num_args = 3
+    )]
+    cam_tf_vec: Vec<f64>,
+
+    /// camera optical frame transform quaternion from base_link
+    #[arg(
+        long,
+        env,
+        default_value = "-1 1 -1 1",
+        value_delimiter = ' ',
+        num_args = 4
+    )]
+    cam_tf_quat: Vec<f64>,
+
+    /// The name of the base frame
+    #[arg(long, default_value = "base_link")]
+    base_frame_id: String,
+
+    /// The name of the camera optical frame
+    #[arg(long, default_value = "camera_optical")]
+    camera_frame_id: String,
 }
 
 // TODO: Add setting target FPS
@@ -364,6 +393,40 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         }
     };
 
+    let publ_tf = match session
+        .declare_publisher("rt/tf_static".to_string())
+        .priority(Priority::Background)
+        .congestion_control(CongestionControl::Drop)
+        .res_async()
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+                "Error while declaring tf_static publisher rt/tf_static: {:?}",
+                e
+            );
+            return Err(e);
+        }
+    };
+
+    let tf_msg = build_tf_msg(&args);
+    let tf_msg = Value::from(cdr::serialize::<_, _, CdrLe>(&tf_msg, Infinite)?).encoding(
+        Encoding::WithSuffix(
+            KnownEncoding::AppOctetStream,
+            "geometry_msgs/msg/TransformStamped".into(),
+        ),
+    );
+    thread::spawn(move || {
+        let interval = Duration::from_secs(1);
+        let mut target_time = Instant::now() + interval;
+        loop {
+            publ_tf.put(tf_msg.clone()).res_sync().unwrap();
+            trace!("Send to tf topic rt/tf_static");
+            sleep(target_time.duration_since(Instant::now()));
+            target_time += interval
+        }
+    });
     let src_pid = process::id();
 
     let mut prev = Instant::now();
@@ -414,10 +477,6 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             trace!("dma msg time: {:?}", dma_msg_time);
         }
 
-        if let Some(ref msg) = info_msg {
-            publ_info.put(msg.clone()).res_async().await.unwrap();
-            trace!("Send to info topic {:?}", args.info_topic);
-        }
         let dma_zenoh_time = now.elapsed();
         // let now = Instant::now();
         if dma_zenoh_time > DMA_ZENOH_TIME_LIMIT {
@@ -471,6 +530,10 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                 trace!("h264 zenoh time: {:?}", h264_zenoh_time)
             }
         }
+        if let Some(ref msg) = info_msg {
+            publ_info.put(msg.clone()).res_async().await.unwrap();
+            trace!("Send to info topic {:?}", args.info_topic);
+        }
     }
 }
 
@@ -479,7 +542,7 @@ fn build_jpeg_msg(
     ts: &Timestamp,
     imgmgr: &ImageManager,
     img: &Image,
-    _: &Args,
+    args: &Args,
 ) -> Result<CompressedImage, Box<dyn Error>> {
     let now = Instant::now();
     imgmgr.convert(buf, img, None)?;
@@ -509,7 +572,7 @@ fn build_jpeg_msg(
                 sec: ts.seconds() as i32,
                 nanosec: ts.subsec(9),
             },
-            frame_id: "".to_string(),
+            frame_id: args.camera_frame_id.clone(),
         },
         format: "jpeg".to_string(),
         data: jpeg.to_vec(),
@@ -523,7 +586,7 @@ fn build_video_msg(
     vid: &mut VideoManager,
     imgmgr: &ImageManager,
     img: &Image,
-    _: &Args,
+    args: &Args,
 ) -> Result<FoxgloveCompressedVideo, Box<dyn Error>> {
     let now = Instant::now();
     let data = match vid.resize_and_encode(buf, imgmgr, img) {
@@ -548,7 +611,7 @@ fn build_video_msg(
                 sec: ts.seconds() as i32,
                 nanosec: ts.subsec(9),
             },
-            frame_id: "".to_string(),
+            frame_id: args.camera_frame_id.to_string(),
         },
         format: "h264".to_string(),
         data,
@@ -557,8 +620,6 @@ fn build_video_msg(
 }
 
 fn build_dma_msg(buf: &CameraBuffer<'_>, pid: u32, args: &Args) -> Result<DmaBuf, Box<dyn Error>> {
-    let _ = args;
-
     let ts = buf.timestamp();
     let width = buf.width() as u32;
     let height = buf.height() as u32;
@@ -572,7 +633,7 @@ fn build_dma_msg(buf: &CameraBuffer<'_>, pid: u32, args: &Args) -> Result<DmaBuf
                 sec: ts.seconds() as i32,
                 nanosec: ts.subsec(9),
             },
-            frame_id: "".to_string(),
+            frame_id: args.camera_frame_id.to_string(),
         },
         pid,
         fd: dma_buf,
@@ -584,9 +645,7 @@ fn build_dma_msg(buf: &CameraBuffer<'_>, pid: u32, args: &Args) -> Result<DmaBuf
     };
     trace!(
         "dmabuf dma_buf: {} pid: {} length: {}",
-        dma_buf,
-        pid,
-        length,
+        dma_buf, pid, length,
     );
     Ok(msg)
 }
@@ -638,7 +697,7 @@ fn build_info_msg(cam: &CameraReader, args: &Args) -> Result<CameraInfo, Box<dyn
     let msg = CameraInfo {
         header: std_msgs::Header {
             stamp: timestamp()?,
-            frame_id: "".to_string(),
+            frame_id: args.camera_frame_id.clone(),
         },
         width,
         height,
@@ -658,6 +717,29 @@ fn build_info_msg(cam: &CameraReader, args: &Args) -> Result<CameraInfo, Box<dyn
         },
     };
     Ok(msg)
+}
+
+fn build_tf_msg(args: &Args) -> TransformStamped {
+    TransformStamped {
+        header: Header {
+            frame_id: args.base_frame_id.clone(),
+            stamp: timestamp().unwrap_or(Time { sec: 0, nanosec: 0 }),
+        },
+        child_frame_id: args.camera_frame_id.clone(),
+        transform: Transform {
+            translation: Vector3 {
+                x: args.cam_tf_vec[0],
+                y: args.cam_tf_vec[1],
+                z: args.cam_tf_vec[2],
+            },
+            rotation: Quaternion {
+                x: args.cam_tf_quat[0],
+                y: args.cam_tf_quat[1],
+                z: args.cam_tf_quat[2],
+                w: args.cam_tf_quat[3],
+            },
+        },
+    }
 }
 
 fn timestamp() -> Result<builtin_interfaces::Time, std::io::Error> {
