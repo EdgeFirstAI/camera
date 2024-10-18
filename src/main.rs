@@ -377,7 +377,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         thread::spawn(jpeg_func);
     }
     // TODO: Decide if the H264 encode/decode should also live in a thread
-    let info_msg = build_info_msg(&cam, &args);
+    let info_msg = build_info_msg(&args);
     let info_msg = match info_msg {
         Ok(m) => Some(
             Value::from(cdr::serialize::<_, _, CdrLe>(&m, Infinite)?).encoding(
@@ -650,7 +650,7 @@ fn build_dma_msg(buf: &CameraBuffer<'_>, pid: u32, args: &Args) -> Result<DmaBuf
     Ok(msg)
 }
 
-fn build_info_msg(cam: &CameraReader, args: &Args) -> Result<CameraInfo, Box<dyn Error>> {
+fn build_info_msg(args: &Args) -> Result<CameraInfo, Box<dyn Error>> {
     let file = match File::open(args.cam_info_path.clone()) {
         Ok(v) => v,
         Err(e) => {
@@ -690,8 +690,18 @@ fn build_info_msg(cam: &CameraReader, args: &Args) -> Result<CameraInfo, Box<dyn
     // TODO: Is there an easier way to do this conversion?
     let k = [k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7], k[8]];
 
-    let width = cam.width() as u32;
-    let height = cam.height() as u32;
+    let width = dewarp_config["source_image"]["width"]
+        .as_f64()
+        .unwrap_or_else(|| {
+            error!("Could not find camera width in camera info json");
+            1920.0
+        }) as u32;
+    let height = dewarp_config["source_image"]["height"]
+        .as_f64()
+        .unwrap_or_else(|| {
+            error!("Could not find camera height in camera info json");
+            1080.0
+        }) as u32;
     let r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
     let msg = CameraInfo {
