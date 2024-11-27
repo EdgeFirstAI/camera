@@ -662,15 +662,25 @@ fn build_info_msg(args: &Args) -> Result<CameraInfo, Box<dyn Error>> {
     };
     let json: serde_json::Value =
         serde_json::from_reader(file).expect("file should be proper JSON");
+    let bypass = json["bypass"].as_bool().unwrap_or(false);
     let dewarp_configs = &json["dewarpConfigArray"];
     if !dewarp_configs.is_array() {
         return Err(Box::from("Did not find dewarpConfigArray as an array"));
     }
     let dewarp_config = &dewarp_configs[0];
-    let distortion_coeff = dewarp_config["distortion_coeff"].as_array();
-    let d: Vec<f64> = match distortion_coeff {
-        Some(v) => v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect(),
-        None => return Err(Box::from("Did not find distortion_coeff as an array")),
+    let d = if bypass {
+        let distortion_coeff = dewarp_config["distortion_coeff"].as_array();
+        match distortion_coeff {
+            Some(v) => v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect(),
+            None => {
+                return Err(Box::from("Did not find distortion_coeff as an array"));
+            }
+        }
+    } else {
+        // the camera driver already applies this distortion correction, so we
+        // set it to zero, as ROS expects the camera info to contain the distortion
+        // information of the image coming from the camera
+        vec![0.0; 5]
     };
 
     let camera_matrix = dewarp_config["camera_matrix"].as_array();
