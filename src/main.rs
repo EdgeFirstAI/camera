@@ -129,7 +129,8 @@ struct Args {
     /// isp-imx data location
     #[arg(
         long,
-        default_value = "/usr/share/imx8-isp/dewarp_config/sensor_dwe_os08a20_1080P_config.json"
+        env,
+        default_value = "/etc/isp/sensor_dwe_os08a20_1080P_config.json"
     )]
     cam_info_path: PathBuf,
 
