@@ -29,11 +29,11 @@ name = "convert"
 harness = false
 
 [dependencies]
-g2d-sys = {version = "1.0.0", path = "g2d-sys"}
-edgefirst-schemas = { version = "1.1.1" }
-turbojpeg = {version = "1.1.0", features = ["image", "require-simd"]}
+g2d-sys = {version = "1.0.1", path = "g2d-sys"}
+edgefirst-schemas = { version = "1.2.4" }
+turbojpeg = {version = "1.2.1", features = ["image", "require-simd"]}
 async-std = {version = "1.12.0", features = ["attributes"] }
-clap = { version = "4.5.1", features = ["derive", "env"] }
+clap = { version = "4.5.28", features = ["derive", "env"] }
 zenoh = "0.10.0-rc"
 serde = "1.0.199"
 serde_derive = "1.0.199"
@@ -41,13 +41,13 @@ cdr = "0.2.4"
 dma-buf = "0.4.0"
 dma-heap = "0.4.0"
 videostream = "0.9.0"
-serde_json = "1.0.116"
+serde_json = "1.0.138"
 unix-ts = "1.0.0"
-log = "0.4.21"
-env_logger = "0.11.2"
+log = "0.4.25"
+env_logger = "0.11.6"
 libc = "0.2.154"
 
 [dev-dependencies]
-rand = "0.8.5"
-serial_test = "3.1.1"
+rand = "0.9.0"
+serial_test = "3.2.0"
 criterion = { version = "0.5", features = ["html_reports"] }
