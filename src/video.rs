@@ -20,10 +20,10 @@ pub struct VideoManager {
     pub bits: usize,
 }
 // Time limit is 8ms for 1080p frame.
-// 8ms / [(1920x1080)/1_000_000] = 3.848 ms per megapixel
-const H264_CONVERT_TIME_LIMIT_PER_MPIX: Duration = Duration::from_micros(3858);
+// 8ms / [(1920x1080)/1_000_000] = 4.823 ms per megapixel
+const H264_CONVERT_TIME_LIMIT_PER_MPIX: Duration = Duration::from_micros(4823);
 // Seems like bitrate does not affect h264 encode time
-const H264_ENCODE_TIME_LIMIT: Duration = Duration::from_millis(8);
+const H264_ENCODE_TIME_LIMIT: Duration = Duration::from_millis(10);
 // Varies by bitrate, but appears to max out at 2.7 ms at maximum bitrate
 const H264_MMAP_TIME_LIMIT: Duration = Duration::from_millis(3);
 impl VideoManager {
