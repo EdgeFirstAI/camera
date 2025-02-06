@@ -11,7 +11,7 @@ use videostream::{
     frame::Frame,
 };
 
-use crate::{H264Bitrate, TARGET_FPS};
+use crate::{args::H264Bitrate, TARGET_FPS};
 
 pub struct VideoManager {
     encoder: Encoder,

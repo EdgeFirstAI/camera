@@ -1,4 +1,8 @@
-use camera::image::{Image, ImageManager, RGBA, encode_jpeg};
+mod args;
+mod video;
+
+use args::{Args, MirrorSetting};
+use camera::image::{encode_jpeg, Image, ImageManager, RGBA};
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
 use edgefirst_schemas::{
@@ -10,11 +14,9 @@ use edgefirst_schemas::{
     std_msgs::{self, Header},
 };
 use log::{error, info, trace, warn};
-use serde_json::json;
 use std::{
     error::Error,
     fs::File,
-    path::PathBuf,
     process,
     sync::mpsc::{self, RecvError},
     thread::{self, sleep},
@@ -23,181 +25,15 @@ use std::{
 use unix_ts::Timestamp;
 use video::VideoManager;
 use videostream::{
-    camera::{CameraBuffer, CameraReader, Mirror, create_camera},
+    camera::{create_camera, CameraBuffer, CameraReader, Mirror},
     fourcc::FourCC,
 };
 use zenoh::{
-    Session,
     bytes::{Encoding, ZBytes},
-    config::{Config, WhatAmI},
     pubsub::Publisher,
     qos::{CongestionControl, Priority},
+    Session,
 };
-
-mod video;
-
-#[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
-enum MirrorSetting {
-    None,
-    Horizontal,
-    Vertical,
-    Both,
-}
-
-#[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
-enum H264Bitrate {
-    Auto,
-    Mbps5,
-    Mbps25,
-    Mbps50,
-    Mbps100,
-}
-#[derive(Parser, Debug, Clone)]
-#[command(author, version, about, long_about = None)]
-struct Args {
-    /// camera capture device
-    #[arg(short, long, env, default_value = "/dev/video3")]
-    camera: String,
-
-    /// camera capture resolution
-    #[arg(
-        long,
-        env,
-        default_value = "1920 1080",
-        value_delimiter = ' ',
-        num_args = 2
-    )]
-    camera_size: Vec<i32>,
-
-    /// camera mirror
-    #[arg(long, env, default_value = "both", value_enum)]
-    mirror: MirrorSetting,
-
-    /// raw dma topic
-    #[arg(long, default_value = "rt/camera/dma")]
-    dma_topic: String,
-
-    /// camera_info topic
-    #[arg(long, default_value = "rt/camera/info")]
-    info_topic: String,
-
-    /// zenoh connection mode
-    #[arg(long, env, default_value = "peer")]
-    mode: WhatAmI,
-
-    /// connect to zenoh endpoints
-    #[arg(long, env)]
-    connect: Vec<String>,
-
-    /// listen to zenoh endpoints
-    #[arg(long, env)]
-    listen: Vec<String>,
-
-    /// disable zenoh multicast scouting
-    #[arg(long, env)]
-    no_multicast_scouting: bool,
-
-    /// stream JPEGs
-    #[arg(long, env)]
-    jpeg: bool,
-
-    /// jpeg ros topic
-    #[arg(long, default_value = "rt/camera/jpeg")]
-    jpeg_topic: String,
-
-    /// stream H264
-    #[arg(long, env)]
-    h264: bool,
-
-    /// h264 foxglove topic
-    #[arg(long, default_value = "rt/camera/h264")]
-    h264_topic: String,
-
-    /// h264 bitrate setting
-    #[arg(long, env, default_value = "auto")]
-    h264_bitrate: H264Bitrate,
-
-    /// streaming resolution
-    #[arg(
-        short,
-        long,
-        env,
-        default_value = "1920 1080",
-        value_delimiter = ' ',
-        num_args = 2
-    )]
-    stream_size: Vec<i32>,
-
-    /// verbose logging
-    #[arg(short, long)]
-    verbose: bool,
-
-    /// isp-imx data location
-    #[arg(
-        long,
-        env,
-        default_value = "/etc/isp/sensor_dwe_os08a20_1080P_config.json"
-    )]
-    cam_info_path: PathBuf,
-
-    /// camera optical frame transform vector from base_link
-    #[arg(
-        long,
-        env,
-        default_value = "0 0 0",
-        value_delimiter = ' ',
-        num_args = 3
-    )]
-    cam_tf_vec: Vec<f64>,
-
-    /// camera optical frame transform quaternion from base_link
-    #[arg(
-        long,
-        env,
-        default_value = "-1 1 -1 1",
-        value_delimiter = ' ',
-        num_args = 4
-    )]
-    cam_tf_quat: Vec<f64>,
-
-    /// The name of the base frame
-    #[arg(long, default_value = "base_link")]
-    base_frame_id: String,
-
-    /// The name of the camera optical frame
-    #[arg(long, default_value = "camera_optical")]
-    camera_frame_id: String,
-}
-
-impl From<Args> for Config {
-    fn from(args: Args) -> Self {
-        let mut config = Config::default();
-
-        config
-            .insert_json5("mode", &json!(args.mode).to_string())
-            .unwrap();
-
-        if !args.connect.is_empty() {
-            config
-                .insert_json5("connect/endpoints", &json!(args.connect).to_string())
-                .unwrap();
-        }
-
-        if !args.listen.is_empty() {
-            config
-                .insert_json5("listen/endpoints", &json!(args.listen).to_string())
-                .unwrap();
-        }
-
-        if args.no_multicast_scouting {
-            config
-                .insert_json5("scouting/multicast/enabled", &json!(false).to_string())
-                .unwrap();
-        }
-
-        config
-    }
-}
 
 // TODO: Add setting target FPS
 const TARGET_FPS: i32 = 30;
@@ -259,11 +95,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // let mut config = Config::default();
     // let mode = WhatAmI::from_str(&args.mode).unwrap();
     // config.set_mode(Some(mode)).unwrap();
-    // config.connect.endpoints = args.endpoints.iter().map(|v| v.parse().unwrap()).collect();
-    // config.listen.endpoints = args.listen.iter().map(|v| v.parse().unwrap()).collect();
-    // let _ = config.scouting.multicast.set_enabled(Some(false));
-    // let _ = config.scouting.gossip.set_enabled(Some(true));
-    // let session = zenoh::open(config.clone()).res_async().await.unwrap();
+    // config.connect.endpoints = args.endpoints.iter().map(|v|
+    // v.parse().unwrap()).collect(); config.listen.endpoints =
+    // args.listen.iter().map(|v| v.parse().unwrap()).collect(); let _ = config.
+    // scouting.multicast.set_enabled(Some(false)); let _ = config.scouting.
+    // gossip.set_enabled(Some(true)); let session =
+    // zenoh::open(config.clone()).res_async().await.unwrap();
 
     info!("opening zenoh session");
     let session = zenoh::open(args.clone()).await.unwrap();
@@ -695,7 +532,9 @@ fn build_dma_msg(buf: &CameraBuffer<'_>, pid: u32, args: &Args) -> Result<DmaBuf
     };
     trace!(
         "dmabuf dma_buf: {} pid: {} length: {}",
-        dma_buf, pid, length,
+        dma_buf,
+        pid,
+        length,
     );
     Ok(msg)
 }
