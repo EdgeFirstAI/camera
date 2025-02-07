@@ -163,5 +163,9 @@ impl From<Args> for Config {
         }
 
         config
+            .insert_json5("scouting/multicast/interface", &json!("lo").to_string())
+            .unwrap();
+
+        config
     }
 }
