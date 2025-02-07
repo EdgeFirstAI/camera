@@ -11,7 +11,6 @@ version = "1.0.1"
 edition = "2021"
 
 [dependencies]
-libc = "0.2.169"
 libloading = "0.8.1"
 dma-buf = "0.4.0"
 nix = { version = "0.29.0", features = ["ioctl"] }

@@ -38,8 +38,6 @@ env_logger = "0.11.6"
 g2d-sys = { version = "1.0.1", path = "g2d-sys" }
 libc = "0.2.154"
 log = "0.4.25"
-serde = "1.0.199"
-serde_derive = "1.0.199"
 serde_json = "1.0.138"
 tokio = { version = "1.43.0", features = ["rt-multi-thread", "time", "io-std"] }
 turbojpeg = { version = "1.2.1", features = ["image", "require-simd"] }

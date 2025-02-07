@@ -19,6 +19,7 @@ pub enum H264Bitrate {
     Mbps50,
     Mbps100,
 }
+
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
@@ -47,22 +48,6 @@ pub struct Args {
     /// camera_info topic
     #[arg(long, default_value = "rt/camera/info")]
     pub info_topic: String,
-
-    /// zenoh connection mode
-    #[arg(long, env, default_value = "peer")]
-    pub mode: WhatAmI,
-
-    /// connect to zenoh endpoints
-    #[arg(long, env)]
-    pub connect: Vec<String>,
-
-    /// listen to zenoh endpoints
-    #[arg(long, env)]
-    pub listen: Vec<String>,
-
-    /// disable zenoh multicast scouting
-    #[arg(long, env)]
-    pub no_multicast_scouting: bool,
 
     /// stream JPEGs
     #[arg(long, env)]
@@ -134,6 +119,22 @@ pub struct Args {
     /// The name of the camera optical frame
     #[arg(long, default_value = "camera_optical")]
     pub camera_frame_id: String,
+
+    /// zenoh connection mode
+    #[arg(long, env, default_value = "peer")]
+    pub mode: WhatAmI,
+
+    /// connect to zenoh endpoints
+    #[arg(long, env)]
+    pub connect: Vec<String>,
+
+    /// listen to zenoh endpoints
+    #[arg(long, env)]
+    pub listen: Vec<String>,
+
+    /// disable zenoh multicast scouting
+    #[arg(long, env)]
+    pub no_multicast_scouting: bool,
 }
 
 impl From<Args> for Config {
