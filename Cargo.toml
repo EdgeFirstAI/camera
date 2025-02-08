@@ -41,6 +41,7 @@ profiling = [
 [dependencies]
 cdr = "0.2.4"
 clap = { version = "4.5.28", features = ["derive", "env"] }
+console-subscriber = "0.4.1"
 dma-buf = "0.4.0"
 dma-heap = "0.4.0"
 edgefirst-schemas = { version = "1.2.4" }

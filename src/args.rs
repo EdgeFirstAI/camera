@@ -123,7 +123,11 @@ pub struct Args {
 
     /// Application log level
     #[arg(long, env, default_value = "info")]
-    pub log_level: LevelFilter,
+    pub rust_log: LevelFilter,
+
+    /// Enable tokio console logging
+    #[arg(long, env)]
+    pub tokio_console: bool,
 
     /// Enable Tracy profiler broadcast
     #[arg(long, env)]

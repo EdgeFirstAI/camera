@@ -14,11 +14,12 @@ use edgefirst_schemas::{
     std_msgs::{self, Header},
 };
 use std::{
+    env,
     error::Error,
     fs::File,
     process,
     sync::mpsc::{self, RecvError},
-    thread::{self, sleep},
+    thread::{self},
     time::{Duration, Instant},
 };
 use tracing::{error, info, info_span, instrument, warn, Instrument};
@@ -63,22 +64,41 @@ fn update_fps(prev: &mut Instant, history: &mut [f64], index: &mut usize) -> f64
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
+    // console_subscriber::init();
     args.tracy.then(tracy_client::Client::start);
 
     let stdout_log = tracing_subscriber::fmt::layer()
         .pretty()
-        .with_filter(args.log_level);
+        .with_filter(args.rust_log);
+
     let journald = match tracing_journald::layer() {
-        Ok(journald) => Some(journald.with_filter(args.log_level)),
+        Ok(journald) => Some(journald.with_filter(args.rust_log)),
         Err(_) => None,
     };
+
+    let (console, console_server) = match args.tokio_console {
+        true => {
+            match env::var("TOKIO_CONSOLE_BIND") {
+                Ok(_) => {}
+                Err(_) => env::set_var("TOKIO_CONSOLE_BIND", "localhost:7000"),
+            };
+            let (console, console_server) = console_subscriber::ConsoleLayer::builder()
+                .with_default_env()
+                .build();
+            (Some(console), Some(console_server))
+        }
+        false => (None, None),
+    };
+
     let tracy = match args.tracy {
-        true => Some(tracing_tracy::TracyLayer::default().with_filter(args.log_level)),
+        true => Some(tracing_tracy::TracyLayer::default().with_filter(args.rust_log)),
         false => None,
     };
+
     let subscriber = Registry::default()
         .with(stdout_log)
         .with(journald)
+        .with(console)
         .with(tracy);
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
     tracing_log::LogTracer::init()?;
@@ -118,7 +138,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let session = zenoh::open(args.clone()).await.unwrap();
-    stream(cam, session, args).await
+    let stream_task = stream(cam, session, args);
+
+    if let Some(console_server) = console_server {
+        let console_task = console_server.serve();
+        let (console_task, stream_task) = tokio::join!(console_task, stream_task);
+        console_task.unwrap();
+        stream_task.unwrap();
+    } else {
+        stream_task.await.unwrap();
+    }
+
+    Ok(())
 }
 
 async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), Box<dyn Error>> {
@@ -197,16 +228,13 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     }
 
     let tf_session = session.clone();
-    let tf_args = args.clone();
-    thread::Builder::new()
-        .name("tf_static".to_string())
-        .spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(tf_task(tf_session, tf_args));
-        })?;
+    let tf_msg = build_tf_msg(&args);
+    let tf_msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&tf_msg, Infinite).unwrap());
+    let tf_enc = Encoding::APPLICATION_CDR.with_schema("geometry_msgs/msg/TransformStamped");
+    let tf_task = tokio::task::Builder::new()
+        .name("tf_static")
+        .spawn(async move { tf_static(tf_session, tf_msg, tf_enc).await })?;
+    std::mem::drop(tf_task);
 
     // TODO: Decide if the H264 encode/decode should also live in a thread
     let info_msg = build_info_msg(&args);
@@ -289,38 +317,20 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     }
 }
 
-async fn tf_task(session: Session, args: Args) {
-    let publ_tf = match session
-        .declare_publisher("rt/tf_static".to_string())
-        .priority(Priority::Background)
-        .congestion_control(CongestionControl::Drop)
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            error!(
-                "Error while declaring tf_static publisher rt/tf_static: {:?}",
-                e
-            );
-            return;
-        }
-    };
-
-    let tf_msg = build_tf_msg(&args);
-    let tf_msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&tf_msg, Infinite).unwrap());
-
-    let interval = Duration::from_secs(1);
-    let mut target_time = Instant::now() + interval;
-    let encoding = Encoding::APPLICATION_CDR.with_schema("geometry_msgs/msg/TransformStamped");
+async fn tf_static(
+    session: Session,
+    msg: ZBytes,
+    enc: Encoding,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let topic = "rt/tf_static".to_string();
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
 
     loop {
-        publ_tf
-            .put(tf_msg.clone())
-            .encoding(encoding.clone())
-            .await
-            .unwrap();
-        sleep(target_time.duration_since(Instant::now()));
-        target_time += interval
+        interval.tick().await;
+        session
+            .put(&topic, msg.clone())
+            .encoding(enc.clone())
+            .await?;
     }
 }
 
