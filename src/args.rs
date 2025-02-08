@@ -1,6 +1,7 @@
 use clap::Parser;
 use serde_json::json;
 use std::path::PathBuf;
+use tracing::level_filters::LevelFilter;
 use zenoh::config::{Config, WhatAmI};
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
@@ -120,21 +121,29 @@ pub struct Args {
     #[arg(long, default_value = "camera_optical")]
     pub camera_frame_id: String,
 
+    /// Application log level
+    #[arg(long, env, default_value = "info")]
+    pub log_level: LevelFilter,
+
+    /// Enable Tracy profiler broadcast
+    #[arg(long, env)]
+    pub tracy: bool,
+
     /// zenoh connection mode
     #[arg(long, env, default_value = "peer")]
-    pub mode: WhatAmI,
+    mode: WhatAmI,
 
     /// connect to zenoh endpoints
     #[arg(long, env)]
-    pub connect: Vec<String>,
+    connect: Vec<String>,
 
     /// listen to zenoh endpoints
     #[arg(long, env)]
-    pub listen: Vec<String>,
+    listen: Vec<String>,
 
     /// disable zenoh multicast scouting
     #[arg(long, env)]
-    pub no_multicast_scouting: bool,
+    no_multicast_scouting: bool,
 }
 
 impl From<Args> for Config {
