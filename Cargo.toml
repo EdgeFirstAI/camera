@@ -46,6 +46,7 @@ dma-buf = "0.4.0"
 dma-heap = "0.4.0"
 edgefirst-schemas = { version = "1.2.4" }
 g2d-sys = { version = "1.0.1", path = "g2d-sys" }
+kanal = { git = "https://github.com/fereidani/kanal", rev = "b6aeab2" }
 libc = "0.2.154"
 serde_json = "1.0.138"
 tokio = { version = "1.43.0", features = [
