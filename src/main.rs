@@ -63,7 +63,6 @@ fn update_fps(prev: &mut Instant, history: &mut [f64], index: &mut usize) -> f64
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
-    // console_subscriber::init();
     args.tracy.then(tracy_client::Client::start);
 
     let stdout_log = tracing_subscriber::fmt::layer()
