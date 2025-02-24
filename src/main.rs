@@ -389,16 +389,9 @@ fn build_jpeg_msg(
 
     let jpeg = info_span!("jpeg_encode").in_scope(|| {
         let dma = img.dmabuf();
-        Ok(match dma.memory_map() {
-            Ok(mem) => match mem.read(encode_jpeg, Some(img)) {
-                Ok(v) => Ok(v),
-                Err(e) => {
-                    return Err(e);
-                }
-            },
-            Err(e) => Err(e),
-        })
-    })??;
+        let buf = dma.memory_map()?.read(encode_jpeg, Some(img))?;
+        Ok::<_, Box<dyn Error>>(buf)
+    })?;
 
     args.tracy
         .then(|| plot!("jpeg_kb", (jpeg.len() / 1024) as f64));
