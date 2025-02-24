@@ -1,3 +1,7 @@
-.vscode
 /target
+/.debug
+.vscode
 *.bb
+kallsyms
+perf.data*
+uftrace.*

@@ -196,15 +196,12 @@ impl TryFrom<&Image> for Frame {
     type Error = Box<dyn Error>;
 
     fn try_from(img: &Image) -> Result<Self, Self::Error> {
-        let frame = match Frame::new(
+        let frame = Frame::new(
             img.width().try_into().unwrap(),
             img.height().try_into().unwrap(),
             0,
             img.format().to_string().as_str(),
-        ) {
-            Ok(f) => f,
-            Err(e) => return Err(e),
-        };
+        )?;
         match frame.attach(img.fd().as_raw_fd(), 0, 0) {
             Ok(_) => (),
             Err(e) => return Err(e),

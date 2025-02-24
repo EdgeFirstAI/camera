@@ -1,3 +1,7 @@
+mod args;
+mod video;
+
+use args::{Args, MirrorSetting};
 use camera::image::{encode_jpeg, Image, ImageManager, RGBA};
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
@@ -9,17 +13,18 @@ use edgefirst_schemas::{
     sensor_msgs::{CameraInfo, CompressedImage, RegionOfInterest},
     std_msgs::{self, Header},
 };
-use log::{error, info, trace, warn};
+use kanal::Receiver;
 use std::{
+    env,
     error::Error,
     fs::File,
-    path::PathBuf,
     process,
-    str::FromStr,
-    sync::mpsc::{self, RecvError},
-    thread::{self, sleep},
+    thread::{self},
     time::{Duration, Instant},
 };
+use tracing::{error, info, info_span, instrument, warn, Instrument};
+use tracing_subscriber::{layer::SubscriberExt as _, Layer as _, Registry};
+use tracy_client::{frame_mark, plot, secondary_frame_mark};
 use unix_ts::Timestamp;
 use video::VideoManager;
 use videostream::{
@@ -27,141 +32,15 @@ use videostream::{
     fourcc::FourCC,
 };
 use zenoh::{
-    config::Config,
-    prelude::{r#async::*, sync::SyncResolve},
-    publication::Publisher,
+    bytes::{Encoding, ZBytes},
+    qos::{CongestionControl, Priority},
+    Session,
 };
 
-mod video;
-
-#[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
-enum MirrorSetting {
-    None,
-    Horizontal,
-    Vertical,
-    Both,
-}
-
-#[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
-enum H264Bitrate {
-    Auto,
-    Mbps5,
-    Mbps25,
-    Mbps50,
-    Mbps100,
-}
-#[derive(Parser, Debug, Clone)]
-#[command(author, version, about, long_about = None)]
-struct Args {
-    /// camera capture device
-    #[arg(short, long, env, default_value = "/dev/video3")]
-    camera: String,
-
-    /// camera capture resolution
-    #[arg(
-        long,
-        env,
-        default_value = "1920 1080",
-        value_delimiter = ' ',
-        num_args = 2
-    )]
-    camera_size: Vec<i32>,
-
-    /// camera mirror
-    #[arg(long, env, default_value = "both", value_enum)]
-    mirror: MirrorSetting,
-
-    /// raw dma topic
-    #[arg(long, default_value = "rt/camera/dma")]
-    dma_topic: String,
-
-    /// camera_info topic
-    #[arg(long, default_value = "rt/camera/info")]
-    info_topic: String,
-
-    /// zenoh connection mode
-    #[arg(short, long, default_value = "client")]
-    mode: String,
-
-    /// connect to endpoint
-    #[arg(short, long, default_value = "tcp/127.0.0.1:7447")]
-    endpoints: Vec<String>,
-
-    /// listen to zenoh endpoints
-    #[arg(long)]
-    listen: Vec<String>,
-
-    /// stream JPEGs
-    #[arg(long, env)]
-    jpeg: bool,
-
-    /// jpeg ros topic
-    #[arg(long, default_value = "rt/camera/jpeg")]
-    jpeg_topic: String,
-
-    /// stream H264
-    #[arg(long, env)]
-    h264: bool,
-
-    /// h264 foxglove topic
-    #[arg(long, default_value = "rt/camera/h264")]
-    h264_topic: String,
-
-    /// h264 bitrate setting
-    #[arg(long, env, default_value = "auto")]
-    h264_bitrate: H264Bitrate,
-
-    /// streaming resolution
-    #[arg(
-        short,
-        long,
-        env,
-        default_value = "1920 1080",
-        value_delimiter = ' ',
-        num_args = 2
-    )]
-    stream_size: Vec<i32>,
-
-    /// verbose logging
-    #[arg(short, long)]
-    verbose: bool,
-
-    /// isp-imx data location
-    #[arg(
-        long,
-        env,
-        default_value = "/etc/isp/sensor_dwe_os08a20_1080P_config.json"
-    )]
-    cam_info_path: PathBuf,
-
-    /// camera optical frame transform vector from base_link
-    #[arg(
-        long,
-        env,
-        default_value = "0 0 0",
-        value_delimiter = ' ',
-        num_args = 3
-    )]
-    cam_tf_vec: Vec<f64>,
-
-    /// camera optical frame transform quaternion from base_link
-    #[arg(
-        long,
-        env,
-        default_value = "-1 1 -1 1",
-        value_delimiter = ' ',
-        num_args = 4
-    )]
-    cam_tf_quat: Vec<f64>,
-
-    /// The name of the base frame
-    #[arg(long, default_value = "base_link")]
-    base_frame_id: String,
-
-    /// The name of the camera optical frame
-    #[arg(long, default_value = "camera_optical")]
-    camera_frame_id: String,
-}
+#[cfg(feature = "profiling")]
+#[global_allocator]
+static GLOBAL: tracy_client::ProfiledAllocator<std::alloc::System> =
+    tracy_client::ProfiledAllocator::new(std::alloc::System, 100);
 
 // TODO: Add setting target FPS
 const TARGET_FPS: i32 = 30;
@@ -172,16 +51,55 @@ fn update_fps(prev: &mut Instant, history: &mut [f64], index: &mut usize) -> f64
     let elapsed = now.duration_since(*prev);
     *prev = now;
 
-    history[*index] = 1e9_f64 / elapsed.as_nanos() as f64;
+    history[*index] = elapsed.as_nanos() as f64;
     *index = (*index + 1) % history.len();
 
-    history.iter().sum::<f64>() / history.len() as f64
+    let avg = history.iter().sum::<f64>() / history.len() as f64;
+
+    1e9 / avg
 }
 
-#[async_std::main]
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    env_logger::init();
     let args = Args::parse();
+
+    args.tracy.then(tracy_client::Client::start);
+
+    let stdout_log = tracing_subscriber::fmt::layer()
+        .pretty()
+        .with_filter(args.rust_log);
+
+    let journald = match tracing_journald::layer() {
+        Ok(journald) => Some(journald.with_filter(args.rust_log)),
+        Err(_) => None,
+    };
+
+    let (console, console_server) = match args.tokio_console {
+        true => {
+            match env::var("TOKIO_CONSOLE_BIND") {
+                Ok(_) => {}
+                Err(_) => env::set_var("TOKIO_CONSOLE_BIND", "localhost:7000"),
+            };
+            let (console, console_server) = console_subscriber::ConsoleLayer::builder()
+                .with_default_env()
+                .build();
+            (Some(console), Some(console_server))
+        }
+        false => (None, None),
+    };
+
+    let tracy = match args.tracy {
+        true => Some(tracing_tracy::TracyLayer::default().with_filter(args.rust_log)),
+        false => None,
+    };
+
+    let subscriber = Registry::default()
+        .with(stdout_log)
+        .with(journald)
+        .with(console)
+        .with(tracy);
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    tracing_log::LogTracer::init()?;
 
     let mirror = match args.mirror {
         MirrorSetting::None => Mirror::None,
@@ -206,6 +124,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             cam.height()
         );
     }
+
     info!(
         "Opened camera: {} resolution: {}x{} stream: {}x{} mirror: {}",
         args.camera,
@@ -216,45 +135,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
         mirror
     );
 
-    let mut config = Config::default();
-    let mode = WhatAmI::from_str(&args.mode).unwrap();
-    config.set_mode(Some(mode)).unwrap();
-    config.connect.endpoints = args.endpoints.iter().map(|v| v.parse().unwrap()).collect();
-    config.listen.endpoints = args.listen.iter().map(|v| v.parse().unwrap()).collect();
-    let _ = config.scouting.multicast.set_enabled(Some(false));
-    let _ = config.scouting.gossip.set_enabled(Some(true));
-    let session = zenoh::open(config.clone()).res_async().await.unwrap();
-    info!("Opened Zenoh session");
-    stream(cam, session, args).await
-}
-const CAPTURE_TIME_LIMIT: Duration = Duration::from_millis(33);
-const DMA_MSG_TIME_LIMIT: Duration = Duration::from_millis(1);
-const DMA_ZENOH_TIME_LIMIT: Duration = Duration::from_millis(1);
-const H264_ZENOH_TIME_LIMIT: Duration = Duration::from_millis(4);
-async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), Box<dyn Error>> {
-    let session = session.into_arc();
-    let publ_dma = match session
-        .declare_publisher(args.dma_topic.clone())
-        .priority(Priority::RealTime)
-        .congestion_control(CongestionControl::Drop)
-        .res_async()
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            error!(
-                "Error while declaring DMA publisher {}: {:?}",
-                args.dma_topic, e
-            );
-            return Err(e);
-        }
-    };
+    let session = zenoh::open(args.clone()).await.unwrap();
+    let stream_task = stream(cam, session, args);
 
+    if let Some(console_server) = console_server {
+        let console_task = console_server.serve();
+        let (console_task, stream_task) = tokio::join!(console_task, stream_task);
+        console_task.unwrap();
+        stream_task.unwrap();
+    } else {
+        stream_task.await.unwrap();
+    }
+
+    Ok(())
+}
+
+async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), Box<dyn Error>> {
     let publ_info = match session
         .declare_publisher(args.info_topic.clone())
         .priority(Priority::Background)
         .congestion_control(CongestionControl::Drop)
-        .res_async()
         .await
     {
         Ok(v) => v,
@@ -267,231 +167,98 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         }
     };
 
-    let publ_h264: Option<Publisher<'_>>;
-
-    let imgmgr = ImageManager::new()?;
-    let mut img_h264 = None;
-    let mut vidmgr = None;
-
+    let (h264_tx, rx) = kanal::bounded(1);
     if args.h264 {
-        publ_h264 = match session
-            .declare_publisher(args.h264_topic.clone())
-            .priority(Priority::Data)
-            .congestion_control(CongestionControl::Block)
-            .res_async()
-            .await
-        {
-            Ok(v) => Some(v),
-            Err(e) => {
-                error!(
-                    "Error while declaring H264 publisher {}: {:?}",
-                    args.h264_topic, e
-                );
-                return Err(e);
-            }
-        };
-        img_h264 = Some(Image::new(args.stream_size[0], args.stream_size[1], RGBA)?);
-
-        vidmgr = match VideoManager::new(
-            FourCC(*b"H264"),
-            args.stream_size[0],
-            args.stream_size[1],
-            args.h264_bitrate,
-        ) {
-            Ok(v) => Some(v),
-            Err(e) => {
-                error!("Could not create Video Manager for H264 encoding: {:?}", e);
-                return Err(e);
-            }
-        }
-    } else {
-        publ_h264 = None;
-    }
-    let (tx, rx) = mpsc::channel();
-    if args.jpeg {
-        // JPEG encoding will live in a thread since it's possible to for it to be
-        // significantly slower than the camera's frame rate
+        let session = session.clone();
         let args = args.clone();
-        let publ_jpeg = match session
-            .declare_publisher(args.jpeg_topic.clone())
-            .priority(Priority::Data)
-            .congestion_control(CongestionControl::Block)
-            .res_async()
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                error!(
-                    "Error while declaring JPEG publisher {}: {:?}",
-                    args.jpeg_topic, e
-                );
-                return Err(e);
-            }
-        };
-        let jpeg_func = move || {
-            let imgmgr = ImageManager::new().unwrap();
-            let img_jpeg = Image::new(args.stream_size[0], args.stream_size[1], RGBA).unwrap();
-            let mut log_warning = true;
-            loop {
-                while rx.try_recv().is_ok() {}
-                let (msg, ts) = match rx.recv() {
-                    Ok(v) => v,
-                    Err(RecvError) => {
-                        // main thread exited
-                        return;
-                    }
-                };
-                let now = Instant::now();
-                let msg = build_jpeg_msg(&msg, &ts, &imgmgr, &img_jpeg, &args);
-                match msg {
-                    Ok(m) => {
-                        let encoded =
-                            Value::from(cdr::serialize::<_, _, CdrLe>(&m, Infinite).unwrap())
-                                .encoding(Encoding::WithSuffix(
-                                    KnownEncoding::AppOctetStream,
-                                    "sensor_msgs/msg/CompressedImage".into(),
-                                ));
-                        trace!("Encoded JPEG message to CDR");
-                        publ_jpeg.put(encoded).res_sync().unwrap();
-                        let elapsed = now.elapsed();
-                        if elapsed > Duration::from_secs_f64(1.0 / TARGET_FPS as f64) && log_warning
-                        {
-                            warn!(
-                                "Encode and Send to JPEG topic {:?} {:?} is slow. This will cause JPEG framerate to drop below target {} FPS",
-                                publ_jpeg.key_expr(),
-                                elapsed,
-                                TARGET_FPS
-                            );
-                            log_warning = false;
-                        } else {
-                            trace!(
-                                "Encode and Send to JPEG topic {:?} {:?}",
-                                publ_jpeg.key_expr(),
-                                elapsed
-                            );
-                        }
-                    }
-                    Err(e) => error!("Error when building JPEG message {e:?}"),
-                }
-            }
-        };
-        thread::spawn(jpeg_func);
+        thread::Builder::new()
+            .name("h264".to_string())
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(h264_task(session, args, rx));
+            })?;
     }
-    // TODO: Decide if the H264 encode/decode should also live in a thread
-    let info_msg = build_info_msg(&args);
-    let info_msg = match info_msg {
-        Ok(m) => Some(
-            Value::from(cdr::serialize::<_, _, CdrLe>(&m, Infinite)?).encoding(
-                Encoding::WithSuffix(
-                    KnownEncoding::AppOctetStream,
-                    "sensor_msgs/msg/CameraInfo".into(),
-                ),
-            ),
-        ),
-        Err(e) => {
-            error!("Error when building camera info message: {e:?}");
-            None
-        }
-    };
 
-    let publ_tf = match session
-        .declare_publisher("rt/tf_static".to_string())
-        .priority(Priority::Background)
-        .congestion_control(CongestionControl::Drop)
-        .res_async()
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            error!(
-                "Error while declaring tf_static publisher rt/tf_static: {:?}",
-                e
-            );
-            return Err(e);
-        }
-    };
+    let (jpeg_tx, rx) = kanal::bounded(1);
+    if args.jpeg {
+        let session = session.clone();
+        let args = args.clone();
+        thread::Builder::new()
+            .name("jpeg".to_string())
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(jpeg_task(session, args, rx));
+            })?;
+    }
 
+    let tf_session = session.clone();
     let tf_msg = build_tf_msg(&args);
-    let tf_msg = Value::from(cdr::serialize::<_, _, CdrLe>(&tf_msg, Infinite)?).encoding(
-        Encoding::WithSuffix(
-            KnownEncoding::AppOctetStream,
-            "geometry_msgs/msg/TransformStamped".into(),
-        ),
-    );
-    thread::spawn(move || {
-        let interval = Duration::from_secs(1);
-        let mut target_time = Instant::now() + interval;
-        loop {
-            publ_tf.put(tf_msg.clone()).res_sync().unwrap();
-            trace!("Send to tf topic rt/tf_static");
-            sleep(target_time.duration_since(Instant::now()));
-            target_time += interval
-        }
-    });
+    let tf_msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&tf_msg, Infinite).unwrap());
+    let tf_enc = Encoding::APPLICATION_CDR.with_schema("geometry_msgs/msg/TransformStamped");
+    let tf_task = tokio::task::Builder::new()
+        .name("tf_static")
+        .spawn(async move { tf_static(tf_session, tf_msg, tf_enc).await })?;
+    std::mem::drop(tf_task);
+
+    let info_msg = build_info_msg(&args)?;
+    let info_msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&info_msg, Infinite)?);
+    let info_enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/CameraInfo");
+
     let src_pid = process::id();
 
     let mut prev = Instant::now();
-    let mut history = vec![0.0; 30];
+    let mut history = vec![0.0; 60];
     let mut index = 0;
 
     loop {
+        let camera_buffer = info_span!("camera_read").in_scope(|| cam.read())?;
+
         let fps = update_fps(&mut prev, &mut history, &mut index);
-        if fps < TARGET_FPS as f64 * 0.99 {
-            warn!("camera FPS is {}", fps);
+        if fps < TARGET_FPS as f64 * 0.9 {
+            warn!("low camera fps {} (target {})", fps, TARGET_FPS);
         }
-        let now = Instant::now();
-        let buf = cam.read()?;
-        let capture_time = now.elapsed();
-        let now = Instant::now();
-        trace!("camera capture: {:?} fps: {}", capture_time, fps);
-        if capture_time > CAPTURE_TIME_LIMIT {
-            warn!(
-                "camera capture: {:?} exceeds {:?}",
-                capture_time, CAPTURE_TIME_LIMIT
-            );
-        } else {
-            trace!("camera capture: {:?}", capture_time);
+        args.tracy.then(|| plot!("fps", fps));
+
+        let (msg, enc) =
+            camera_dma_serialize(&camera_buffer, src_pid, args.camera_frame_id.clone())?;
+        let span = info_span!("camera_publish");
+        let local_session = session.clone();
+        let dma_topic = args.dma_topic.clone();
+        let dma_task = async move {
+            local_session
+                .put(dma_topic, msg)
+                .encoding(enc)
+                .priority(Priority::Data)
+                .congestion_control(CongestionControl::Drop)
+                .await
+                .unwrap();
         }
-        let dma_msg = build_dma_msg(&buf, src_pid, &args);
-        match dma_msg {
-            Ok(m) => {
-                let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&m, Infinite)?).encoding(
-                    Encoding::WithSuffix(
-                        KnownEncoding::AppOctetStream,
-                        "edgefirst_msgs/msg/DmaBuffer".into(),
-                    ),
-                );
-                trace!("Encoded DMA message to CDR");
-                publ_dma.put(encoded).res_async().await.unwrap();
-                trace!("Send to DMA topic {:?}", args.dma_topic);
+        .instrument(span);
+        let info_task = publ_info.put(info_msg.clone()).encoding(info_enc.clone());
+
+        if args.h264 {
+            let ts = camera_buffer.timestamp();
+            let src_img = Image::from_camera(&camera_buffer)?;
+
+            match h264_tx.try_send((src_img, ts)) {
+                Ok(_) => {}
+                Err(e) => {
+                    error!("H264 thread messaging error: {:?}", e);
+                }
             }
-            Err(e) => error!("Error when building DMA message: {e:?}"),
-        }
-        let dma_msg_time = now.elapsed();
-        let now = Instant::now();
-        if dma_msg_time > DMA_MSG_TIME_LIMIT {
-            warn!(
-                "dma msg time: {:?} exceeds {:?}",
-                dma_msg_time, DMA_MSG_TIME_LIMIT
-            );
-        } else {
-            trace!("dma msg time: {:?}", dma_msg_time);
         }
 
-        let dma_zenoh_time = now.elapsed();
-        // let now = Instant::now();
-        if dma_zenoh_time > DMA_ZENOH_TIME_LIMIT {
-            warn!(
-                "dma zenoh time: {:?} exceeds {:?}",
-                dma_zenoh_time, DMA_ZENOH_TIME_LIMIT
-            );
-        } else {
-            trace!("dma zenoh time: {:?}", dma_zenoh_time)
-        }
         if args.jpeg {
-            let ts = buf.timestamp();
-            let src_img = Image::from_camera(&buf)?;
-            match tx.send((src_img, ts)) {
+            let ts = camera_buffer.timestamp();
+            let src_img = Image::from_camera(&camera_buffer)?;
+
+            match jpeg_tx.try_send((src_img, ts)) {
                 Ok(_) => {}
                 Err(e) => {
                     error!("JPEG thread messaging error: {:?}", e);
@@ -499,42 +266,115 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             }
         }
 
-        if args.h264 {
-            trace!("Start h264");
-            let vid = vidmgr.as_mut().unwrap();
-            let img = img_h264.as_ref().unwrap();
-            let ts = buf.timestamp();
-            let src_img = Image::from_camera(&buf)?;
-            let msg = build_video_msg(&src_img, &ts, vid, &imgmgr, img, &args);
-            let now = Instant::now();
-            match msg {
-                Ok(m) => {
-                    let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&m, Infinite)?)
-                        .encoding(Encoding::WithSuffix(
-                            KnownEncoding::AppOctetStream,
-                            "foxglove_msgs/msg/CompressedVideo".into(),
-                        ));
-                    if let Some(publ) = publ_h264.as_ref() {
-                        publ.put(encoded).res_async().await.unwrap();
-                    }
-                    trace!("Send to H264 topic {:?}", args.h264_topic);
-                }
-                Err(e) => error!("Error when building video message: {e:?}"),
-            }
-            let h264_zenoh_time = now.elapsed();
-            if h264_zenoh_time > H264_ZENOH_TIME_LIMIT {
-                warn!(
-                    "h264 zenoh time: {:?} exceeds {:?}",
-                    h264_zenoh_time, H264_ZENOH_TIME_LIMIT
-                );
-            } else {
-                trace!("h264 zenoh time: {:?}", h264_zenoh_time)
-            }
+        let (_dma_task, info_task) = tokio::join!(dma_task, info_task);
+        info_task.unwrap();
+
+        args.tracy.then(frame_mark);
+    }
+}
+
+async fn tf_static(
+    session: Session,
+    msg: ZBytes,
+    enc: Encoding,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let topic = "rt/tf_static".to_string();
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+
+    loop {
+        interval.tick().await;
+        session
+            .put(&topic, msg.clone())
+            .encoding(enc.clone())
+            .await?;
+    }
+}
+
+async fn h264_task(session: Session, args: Args, rx: Receiver<(Image, Timestamp)>) {
+    let publisher = match session
+        .declare_publisher(args.h264_topic.clone())
+        .priority(Priority::Data)
+        .congestion_control(CongestionControl::Drop)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+                "Error while declaring H264 publisher {}: {:?}",
+                args.h264_topic, e
+            );
+            return;
         }
-        if let Some(ref msg) = info_msg {
-            publ_info.put(msg.clone()).res_async().await.unwrap();
-            trace!("Send to info topic {:?}", args.info_topic);
+    };
+
+    let imgmgr = ImageManager::new().unwrap();
+    let img_h264 = Image::new(args.stream_size[0], args.stream_size[1], RGBA).unwrap();
+    let mut vidmgr = VideoManager::new(
+        FourCC(*b"H264"),
+        args.stream_size[0],
+        args.stream_size[1],
+        args.h264_bitrate,
+    )
+    .unwrap();
+
+    loop {
+        let (msg, ts) = match rx.recv() {
+            Ok(v) => v,
+            Err(_) => {
+                // main thread exited
+                return;
+            }
+        };
+
+        let span = info_span!("h264");
+        async {
+            let (msg, enc) =
+                build_video_msg(&msg, &ts, &mut vidmgr, &imgmgr, &img_h264, &args).unwrap();
+            publisher.put(msg).encoding(enc).await.unwrap();
         }
+        .instrument(span)
+        .await;
+        args.tracy.then(|| secondary_frame_mark!("h264"));
+    }
+}
+
+async fn jpeg_task(session: Session, args: Args, rx: Receiver<(Image, Timestamp)>) {
+    let publisher = match session
+        .declare_publisher(args.jpeg_topic.clone())
+        .priority(Priority::Data)
+        .congestion_control(CongestionControl::Drop)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+                "Error while declaring JPEG publisher {}: {:?}",
+                args.jpeg_topic, e
+            );
+            return;
+        }
+    };
+
+    let imgmgr = ImageManager::new().unwrap();
+    let img_jpeg = Image::new(args.stream_size[0], args.stream_size[1], RGBA).unwrap();
+
+    loop {
+        let (msg, ts) = match rx.recv() {
+            Ok(v) => v,
+            Err(_) => {
+                // main thread exited
+                return;
+            }
+        };
+
+        let span = info_span!("jpeg");
+        async {
+            let (msg, enc) = build_jpeg_msg(&msg, &ts, &imgmgr, &img_jpeg, &args).unwrap();
+            publisher.put(msg).encoding(enc).await.unwrap();
+        }
+        .instrument(span)
+        .await;
+        args.tracy.then(|| secondary_frame_mark!("jpeg"));
     }
 }
 
@@ -544,41 +384,36 @@ fn build_jpeg_msg(
     imgmgr: &ImageManager,
     img: &Image,
     args: &Args,
-) -> Result<CompressedImage, Box<dyn Error>> {
-    let now = Instant::now();
-    imgmgr.convert(buf, img, None)?;
-    let convert_time = now.elapsed();
+) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
+    info_span!("jpeg_convert").in_scope(|| imgmgr.convert(buf, img, None))?;
 
-    let now = Instant::now();
-    let dma = img.dmabuf();
-    let mem = dma.memory_map()?;
-    let jpeg = mem.read(encode_jpeg, Some(img))?;
-    let encode_time = now.elapsed();
+    let jpeg = info_span!("jpeg_encode").in_scope(|| {
+        let dma = img.dmabuf();
+        let buf = dma.memory_map()?.read(encode_jpeg, Some(img))?;
+        Ok::<_, Box<dyn Error>>(buf)
+    })?;
 
-    trace!(
-        "camera {}x{} image {}x{} size: {}KB jpeg: {}KB convert: {:?} encode: {:?}",
-        buf.width(),
-        buf.height(),
-        img.width(),
-        img.height(),
-        img.width() * img.height() * 4 / 1024,
-        jpeg.len() / 1024,
-        convert_time,
-        encode_time,
-    );
+    args.tracy
+        .then(|| plot!("jpeg_kb", (jpeg.len() / 1024) as f64));
 
-    let msg = CompressedImage {
-        header: std_msgs::Header {
-            stamp: builtin_interfaces::Time {
-                sec: ts.seconds() as i32,
-                nanosec: ts.subsec(9),
+    info_span!("jpeg_publish").in_scope(|| {
+        let msg = CompressedImage {
+            header: std_msgs::Header {
+                stamp: builtin_interfaces::Time {
+                    sec: ts.seconds() as i32,
+                    nanosec: ts.subsec(9),
+                },
+                frame_id: args.camera_frame_id.clone(),
             },
-            frame_id: args.camera_frame_id.clone(),
-        },
-        format: "jpeg".to_string(),
-        data: jpeg.to_vec(),
-    };
-    Ok(msg)
+            format: "jpeg".to_string(),
+            data: jpeg.to_vec(),
+        };
+
+        let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
+        let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/CompressedImage");
+
+        Ok((msg, enc))
+    })
 }
 
 fn build_video_msg(
@@ -588,67 +423,62 @@ fn build_video_msg(
     imgmgr: &ImageManager,
     img: &Image,
     args: &Args,
-) -> Result<FoxgloveCompressedVideo, Box<dyn Error>> {
-    let now = Instant::now();
-    let data = match vid.resize_and_encode(buf, imgmgr, img) {
-        Ok(d) => d.0,
-        Err(e) => {
-            return Err(e);
-        }
-    };
-    let encode_time = now.elapsed();
-    trace!(
-        "video h.264 {}x{} size: {}KB video_frame: {}KB encode: {:?} ",
-        buf.width(),
-        buf.height(),
-        buf.width() * buf.height() * 4 / 1024,
-        data.len() / 1024,
-        encode_time,
-    );
-
-    let msg = FoxgloveCompressedVideo {
-        header: std_msgs::Header {
-            stamp: builtin_interfaces::Time {
-                sec: ts.seconds() as i32,
-                nanosec: ts.subsec(9),
+) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
+    let data = vid.resize_and_encode(buf, imgmgr, img)?.0;
+    info_span!("h264_publish").in_scope(|| {
+        let msg = FoxgloveCompressedVideo {
+            header: std_msgs::Header {
+                stamp: builtin_interfaces::Time {
+                    sec: ts.seconds() as i32,
+                    nanosec: ts.subsec(9),
+                },
+                frame_id: args.camera_frame_id.clone(),
             },
-            frame_id: args.camera_frame_id.to_string(),
-        },
-        format: "h264".to_string(),
-        data,
-    };
-    Ok(msg)
+            format: "h264".to_string(),
+            data,
+        };
+
+        let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
+        let enc = Encoding::APPLICATION_CDR.with_schema("foxglove_msgs/msg/CompressedVideo");
+
+        Ok((msg, enc))
+    })
 }
 
-fn build_dma_msg(buf: &CameraBuffer<'_>, pid: u32, args: &Args) -> Result<DmaBuf, Box<dyn Error>> {
+#[instrument(skip_all, fields(width = buf.width(), height = buf.height(), format = buf.format().to_string()))]
+fn camera_dma_serialize(
+    buf: &CameraBuffer<'_>,
+    pid: u32,
+    frame_id: String,
+) -> Result<(ZBytes, Encoding), cdr::Error> {
     let ts = buf.timestamp();
     let width = buf.width() as u32;
     let height = buf.height() as u32;
     let fourcc = buf.format().into();
     let dma_buf = buf.rawfd();
-    // let dma_buf = buf.original_fd;
     let length = buf.length() as u32;
+
     let msg = DmaBuf {
         header: std_msgs::Header {
             stamp: builtin_interfaces::Time {
                 sec: ts.seconds() as i32,
                 nanosec: ts.subsec(9),
             },
-            frame_id: args.camera_frame_id.to_string(),
+            frame_id,
         },
         pid,
         fd: dma_buf,
         width,
         height,
-        stride: width,
+        stride: width, // FIXME: stride is not always equal to width!
         fourcc,
         length,
     };
-    trace!(
-        "dmabuf dma_buf: {} pid: {} length: {}",
-        dma_buf, pid, length,
-    );
-    Ok(msg)
+
+    let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite)?);
+    let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/DmaBuffer");
+
+    Ok((msg, enc))
 }
 
 fn build_info_msg(args: &Args) -> Result<CameraInfo, Box<dyn Error>> {
