@@ -308,6 +308,8 @@ async fn h264_task(session: Session, args: Args, rx: Receiver<(Image, Timestamp)
     };
 
     let imgmgr = ImageManager::new().unwrap();
+    info!("Opened G2D with version {}", imgmgr.version());
+
     let img_h264 = Image::new(args.stream_size[0], args.stream_size[1], RGBA).unwrap();
     let mut vidmgr = VideoManager::new(
         FourCC(*b"H264"),
