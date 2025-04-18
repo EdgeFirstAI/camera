@@ -22,8 +22,8 @@ use std::{
     thread::{self},
     time::{Duration, Instant},
 };
-use tracing::{error, info, info_span, instrument, warn, Instrument};
-use tracing_subscriber::{layer::SubscriberExt as _, Layer as _, Registry};
+use tracing::{error, info, info_span, instrument, level_filters::LevelFilter, warn, Instrument};
+use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter, Layer as _, Registry};
 use tracy_client::{frame_mark, plot, secondary_frame_mark};
 use unix_ts::Timestamp;
 use video::VideoManager;
@@ -59,6 +59,12 @@ fn update_fps(prev: &mut Instant, history: &mut [f64], index: &mut usize) -> f64
     1e9 / avg
 }
 
+fn get_env_filter() -> EnvFilter {
+    tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
@@ -67,10 +73,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let stdout_log = tracing_subscriber::fmt::layer()
         .pretty()
-        .with_filter(args.rust_log);
+        .with_filter(get_env_filter());
 
     let journald = match tracing_journald::layer() {
-        Ok(journald) => Some(journald.with_filter(args.rust_log)),
+        Ok(journald) => Some(journald.with_filter(get_env_filter())),
         Err(_) => None,
     };
 
@@ -89,7 +95,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let tracy = match args.tracy {
-        true => Some(tracing_tracy::TracyLayer::default().with_filter(args.rust_log)),
+        true => Some(tracing_tracy::TracyLayer::default().with_filter(get_env_filter())),
         false => None,
     };
 
