@@ -13,7 +13,7 @@ use edgefirst_schemas::{
     sensor_msgs::{CameraInfo, CompressedImage, RegionOfInterest},
     std_msgs::{self, Header},
 };
-use kanal::Receiver;
+use kanal::{Receiver, Sender};
 use std::{
     env,
     error::Error,
@@ -251,31 +251,28 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         if args.h264 {
             let ts = camera_buffer.timestamp();
             let src_img = Image::from_camera(&camera_buffer)?;
-
-            match h264_tx.try_send((src_img, ts)) {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("H264 thread messaging error: {:?}", e);
-                }
-            }
+            try_send(&h264_tx, src_img, ts, "H264");
         }
 
         if args.jpeg {
             let ts = camera_buffer.timestamp();
             let src_img = Image::from_camera(&camera_buffer)?;
-
-            match jpeg_tx.try_send((src_img, ts)) {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("JPEG thread messaging error: {:?}", e);
-                }
-            }
+            try_send(&jpeg_tx, src_img, ts, "JPEG");
         }
 
         let (_dma_task, info_task) = tokio::join!(dma_task, info_task);
         info_task.unwrap();
 
         args.tracy.then(frame_mark);
+    }
+}
+
+fn try_send(tx: &Sender<(Image, Timestamp)>, img: Image, ts: Timestamp, name: &str) {
+    match tx.try_send((img, ts)) {
+        Ok(_) => {}
+        Err(e) => {
+            error!("{} thread messaging error: {:?}", name, e);
+        }
     }
 }
 
