@@ -84,13 +84,9 @@ pub struct Args {
     #[arg(short, long)]
     pub verbose: bool,
 
-    /// isp-imx data location
-    #[arg(
-        long,
-        env,
-        default_value = "/etc/isp/sensor_dwe_os08a20_1080P_config.json"
-    )]
-    pub cam_info_path: PathBuf,
+    /// isp-imx data location (json format)
+    #[arg(long, env)]
+    pub cam_info_path: Option<PathBuf>,
 
     /// camera optical frame transform vector from base_link
     #[arg(
