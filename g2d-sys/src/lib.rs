@@ -108,20 +108,26 @@ pub struct Version {
     pub major: i64,
     pub minor: i64,
     pub patch: i64,
+    pub num: i64,
 }
 
 impl Display for Version {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+        write!(
+            f,
+            "{}.{}.{}:{}",
+            self.major, self.minor, self.patch, self.num
+        )
     }
 }
 
 impl Version {
-    pub fn new(major: i64, minor: i64, patch: i64) -> Self {
+    pub fn new(major: i64, minor: i64, patch: i64, num: i64) -> Self {
         Version {
             major,
             minor,
             patch,
+            num,
         }
     }
 }
@@ -138,9 +144,9 @@ pub fn guess_version(g2d: &g2d) -> Option<Version> {
         let s = CStr::from_ptr(ptr).to_string_lossy().to_string();
         // s = "$VERSION$6.4.3:398061:d3dac3f35d$\n"
         let mut version = Version::default();
-        let s = s[9..].split(":").next()?;
+        let s: Vec<_> = s[9..].split(":").collect();
 
-        let v: Vec<_> = s.split(".").collect();
+        let v: Vec<_> = s[0].split(".").collect();
         if let Some(s) = v.first() {
             if let Ok(major) = s.parse() {
                 version.major = major;
@@ -154,6 +160,11 @@ pub fn guess_version(g2d: &g2d) -> Option<Version> {
         if let Some(s) = v.get(2) {
             if let Ok(patch) = s.parse() {
                 version.patch = patch;
+            }
+        }
+        if let Some(s) = s.get(1) {
+            if let Ok(num) = s.parse() {
+                version.num = num;
             }
         }
         Some(version)

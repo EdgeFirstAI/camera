@@ -39,6 +39,7 @@ const G2D_2_3_0: g2d_sys::Version = g2d_sys::Version {
     major: 6,
     minor: 4,
     patch: 11,
+    num: 1049711,
 };
 
 pub struct ImageManager {
