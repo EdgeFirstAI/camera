@@ -13,7 +13,7 @@ use edgefirst_schemas::{
     sensor_msgs::{CameraInfo, CompressedImage, RegionOfInterest},
     std_msgs::{self, Header},
 };
-use kanal::Receiver;
+use kanal::{Receiver, Sender};
 use std::{
     env,
     error::Error,
@@ -22,8 +22,8 @@ use std::{
     thread::{self},
     time::{Duration, Instant},
 };
-use tracing::{error, info, info_span, instrument, warn, Instrument};
-use tracing_subscriber::{layer::SubscriberExt as _, Layer as _, Registry};
+use tracing::{error, info, info_span, instrument, level_filters::LevelFilter, warn, Instrument};
+use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter, Layer as _, Registry};
 use tracy_client::{frame_mark, plot, secondary_frame_mark};
 use unix_ts::Timestamp;
 use video::VideoManager;
@@ -59,18 +59,24 @@ fn update_fps(prev: &mut Instant, history: &mut [f64], index: &mut usize) -> f64
     1e9 / avg
 }
 
+fn get_env_filter() -> EnvFilter {
+    tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     args.tracy.then(tracy_client::Client::start);
 
     let stdout_log = tracing_subscriber::fmt::layer()
         .pretty()
-        .with_filter(args.rust_log);
+        .with_filter(get_env_filter());
 
     let journald = match tracing_journald::layer() {
-        Ok(journald) => Some(journald.with_filter(args.rust_log)),
+        Ok(journald) => Some(journald.with_filter(get_env_filter())),
         Err(_) => None,
     };
 
@@ -89,7 +95,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let tracy = match args.tracy {
-        true => Some(tracing_tracy::TracyLayer::default().with_filter(args.rust_log)),
+        true => Some(tracing_tracy::TracyLayer::default().with_filter(get_env_filter())),
         false => None,
     };
 
@@ -134,6 +140,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         args.stream_size[1],
         mirror
     );
+    args.stream_size[0] = cam.width();
+    args.stream_size[1] = cam.height();
 
     let session = zenoh::open(args.clone()).await.unwrap();
     let stream_task = stream(cam, session, args);
@@ -245,31 +253,28 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         if args.h264 {
             let ts = camera_buffer.timestamp();
             let src_img = Image::from_camera(&camera_buffer)?;
-
-            match h264_tx.try_send((src_img, ts)) {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("H264 thread messaging error: {:?}", e);
-                }
-            }
+            try_send(&h264_tx, src_img, ts, "H264");
         }
 
         if args.jpeg {
             let ts = camera_buffer.timestamp();
             let src_img = Image::from_camera(&camera_buffer)?;
-
-            match jpeg_tx.try_send((src_img, ts)) {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("JPEG thread messaging error: {:?}", e);
-                }
-            }
+            try_send(&jpeg_tx, src_img, ts, "JPEG");
         }
 
         let (_dma_task, info_task) = tokio::join!(dma_task, info_task);
         info_task.unwrap();
 
         args.tracy.then(frame_mark);
+    }
+}
+
+fn try_send(tx: &Sender<(Image, Timestamp)>, img: Image, ts: Timestamp, name: &str) {
+    match tx.try_send((img, ts)) {
+        Ok(_) => {}
+        Err(e) => {
+            error!("{} thread messaging error: {:?}", name, e);
+        }
     }
 }
 
@@ -308,6 +313,8 @@ async fn h264_task(session: Session, args: Args, rx: Receiver<(Image, Timestamp)
     };
 
     let imgmgr = ImageManager::new().unwrap();
+    info!("Opened G2D with version {}", imgmgr.version());
+
     let img_h264 = Image::new(args.stream_size[0], args.stream_size[1], RGBA).unwrap();
     let mut vidmgr = VideoManager::new(
         FourCC(*b"H264"),
@@ -482,91 +489,123 @@ fn camera_dma_serialize(
 }
 
 fn build_info_msg(args: &Args) -> Result<CameraInfo, Box<dyn Error>> {
-    let file = match File::open(args.cam_info_path.clone()) {
-        Ok(v) => v,
-        Err(e) => {
+    let msg = if let Some(p) = args.cam_info_path.clone() {
+        let file = match File::open(p) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(Box::from(format!(
+                    "Cannot open file {:?}: {e:?}",
+                    &args.cam_info_path
+                )));
+            }
+        };
+        let json: serde_json::Value =
+            serde_json::from_reader(file).expect("file should be proper JSON");
+        let bypass = json["bypass"].as_bool().unwrap_or(false);
+        let dewarp_configs = &json["dewarpConfigArray"];
+        if !dewarp_configs.is_array() {
+            return Err(Box::from("Did not find dewarpConfigArray as an array"));
+        }
+        let dewarp_config = &dewarp_configs[0];
+        let d = if bypass {
+            let distortion_coeff = dewarp_config["distortion_coeff"].as_array();
+            match distortion_coeff {
+                Some(v) => v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect(),
+                None => {
+                    return Err(Box::from("Did not find distortion_coeff as an array"));
+                }
+            }
+        } else {
+            // the camera driver already applies this distortion correction, so we
+            // set it to zero, as ROS expects the camera info to contain the distortion
+            // information of the image coming from the camera
+            vec![0.0; 5]
+        };
+
+        let camera_matrix = dewarp_config["camera_matrix"].as_array();
+        let k: Vec<f64> = match camera_matrix {
+            Some(v) => v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect(),
+            None => return Err(Box::from("Did not find camera_matrix as an array")),
+        };
+        if k.len() != 9 {
             return Err(Box::from(format!(
-                "Cannot open file {:?}: {e:?}",
-                &args.cam_info_path
+                "Expected exactly 9 elements in distortion_coeff array but found {}",
+                d.len()
             )));
         }
-    };
-    let json: serde_json::Value =
-        serde_json::from_reader(file).expect("file should be proper JSON");
-    let bypass = json["bypass"].as_bool().unwrap_or(false);
-    let dewarp_configs = &json["dewarpConfigArray"];
-    if !dewarp_configs.is_array() {
-        return Err(Box::from("Did not find dewarpConfigArray as an array"));
-    }
-    let dewarp_config = &dewarp_configs[0];
-    let d = if bypass {
-        let distortion_coeff = dewarp_config["distortion_coeff"].as_array();
-        match distortion_coeff {
-            Some(v) => v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect(),
-            None => {
-                return Err(Box::from("Did not find distortion_coeff as an array"));
-            }
+        let p = [
+            k[0], k[1], k[2], 0.0, k[3], k[4], k[5], 0.0, k[6], k[7], k[8], 0.0,
+        ];
+        // TODO: Is there an easier way to do this conversion?
+        let k = [k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7], k[8]];
+
+        let width = dewarp_config["source_image"]["width"]
+            .as_f64()
+            .unwrap_or_else(|| {
+                error!("Could not find camera width in camera info json");
+                1920.0
+            }) as u32;
+        let height = dewarp_config["source_image"]["height"]
+            .as_f64()
+            .unwrap_or_else(|| {
+                error!("Could not find camera height in camera info json");
+                1080.0
+            }) as u32;
+        let r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+        CameraInfo {
+            header: std_msgs::Header {
+                stamp: timestamp()?,
+                frame_id: args.camera_frame_id.clone(),
+            },
+            width,
+            height,
+            distortion_model: String::from("plumb_bob"),
+            d,
+            k,
+            r,
+            p,
+            binning_x: 1,
+            binning_y: 1,
+            roi: RegionOfInterest {
+                x_offset: 0,
+                y_offset: 0,
+                height,
+                width,
+                do_rectify: false,
+            },
         }
     } else {
-        // the camera driver already applies this distortion correction, so we
-        // set it to zero, as ROS expects the camera info to contain the distortion
-        // information of the image coming from the camera
-        vec![0.0; 5]
-    };
-
-    let camera_matrix = dewarp_config["camera_matrix"].as_array();
-    let k: Vec<f64> = match camera_matrix {
-        Some(v) => v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect(),
-        None => return Err(Box::from("Did not find camera_matrix as an array")),
-    };
-    if k.len() != 9 {
-        return Err(Box::from(format!(
-            "Expected exactly 9 elements in distortion_coeff array but found {}",
-            d.len()
-        )));
-    }
-    let p = [
-        k[0], k[1], k[2], 0.0, k[3], k[4], k[5], 0.0, k[6], k[7], k[8], 0.0,
-    ];
-    // TODO: Is there an easier way to do this conversion?
-    let k = [k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7], k[8]];
-
-    let width = dewarp_config["source_image"]["width"]
-        .as_f64()
-        .unwrap_or_else(|| {
-            error!("Could not find camera width in camera info json");
-            1920.0
-        }) as u32;
-    let height = dewarp_config["source_image"]["height"]
-        .as_f64()
-        .unwrap_or_else(|| {
-            error!("Could not find camera height in camera info json");
-            1080.0
-        }) as u32;
-    let r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-
-    let msg = CameraInfo {
-        header: std_msgs::Header {
-            stamp: timestamp()?,
-            frame_id: args.camera_frame_id.clone(),
-        },
-        width,
-        height,
-        distortion_model: String::from("plumb_bob"),
-        d,
-        k,
-        r,
-        p,
-        binning_x: 1,
-        binning_y: 1,
-        roi: RegionOfInterest {
-            x_offset: 0,
-            y_offset: 0,
-            height,
+        let k = [1270.0, 0.0, 960.0, 0.0, 1270.0, 540.0, 0.0, 0.0, 1.0];
+        let p = [
+            k[0], k[1], k[2], 0.0, k[3], k[4], k[5], 0.0, k[6], k[7], k[8], 0.0,
+        ];
+        let width = 1920;
+        let height = 1080;
+        CameraInfo {
+            header: std_msgs::Header {
+                stamp: timestamp()?,
+                frame_id: args.camera_frame_id.clone(),
+            },
             width,
-            do_rectify: false,
-        },
+            height,
+            distortion_model: String::from("plumb_bob"),
+            d: vec![0.0; 5],
+            k,
+            r: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            p,
+            binning_x: 1,
+            binning_y: 1,
+            roi: RegionOfInterest {
+                x_offset: 0,
+                y_offset: 0,
+                height,
+                width,
+                do_rectify: false,
+            },
+        }
     };
+
     Ok(msg)
 }
 

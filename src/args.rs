@@ -1,7 +1,6 @@
 use clap::Parser;
 use serde_json::json;
 use std::path::PathBuf;
-use tracing::level_filters::LevelFilter;
 use zenoh::config::{Config, WhatAmI};
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
@@ -85,13 +84,9 @@ pub struct Args {
     #[arg(short, long)]
     pub verbose: bool,
 
-    /// isp-imx data location
-    #[arg(
-        long,
-        env,
-        default_value = "/etc/isp/sensor_dwe_os08a20_1080P_config.json"
-    )]
-    pub cam_info_path: PathBuf,
+    /// isp-imx data location (json format)
+    #[arg(long, env)]
+    pub cam_info_path: Option<PathBuf>,
 
     /// camera optical frame transform vector from base_link
     #[arg(
@@ -120,10 +115,6 @@ pub struct Args {
     /// The name of the camera optical frame
     #[arg(long, default_value = "camera_optical")]
     pub camera_frame_id: String,
-
-    /// Application log level
-    #[arg(long, env, default_value = "info")]
-    pub rust_log: LevelFilter,
 
     /// Enable tokio console logging
     #[arg(long, env)]

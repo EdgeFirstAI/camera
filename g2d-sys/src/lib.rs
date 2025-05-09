@@ -3,12 +3,18 @@
 #![allow(non_snake_case)]
 #![allow(clippy::missing_safety_doc)]
 
-include!("ffi.rs");
-
-use std::os::fd::AsRawFd;
+include!("./ffi.rs");
+mod ffi_new;
 
 use dma_buf::DmaBuf;
+
+pub use ffi_new::*;
 use nix::ioctl_write_ptr;
+use std::{
+    ffi::{c_char, CStr},
+    fmt::Display,
+    os::fd::AsRawFd,
+};
 
 use videostream::fourcc::FourCC;
 
@@ -56,7 +62,8 @@ impl From<G2DFormat> for FourCC {
     }
 }
 
-pub struct G2DPhysical(g2d_phys_addr_t);
+#[derive(Debug, Copy, Clone)]
+pub struct G2DPhysical(g2d_phys_addr_t_new);
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -79,12 +86,87 @@ impl From<DmaBuf> for G2DPhysical {
             return G2DPhysical(0);
         }
 
-        G2DPhysical(phys.0 as i32)
+        G2DPhysical(phys.0)
     }
 }
 
-impl From<G2DPhysical> for i32 {
+impl From<G2DPhysical> for g2d_phys_addr_t {
     fn from(phys: G2DPhysical) -> Self {
+        phys.0 as g2d_phys_addr_t
+    }
+}
+
+impl From<G2DPhysical> for g2d_phys_addr_t_new {
+    fn from(phys: G2DPhysical) -> g2d_phys_addr_t_new {
         phys.0
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Default, Copy)]
+pub struct Version {
+    pub major: i64,
+    pub minor: i64,
+    pub patch: i64,
+    pub num: i64,
+}
+
+impl Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}.{}.{}:{}",
+            self.major, self.minor, self.patch, self.num
+        )
+    }
+}
+
+impl Version {
+    pub fn new(major: i64, minor: i64, patch: i64, num: i64) -> Self {
+        Version {
+            major,
+            minor,
+            patch,
+            num,
+        }
+    }
+}
+pub fn guess_version(g2d: &g2d) -> Option<Version> {
+    unsafe {
+        let version = g2d
+            .__library
+            .get::<*const *const c_char>(b"_G2D_VERSION")
+            .map_or(None, |v| Some(*v));
+
+        // Seems like the char sequence is `\n\0$VERSION$6.4.3:398061:d3dac3f35d$\n\0`
+        // So we need to shift the ptr by two
+        let ptr = (*version.unwrap()).byte_offset(2);
+        let s = CStr::from_ptr(ptr).to_string_lossy().to_string();
+        // s = "$VERSION$6.4.3:398061:d3dac3f35d$\n"
+        let mut version = Version::default();
+        let s: Vec<_> = s[9..].split(":").collect();
+
+        let v: Vec<_> = s[0].split(".").collect();
+        if let Some(s) = v.first() {
+            if let Ok(major) = s.parse() {
+                version.major = major;
+            }
+        }
+        if let Some(s) = v.get(1) {
+            if let Ok(minor) = s.parse() {
+                version.minor = minor;
+            }
+        }
+        if let Some(s) = v.get(2) {
+            if let Ok(patch) = s.parse() {
+                version.patch = patch;
+            }
+        }
+        if let Some(s) = s.get(1) {
+            if let Ok(num) = s.parse() {
+                version.num = num;
+            }
+        }
+        Some(version)
     }
 }
