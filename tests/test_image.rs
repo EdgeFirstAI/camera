@@ -1,4 +1,4 @@
-use camera::{
+use edgefirst_camera::{
     image,
     image::{encode_jpeg, Image, ImageManager},
 };

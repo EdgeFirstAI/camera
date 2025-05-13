@@ -1,8 +1,8 @@
-use camera::{
+use criterion::{criterion_group, criterion_main, Criterion};
+use edgefirst_camera::{
     image,
     image::{encode_jpeg, Image},
 };
-use criterion::{criterion_group, criterion_main, Criterion};
 
 fn benchmark_jpeg(img: &Image) {
     let dma = img.dmabuf();

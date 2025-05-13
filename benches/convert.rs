@@ -1,5 +1,5 @@
-use camera::image::{self, Image, ImageManager};
 use criterion::{criterion_group, criterion_main, Criterion};
+use edgefirst_camera::image::{self, Image, ImageManager};
 
 pub fn benchmark_resize(c: &mut Criterion) {
     let fmts = [image::RGBA, image::RGB3, image::YUYV, image::NV12];

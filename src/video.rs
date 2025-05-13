@@ -1,4 +1,4 @@
-use camera::image::{Image, ImageManager};
+use edgefirst_camera::image::{Image, ImageManager};
 use std::{error::Error, os::raw::c_int};
 use tracing::{debug, info_span};
 use tracy_client::plot;

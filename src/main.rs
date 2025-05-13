@@ -2,9 +2,9 @@ mod args;
 mod video;
 
 use args::{Args, MirrorSetting};
-use camera::image::{encode_jpeg, Image, ImageManager, RGBA};
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
+use edgefirst_camera::image::{encode_jpeg, Image, ImageManager, RGBA};
 use edgefirst_schemas::{
     builtin_interfaces::{self, Time},
     edgefirst_msgs::DmaBuf,
