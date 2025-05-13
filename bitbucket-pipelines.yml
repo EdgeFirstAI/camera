@@ -4,8 +4,6 @@ clone:
   depth: full
 
 definitions:
-  caches:
-    rust-target: $BITBUCKET_CLONE_DIR/target
   steps:
     - step: &version
         name: VERSION
