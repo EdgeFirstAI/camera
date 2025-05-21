@@ -4,7 +4,7 @@ mod video;
 use args::{Args, MirrorSetting};
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
-use edgefirst_camera::image::{encode_jpeg, Image, ImageManager, RGBA};
+use edgefirst_camera::image::{encode_jpeg, Image, ImageManager, Rotation, RGBA};
 use edgefirst_schemas::{
     builtin_interfaces::{self, Time},
     edgefirst_msgs::DmaBuf,
@@ -392,7 +392,7 @@ fn build_jpeg_msg(
     img: &Image,
     args: &Args,
 ) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
-    info_span!("jpeg_convert").in_scope(|| imgmgr.convert(buf, img, None))?;
+    info_span!("jpeg_convert").in_scope(|| imgmgr.convert(buf, img, None, Rotation::Rotation0))?;
 
     let jpeg = info_span!("jpeg_encode").in_scope(|| {
         let dma = img.dmabuf();

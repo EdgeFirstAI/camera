@@ -7,16 +7,14 @@ include!("./ffi.rs");
 mod ffi_new;
 
 use dma_buf::DmaBuf;
-
 pub use ffi_new::*;
 use nix::ioctl_write_ptr;
 use std::{
     ffi::{c_char, CStr},
     fmt::Display,
-    os::fd::AsRawFd,
+    os::fd::{AsRawFd, FromRawFd},
 };
-
-use videostream::fourcc::FourCC;
+use videostream::{fourcc::FourCC, frame::Frame};
 
 const RGB3: FourCC = FourCC(*b"RGB3");
 const RGBX: FourCC = FourCC(*b"RGBX");
@@ -90,6 +88,12 @@ impl From<DmaBuf> for G2DPhysical {
     }
 }
 
+impl From<u64> for G2DPhysical {
+    fn from(buf: u64) -> Self {
+        G2DPhysical(buf)
+    }
+}
+
 impl From<G2DPhysical> for g2d_phys_addr_t {
     fn from(phys: G2DPhysical) -> Self {
         phys.0 as g2d_phys_addr_t
@@ -102,6 +106,77 @@ impl From<G2DPhysical> for g2d_phys_addr_t_new {
     }
 }
 
+impl From<&Frame> for g2d_surface {
+    fn from(frame: &Frame) -> Self {
+        let from_phys: G2DPhysical = match frame.paddr() {
+            Some(v) => (v as u64).into(),
+            None => unsafe { DmaBuf::from_raw_fd(frame.handle()).into() },
+        };
+        let fourcc = FourCC::from(frame.fourcc());
+        let planes = match fourcc {
+            NV12 => {
+                let width = frame.width();
+                let height = frame.height();
+                let y_size = width * height;
+                let v_size = y_size / 4;
+                let phys = from_phys.into();
+                [phys, phys + y_size, phys + y_size + v_size]
+            }
+            _ => [from_phys.into(), 0, 0],
+        };
+        g2d_surface {
+            planes,
+            format: G2DFormat::from(fourcc).format(),
+            left: 0,
+            top: 0,
+            right: frame.width(),
+            bottom: frame.height(),
+            stride: frame.width(),
+            width: frame.width(),
+            height: frame.height(),
+            blendfunc: 0,
+            clrcolor: 0,
+            rot: 0,
+            global_alpha: 0,
+        }
+    }
+}
+
+impl From<&Frame> for g2d_surface_new {
+    fn from(frame: &Frame) -> Self {
+        let from_phys: G2DPhysical = match frame.paddr() {
+            Some(v) => (v as u64).into(),
+            None => unsafe { DmaBuf::from_raw_fd(frame.handle()).into() },
+        };
+        let fourcc = FourCC::from(frame.fourcc());
+        let planes = match fourcc {
+            NV12 => {
+                let width = frame.width() as u64;
+                let height = frame.height() as u64;
+                let y_size = width * height;
+                let v_size = y_size / 4;
+                let phys = from_phys.into();
+                [phys, phys + y_size, phys + y_size + v_size]
+            }
+            _ => [from_phys.into(), 0, 0],
+        };
+        Self {
+            planes,
+            format: G2DFormat::from(fourcc).format(),
+            left: 0,
+            top: 0,
+            right: frame.width(),
+            bottom: frame.height(),
+            stride: frame.width(),
+            width: frame.width(),
+            height: frame.height(),
+            blendfunc: 0,
+            clrcolor: 0,
+            rot: 0,
+            global_alpha: 0,
+        }
+    }
+}
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Default, Copy)]
 pub struct Version {

@@ -1,6 +1,6 @@
 use edgefirst_camera::{
     image,
-    image::{encode_jpeg, Image, ImageManager},
+    image::{encode_jpeg, Image, ImageManager, Rotation},
 };
 use serial_test::serial;
 use std::{error::Error, time::Instant};
@@ -96,7 +96,7 @@ fn test_resize() -> Result<(), Box<dyn Error>> {
     let from = Image::new(1920, 1080, image::RGBA)?;
     let to = Image::new(640, 480, image::RGBA)?;
     let mgr = ImageManager::new()?;
-    mgr.convert(&from, &to, None)?;
+    mgr.convert(&from, &to, None, Rotation::Rotation0)?;
 
     Ok(())
 }
@@ -107,7 +107,7 @@ fn test_convert() -> Result<(), Box<dyn Error>> {
     let from = Image::new(1920, 1080, image::YUYV)?;
     let to = Image::new(1920, 1080, image::RGBA)?;
     let mgr = ImageManager::new()?;
-    mgr.convert(&from, &to, None)?;
+    mgr.convert(&from, &to, None, Rotation::Rotation0)?;
 
     Ok(())
 }
@@ -138,7 +138,7 @@ fn test_capture() -> Result<(), Box<dyn Error>> {
     let dst = Image::new(1920, 1080, image::RGBA)?;
 
     let mgr = ImageManager::new()?;
-    mgr.convert(&src, &dst, None)?;
+    mgr.convert(&src, &dst, None, Rotation::Rotation0)?;
 
     let now = Instant::now();
     let dma = dst.dmabuf();

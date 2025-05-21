@@ -1,4 +1,4 @@
-use edgefirst_camera::image::{Image, ImageManager};
+use edgefirst_camera::image::{Image, ImageManager, Rotation};
 use std::{error::Error, os::raw::c_int};
 use tracing::{debug, info_span};
 use tracy_client::plot;
@@ -53,7 +53,8 @@ impl VideoManager {
         imgmgr: &ImageManager,
         img: &Image,
     ) -> Result<(Vec<u8>, bool), Box<dyn Error>> {
-        info_span!("h264_resize").in_scope(|| imgmgr.convert(source, img, None))?;
+        info_span!("h264_resize")
+            .in_scope(|| imgmgr.convert(source, img, None, Rotation::Rotation0))?;
         let frame: Frame = match img.try_into() {
             Ok(f) => f,
             Err(e) => {
