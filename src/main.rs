@@ -116,12 +116,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let cam = create_camera()
         .with_device(&args.camera)
-        .with_resolution(args.camera_size[0], args.camera_size[1])
+        .with_resolution(args.camera_size[0] as i32, args.camera_size[1] as i32)
         .with_format(FourCC(*b"YUYV"))
         .with_mirror(mirror)
         .open()?;
     cam.start()?;
-    if cam.width() != args.camera_size[0] || cam.height() != args.camera_size[1] {
+    if cam.width() as u32 != args.camera_size[0] || cam.height() as u32 != args.camera_size[1] {
         warn!(
             "User requested {}x{} resolution but camera set {}x{} resolution",
             args.camera_size[0],
@@ -140,8 +140,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         args.stream_size[1],
         mirror
     );
-    args.stream_size[0] = cam.width();
-    args.stream_size[1] = cam.height();
+    args.stream_size[0] = cam.width() as u32;
+    args.stream_size[1] = cam.height() as u32;
 
     let session = zenoh::open(args.clone()).await.unwrap();
     let stream_task = stream(cam, session, args);
@@ -318,8 +318,8 @@ async fn h264_task(session: Session, args: Args, rx: Receiver<(Image, Timestamp)
     let img_h264 = Image::new(args.stream_size[0], args.stream_size[1], RGBA).unwrap();
     let mut vidmgr = VideoManager::new(
         FourCC(*b"H264"),
-        args.stream_size[0],
-        args.stream_size[1],
+        args.stream_size[0] as i32,
+        args.stream_size[1] as i32,
         args.h264_bitrate,
     )
     .unwrap();

@@ -351,12 +351,12 @@ impl Drop for ImageManager {
 #[derive(Debug)]
 pub struct Image {
     fd: OwnedFd,
-    width: i32,
-    height: i32,
+    width: u32,
+    height: u32,
     format: FourCC,
 }
 
-const fn format_row_stride(format: FourCC, width: i32) -> usize {
+const fn format_row_stride(format: FourCC, width: u32) -> usize {
     match format {
         RGB3 => 3 * width as usize,
         RGBX => 4 * width as usize,
@@ -367,12 +367,12 @@ const fn format_row_stride(format: FourCC, width: i32) -> usize {
     }
 }
 
-const fn image_size(width: i32, height: i32, format: FourCC) -> usize {
+const fn image_size(width: u32, height: u32, format: FourCC) -> usize {
     format_row_stride(format, width) * height as usize
 }
 
 impl Image {
-    pub fn new(width: i32, height: i32, format: FourCC) -> Result<Self, Box<dyn Error>> {
+    pub fn new(width: u32, height: u32, format: FourCC) -> Result<Self, Box<dyn Error>> {
         let heap = Heap::new(HeapKind::Cma)?;
         let fd = heap.allocate(image_size(width, height, format))?;
         Ok(Self {
@@ -383,7 +383,7 @@ impl Image {
         })
     }
 
-    pub fn new_preallocated(fd: OwnedFd, width: i32, height: i32, format: FourCC) -> Self {
+    pub fn new_preallocated(fd: OwnedFd, width: u32, height: u32, format: FourCC) -> Self {
         Self {
             fd,
             width,
@@ -397,8 +397,8 @@ impl Image {
 
         Ok(Self {
             fd: fd.try_clone_to_owned()?,
-            width: buffer.width(),
-            height: buffer.height(),
+            width: buffer.width() as u32,
+            height: buffer.height() as u32,
             format: buffer.format(),
         })
     }
@@ -415,11 +415,11 @@ impl Image {
         unsafe { DmaBuf::from_raw_fd(dup(self.fd.as_raw_fd())) }
     }
 
-    pub fn width(&self) -> i32 {
+    pub fn width(&self) -> u32 {
         self.width
     }
 
-    pub fn height(&self) -> i32 {
+    pub fn height(&self) -> u32 {
         self.height
     }
 
@@ -455,8 +455,8 @@ impl TryFrom<&Image> for Frame {
 
     fn try_from(img: &Image) -> Result<Self, Self::Error> {
         let frame = Frame::new(
-            img.width().try_into().unwrap(),
-            img.height().try_into().unwrap(),
+            img.width(),
+            img.height(),
             0,
             img.format().to_string().as_str(),
         )?;
@@ -479,11 +479,11 @@ impl TryFrom<&Image> for g2d_surface {
             format: G2DFormat::from(img.format).format(),
             left: 0,
             top: 0,
-            right: img.width,
-            bottom: img.height,
-            stride: img.width,
-            width: img.width,
-            height: img.height,
+            right: img.width as i32,
+            bottom: img.height as i32,
+            stride: img.width as i32,
+            width: img.width as i32,
+            height: img.height as i32,
             blendfunc: 0,
             clrcolor: 0,
             rot: 0,
@@ -503,11 +503,11 @@ impl TryFrom<&Image> for g2d_surface_new {
             format: G2DFormat::from(img.format).format(),
             left: 0,
             top: 0,
-            right: img.width,
-            bottom: img.height,
-            stride: img.width,
-            width: img.width,
-            height: img.height,
+            right: img.width as i32,
+            bottom: img.height as i32,
+            stride: img.width as i32,
+            width: img.width as i32,
+            height: img.height as i32,
             blendfunc: 0,
             clrcolor: 0,
             rot: 0,
