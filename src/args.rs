@@ -35,7 +35,7 @@ pub struct Args {
         value_delimiter = ' ',
         num_args = 2
     )]
-    pub camera_size: Vec<i32>,
+    pub camera_size: Vec<u32>,
 
     /// camera mirror
     #[arg(long, env, default_value = "both", value_enum)]
@@ -78,7 +78,7 @@ pub struct Args {
         value_delimiter = ' ',
         num_args = 2
     )]
-    pub stream_size: Vec<i32>,
+    pub stream_size: Vec<u32>,
 
     /// verbose logging
     #[arg(short, long)]

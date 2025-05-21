@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use edgefirst_camera::image::{self, Image, ImageManager};
+use edgefirst_camera::image::{self, Image, ImageManager, Rotation};
 
 pub fn benchmark_resize(c: &mut Criterion) {
     let fmts = [image::RGBA, image::RGB3, image::YUYV, image::NV12];
@@ -21,7 +21,7 @@ pub fn benchmark_resize(c: &mut Criterion) {
                 group.bench_with_input(
                     format!("{}x{}-{}x{}", src_dim.0, src_dim.1, dst_dim.0, dst_dim.1),
                     &(src, dst),
-                    |b, imgs| b.iter(|| mgr.convert(&imgs.0, &imgs.1, None)),
+                    |b, imgs| b.iter(|| mgr.convert(&imgs.0, &imgs.1, None, Rotation::Rotation0)),
                 );
             }
         }
