@@ -140,8 +140,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         args.stream_size[1],
         mirror
     );
-    args.stream_size[0] = cam.width() as u32;
-    args.stream_size[1] = cam.height() as u32;
+    args.camera_size[0] = cam.width() as u32;
+    args.camera_size[1] = cam.height() as u32;
 
     let session = zenoh::open(args.clone()).await.unwrap();
     let stream_task = stream(cam, session, args);
