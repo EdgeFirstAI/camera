@@ -4,7 +4,7 @@ mod video;
 use args::{Args, MirrorSetting};
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
-use edgefirst_camera::image::{encode_jpeg, Image, ImageManager, Rotation, RGBA};
+use edgefirst_camera::image::{encode_jpeg, Image, ImageManager, Rect, Rotation, RGBA};
 use edgefirst_schemas::{
     builtin_interfaces::{self, Time},
     edgefirst_msgs::DmaBuf,
@@ -44,6 +44,28 @@ static GLOBAL: tracy_client::ProfiledAllocator<std::alloc::System> =
 
 // TODO: Add setting target FPS
 const TARGET_FPS: i32 = 30;
+
+#[derive(Clone, Copy, Debug)]
+enum TilePosition {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl TilePosition {
+    fn get_crop_params(&self, source_width: u32, source_height: u32) -> (u32, u32, u32, u32) {
+        let tile_width = source_width / 2;
+        let tile_height = source_height / 2;
+
+        match self {
+            TilePosition::TopLeft => (0, 0, tile_width, tile_height),
+            TilePosition::TopRight => (tile_width, 0, tile_width, tile_height),
+            TilePosition::BottomLeft => (0, tile_height, tile_width, tile_height),
+            TilePosition::BottomRight => (tile_width, tile_height, tile_width, tile_height),
+        }
+    }
+}
 
 fn update_fps(prev: &mut Instant, history: &mut [f64], index: &mut usize) -> f64 {
     let now = Instant::now();
@@ -205,13 +227,43 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             })?;
     }
 
+    let mut h264_tiles_txs = Vec::new();
+    if args.h264_tiles {
+        // Create 4 separate encoding threads, one for each tile
+        let tile_positions = [
+            TilePosition::TopLeft,
+            TilePosition::TopRight,
+            TilePosition::BottomLeft,
+            TilePosition::BottomRight,
+        ];
+
+        for (i, &tile_pos) in tile_positions.iter().enumerate() {
+            let (tx, rx) = kanal::bounded(1);
+            let session = session.clone();
+            let args = args.clone();
+            let tile_topic = args.h264_tiles_topics[i].clone();
+
+            thread::Builder::new()
+                .name(format!("h264_tile_{:?}", tile_pos).to_lowercase())
+                .spawn(move || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(h264_single_tile_task(
+                            session, args, rx, tile_pos, tile_topic,
+                        ));
+                })?;
+
+            h264_tiles_txs.push(tx);
+        }
+    }
+
     let tf_session = session.clone();
     let tf_msg = build_tf_msg(&args);
     let tf_msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&tf_msg, Infinite).unwrap());
     let tf_enc = Encoding::APPLICATION_CDR.with_schema("geometry_msgs/msg/TransformStamped");
-    let tf_task = tokio::task::Builder::new()
-        .name("tf_static")
-        .spawn(async move { tf_static(tf_session, tf_msg, tf_enc).await })?;
+    let tf_task = tokio::spawn(async move { tf_static(tf_session, tf_msg, tf_enc).await });
     std::mem::drop(tf_task);
 
     let info_msg = build_info_msg(&args)?;
@@ -260,6 +312,15 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             let ts = camera_buffer.timestamp();
             let src_img = Image::from_camera(&camera_buffer)?;
             try_send(&jpeg_tx, src_img, ts, "JPEG");
+        }
+
+        if args.h264_tiles {
+            let ts = camera_buffer.timestamp();
+            // Send to all 4 tile encoding threads (each creates its own image from camera buffer)
+            for (i, tx) in h264_tiles_txs.iter().enumerate() {
+                let src_img = Image::from_camera(&camera_buffer)?;
+                try_send(tx, src_img, ts, &format!("H264_TILE_{}", i));
+            }
         }
 
         let (_dma_task, info_task) = tokio::join!(dma_task, info_task);
@@ -385,6 +446,100 @@ async fn jpeg_task(session: Session, args: Args, rx: Receiver<(Image, Timestamp)
     }
 }
 
+async fn h264_single_tile_task(
+    session: Session,
+    args: Args,
+    rx: Receiver<(Image, Timestamp)>,
+    tile_pos: TilePosition,
+    topic: String,
+) {
+    let publisher = match session
+        .declare_publisher(topic.clone())
+        .priority(Priority::Data)
+        .congestion_control(CongestionControl::Drop)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+                "Error while declaring H264 tile publisher {}: {:?}",
+                topic, e
+            );
+            return;
+        }
+    };
+
+    let imgmgr = ImageManager::new().unwrap();
+    info!(
+        "Opened G2D for tile {:?} with version {}",
+        tile_pos,
+        imgmgr.version()
+    );
+
+    let tile_width = 1920u32;
+    let tile_height = 1080u32;
+
+    let tile_image = Image::new(tile_width, tile_height, RGBA).unwrap();
+    let mut vid_mgr = VideoManager::new(
+        FourCC(*b"H264"),
+        tile_width as i32,
+        tile_height as i32,
+        args.h264_bitrate,
+    )
+    .unwrap();
+
+    loop {
+        let (source_img, ts) = match rx.recv() {
+            Ok(v) => v,
+            Err(_) => {
+                // main thread exited
+                return;
+            }
+        };
+
+        let span = info_span!("h264_tile", tile = ?tile_pos);
+        async {
+            // G2D crop the specific tile
+            let (crop_x, crop_y, crop_width, crop_height) =
+                tile_pos.get_crop_params(source_img.width(), source_img.height());
+
+            let crop_region = Some(Rect {
+                x: crop_x as i32,
+                y: crop_y as i32,
+                width: crop_width as i32,
+                height: crop_height as i32,
+            });
+
+            if let Err(e) =
+                imgmgr.convert(&source_img, &tile_image, crop_region, Rotation::Rotation0)
+            {
+                error!("Failed to convert tile {:?}: {:?}", tile_pos, e);
+                return;
+            }
+
+            // VPU encode the tile
+            match vid_mgr.encode_only(&tile_image) {
+                Ok((data, _is_key)) => match build_tile_video_msg(&data, &ts, &args, tile_pos) {
+                    Ok((msg, enc)) => {
+                        if let Err(e) = publisher.put(msg).encoding(enc).await {
+                            error!("Failed to publish tile {:?}: {:?}", tile_pos, e);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to build tile video message: {:?}", e);
+                    }
+                },
+                Err(e) => {
+                    error!("Failed to encode tile {:?}: {:?}", tile_pos, e);
+                }
+            }
+        }
+        .instrument(span)
+        .await;
+        args.tracy.then(|| secondary_frame_mark!("h264_tile"));
+    }
+}
+
 fn build_jpeg_msg(
     buf: &Image,
     ts: &Timestamp,
@@ -443,6 +598,34 @@ fn build_video_msg(
             },
             format: "h264".to_string(),
             data,
+        };
+
+        let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
+        let enc = Encoding::APPLICATION_CDR.with_schema("foxglove_msgs/msg/CompressedVideo");
+
+        Ok((msg, enc))
+    })
+}
+
+fn build_tile_video_msg(
+    data: &[u8],
+    ts: &Timestamp,
+    args: &Args,
+    tile_pos: TilePosition,
+) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
+    info_span!("h264_tile_publish").in_scope(|| {
+        let frame_id = format!("{}_{:?}", args.camera_frame_id, tile_pos).to_lowercase();
+
+        let msg = FoxgloveCompressedVideo {
+            header: std_msgs::Header {
+                stamp: builtin_interfaces::Time {
+                    sec: ts.seconds() as i32,
+                    nanosec: ts.subsec(9),
+                },
+                frame_id,
+            },
+            format: "h264".to_string(),
+            data: data.to_vec(),
         };
 
         let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
