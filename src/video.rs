@@ -119,6 +119,16 @@ impl VideoManager {
         info_span!("h264_encode_direct").in_scope(|| self.encode_from_vsl(&frame))
     }
 
+    pub fn update_crop_region(
+        &mut self,
+        crop_x: i32,
+        crop_y: i32,
+        crop_width: i32,
+        crop_height: i32,
+    ) {
+        self.crop = VSLRect::new(crop_x, crop_y, crop_width, crop_height);
+    }
+
     fn encode_from_vsl(&mut self, source: &Frame) -> Result<(Vec<u8>, bool), Box<dyn Error>> {
         let mut key_frame: c_int = 0;
         let _ret = self

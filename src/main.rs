@@ -4,7 +4,7 @@ mod video;
 use args::{Args, MirrorSetting};
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
-use edgefirst_camera::image::{encode_jpeg, Image, ImageManager, Rect, Rotation, RGBA};
+use edgefirst_camera::image::{encode_jpeg, Image, ImageManager, Rotation, RGBA};
 use edgefirst_schemas::{
     builtin_interfaces::{self, Time},
     edgefirst_msgs::DmaBuf,
@@ -469,21 +469,12 @@ async fn h264_single_tile_task(
         }
     };
 
-    let imgmgr = ImageManager::new().unwrap();
-    info!(
-        "Opened G2D for tile {:?} with version {}",
-        tile_pos,
-        imgmgr.version()
-    );
-
-    let tile_width = 1920u32;
-    let tile_height = 1080u32;
-
-    let tile_image = Image::new(tile_width, tile_height, RGBA).unwrap();
-    let mut vid_mgr = VideoManager::new(
+    // Create a single VideoManager that we'll reuse with dynamic crop updates
+    let mut vid_mgr = VideoManager::new_with_crop(
         FourCC(*b"H264"),
-        tile_width as i32,
-        tile_height as i32,
+        1920,               // tile output width
+        1080,               // tile output height
+        (0, 0, 1920, 1080), // initial crop region (will be updated per frame)
         args.h264_bitrate,
     )
     .unwrap();
@@ -499,26 +490,16 @@ async fn h264_single_tile_task(
 
         let span = info_span!("h264_tile", tile = ?tile_pos);
         async {
-            // G2D crop the specific tile
             let (crop_x, crop_y, crop_width, crop_height) =
                 tile_pos.get_crop_params(source_img.width(), source_img.height());
 
-            let crop_region = Some(Rect {
-                x: crop_x as i32,
-                y: crop_y as i32,
-                width: crop_width as i32,
-                height: crop_height as i32,
-            });
-
-            if let Err(e) =
-                imgmgr.convert(&source_img, &tile_image, crop_region, Rotation::Rotation0)
-            {
-                error!("Failed to convert tile {:?}: {:?}", tile_pos, e);
-                return;
-            }
-
-            // VPU encode the tile
-            match vid_mgr.encode_only(&tile_image) {
+            vid_mgr.update_crop_region(
+                crop_x as i32,
+                crop_y as i32,
+                crop_width as i32,
+                crop_height as i32,
+            );
+            match vid_mgr.encode_direct(&source_img) {
                 Ok((data, _is_key)) => match build_tile_video_msg(&data, &ts, &args, tile_pos) {
                     Ok((msg, enc)) => {
                         if let Err(e) = publisher.put(msg).encoding(enc).await {
