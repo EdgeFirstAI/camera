@@ -42,7 +42,6 @@ use zenoh::{
 static GLOBAL: tracy_client::ProfiledAllocator<std::alloc::System> =
     tracy_client::ProfiledAllocator::new(std::alloc::System, 100);
 
-// TODO: Add setting target FPS
 const TARGET_FPS: i32 = 30;
 
 #[derive(Clone, Copy, Debug)]
@@ -55,15 +54,26 @@ enum TilePosition {
 
 impl TilePosition {
     fn get_crop_params(&self, source_width: u32, source_height: u32) -> (u32, u32, u32, u32) {
-        let tile_width = source_width / 2;
-        let tile_height = source_height / 2;
+        let source_tile_width = source_width / 2;
+        let source_tile_height = source_height / 2;
 
         match self {
-            TilePosition::TopLeft => (0, 0, tile_width, tile_height),
-            TilePosition::TopRight => (tile_width, 0, tile_width, tile_height),
-            TilePosition::BottomLeft => (0, tile_height, tile_width, tile_height),
-            TilePosition::BottomRight => (tile_width, tile_height, tile_width, tile_height),
+            TilePosition::TopLeft => (0, 0, source_tile_width, source_tile_height),
+            TilePosition::TopRight => (source_tile_width, 0, source_tile_width, source_tile_height),
+            TilePosition::BottomLeft => {
+                (0, source_tile_height, source_tile_width, source_tile_height)
+            }
+            TilePosition::BottomRight => (
+                source_tile_width,
+                source_tile_height,
+                source_tile_width,
+                source_tile_height,
+            ),
         }
+    }
+
+    fn get_output_dimensions() -> (u32, u32) {
+        (1920, 1080)
     }
 }
 
@@ -238,7 +248,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         ];
 
         for (i, &tile_pos) in tile_positions.iter().enumerate() {
-            let (tx, rx) = kanal::bounded(1);
+            let (tx, rx) = kanal::bounded(3);
             let session = session.clone();
             let args = args.clone();
             let tile_topic = args.h264_tiles_topics[i].clone();
@@ -316,7 +326,6 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
 
         if args.h264_tiles {
             let ts = camera_buffer.timestamp();
-            // Send to all 4 tile encoding threads (each creates its own image from camera buffer)
             for (i, tx) in h264_tiles_txs.iter().enumerate() {
                 let src_img = Image::from_camera(&camera_buffer)?;
                 try_send(tx, src_img, ts, &format!("H264_TILE_{}", i));
@@ -330,11 +339,12 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     }
 }
 
-fn try_send(tx: &Sender<(Image, Timestamp)>, img: Image, ts: Timestamp, name: &str) {
+fn try_send(tx: &Sender<(Image, Timestamp)>, img: Image, ts: Timestamp, _name: &str) {
     match tx.try_send((img, ts)) {
         Ok(_) => {}
-        Err(e) => {
-            error!("{} thread messaging error: {:?}", name, e);
+        Err(_) => {
+            // Channel issue - likely full due to slow encoding, which is expected with 4 tile threads
+            // Silently drop frames when channels are full to avoid log spam
         }
     }
 }
@@ -469,15 +479,40 @@ async fn h264_single_tile_task(
         }
     };
 
-    // Create a single VideoManager that we'll reuse with dynamic crop updates
-    let mut vid_mgr = VideoManager::new_with_crop(
+    let (output_width, output_height) = TilePosition::get_output_dimensions();
+
+    let initial_width = 3840u32; // Assume 4K source
+    let initial_height = 2160u32;
+    let (crop_x, crop_y, crop_width, crop_height) =
+        tile_pos.get_crop_params(initial_width, initial_height);
+
+    let mut vid_mgr = match VideoManager::new_with_crop(
         FourCC(*b"H264"),
-        1920,               // tile output width
-        1080,               // tile output height
-        (0, 0, 1920, 1080), // initial crop region (will be updated per frame)
+        output_width as i32,
+        output_height as i32,
+        (
+            crop_x as i32,
+            crop_y as i32,
+            crop_width as i32,
+            crop_height as i32,
+        ),
         args.h264_bitrate,
-    )
-    .unwrap();
+        Some(args.h264_tiles_fps as i32),
+    ) {
+        Ok(mgr) => mgr,
+        Err(e) => {
+            error!(
+                "Failed to create VideoManager for tile {:?} with dimensions {}x{}, crop ({}, {}, {}, {}): {:?}",
+                tile_pos, output_width, output_height, crop_x, crop_y, crop_width, crop_height, e
+            );
+            return;
+        }
+    };
+
+    let mut last_source_size = (initial_width, initial_height);
+    let tile_fps_limit = args.h264_tiles_fps;
+    let frame_interval = Duration::from_millis(1000 / tile_fps_limit as u64);
+    let mut last_encode_time = Instant::now();
 
     loop {
         let (source_img, ts) = match rx.recv() {
@@ -490,15 +525,24 @@ async fn h264_single_tile_task(
 
         let span = info_span!("h264_tile", tile = ?tile_pos);
         async {
-            let (crop_x, crop_y, crop_width, crop_height) =
-                tile_pos.get_crop_params(source_img.width(), source_img.height());
+            let now = Instant::now();
+            if now.duration_since(last_encode_time) < frame_interval {
+                return;
+            }
+            last_encode_time = now;
+            let current_source_size = (source_img.width(), source_img.height());
+            if current_source_size != last_source_size {
+                let (new_crop_x, new_crop_y, new_crop_width, new_crop_height) =
+                    tile_pos.get_crop_params(source_img.width(), source_img.height());
+                vid_mgr.update_crop_region(
+                    new_crop_x as i32,
+                    new_crop_y as i32,
+                    new_crop_width as i32,
+                    new_crop_height as i32,
+                );
+                last_source_size = current_source_size;
+            }
 
-            vid_mgr.update_crop_region(
-                crop_x as i32,
-                crop_y as i32,
-                crop_width as i32,
-                crop_height as i32,
-            );
             match vid_mgr.encode_direct(&source_img) {
                 Ok((data, _is_key)) => match build_tile_video_msg(&data, &ts, &args, tile_pos) {
                     Ok((msg, enc)) => {

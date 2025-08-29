@@ -82,6 +82,10 @@ pub struct Args {
     )]
     pub h264_tiles_topics: Vec<String>,
 
+    /// h264 tiles fps limit (lower than camera fps to reduce artifacts)
+    #[arg(long, env, default_value = "15")]
+    pub h264_tiles_fps: u32,
+
     /// streaming resolution
     #[arg(
         short,

@@ -33,7 +33,7 @@ impl VideoManager {
         };
         let encoder = Encoder::create(profile as u32, u32::from(video_fmt), TARGET_FPS);
         let crop = VSLRect::new(0, 0, width, height);
-        let output_frame = match encoder.new_output_frame(width, height, -1, -1, -1) {
+        let output_frame = match encoder.new_output_frame(width, height, 30i64, 0, 0) {
             Ok(f) => f,
             Err(e) => {
                 return Err(e);
@@ -53,6 +53,7 @@ impl VideoManager {
         output_height: i32,
         crop_rect: (i32, i32, i32, i32), // (x, y, width, height)
         bitrate: H264Bitrate,
+        target_fps: Option<i32>,
     ) -> Result<VideoManager, Box<dyn Error>> {
         let profile = match bitrate {
             H264Bitrate::Auto => VSLEncoderProfileEnum::Auto,
@@ -61,15 +62,20 @@ impl VideoManager {
             H264Bitrate::Mbps50 => VSLEncoderProfileEnum::Kbps50000,
             H264Bitrate::Mbps100 => VSLEncoderProfileEnum::Kbps100000,
         };
-        let encoder = Encoder::create(profile as u32, u32::from(video_fmt), TARGET_FPS);
+
+        let fps = target_fps.unwrap_or(TARGET_FPS);
+        let encoder = Encoder::create(profile as u32, u32::from(video_fmt), fps);
+
         let (crop_x, crop_y, crop_width, crop_height) = crop_rect;
         let crop = VSLRect::new(crop_x, crop_y, crop_width, crop_height);
-        let output_frame = match encoder.new_output_frame(output_width, output_height, -1, -1, -1) {
-            Ok(f) => f,
-            Err(e) => {
-                return Err(e);
-            }
-        };
+
+        let output_frame =
+            match encoder.new_output_frame(output_width, output_height, fps as i64, 0, 0) {
+                Ok(f) => f,
+                Err(e) => {
+                    return Err(e);
+                }
+            };
         Ok(Self {
             encoder,
             crop,
@@ -96,19 +102,7 @@ impl VideoManager {
         info_span!("h264_encode").in_scope(|| self.encode_from_vsl(&frame))
     }
 
-    pub fn encode_only(&mut self, img: &Image) -> Result<(Vec<u8>, bool), Box<dyn Error>> {
-        let frame: Frame = match img.try_into() {
-            Ok(f) => f,
-            Err(e) => {
-                return Err(e);
-            }
-        };
-
-        info_span!("h264_encode").in_scope(|| self.encode_from_vsl(&frame))
-    }
-
     pub fn encode_direct(&mut self, source_img: &Image) -> Result<(Vec<u8>, bool), Box<dyn Error>> {
-        // Convert source image directly to frame and encode with VPU crop
         let frame: Frame = match source_img.try_into() {
             Ok(f) => f,
             Err(e) => {
