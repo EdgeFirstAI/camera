@@ -69,6 +69,23 @@ pub struct Args {
     #[arg(long, env, default_value = "auto")]
     pub h264_bitrate: H264Bitrate,
 
+    /// stream H264 tiles (4x 1080p tiles for 4K)
+    #[arg(long, env)]
+    pub h264_tiles: bool,
+
+    /// h264 tiles topics (tl, tr, bl, br)
+    #[arg(
+        long,
+        default_value = "rt/camera/h264/tl rt/camera/h264/tr rt/camera/h264/bl rt/camera/h264/br",
+        value_delimiter = ' ',
+        num_args = 4
+    )]
+    pub h264_tiles_topics: Vec<String>,
+
+    /// h264 tiles fps limit (lower than camera fps to reduce artifacts)
+    #[arg(long, env, default_value = "15")]
+    pub h264_tiles_fps: u32,
+
     /// streaming resolution
     #[arg(
         short,
