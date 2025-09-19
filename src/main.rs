@@ -343,8 +343,9 @@ fn try_send(tx: &Sender<(Image, Timestamp)>, img: Image, ts: Timestamp, _name: &
     match tx.try_send((img, ts)) {
         Ok(_) => {}
         Err(_) => {
-            // Channel issue - likely full due to slow encoding, which is expected with 4 tile threads
-            // Silently drop frames when channels are full to avoid log spam
+            // Channel issue - likely full due to slow encoding, which is
+            // expected with 4 tile threads Silently drop frames
+            // when channels are full to avoid log spam
         }
     }
 }
