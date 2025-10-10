@@ -175,6 +175,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
     args.camera_size[0] = cam.width() as u32;
     args.camera_size[1] = cam.height() as u32;
 
+    // Automatically enable tiling for resolutions greater than 1080p
+    if args.camera_size[1] > 1080 {
+        if !args.h264_tiles {
+            info!(
+                "Camera resolution {}x{} exceeds 1080p, automatically enabling H264 tiling",
+                args.camera_size[0], args.camera_size[1]
+            );
+            args.h264_tiles = true;
+        } else {
+            info!(
+                "H264 tiling already enabled for {}x{} resolution",
+                args.camera_size[0], args.camera_size[1]
+            );
+        }
+    } else if args.h264_tiles {
+        info!(
+            "H264 tiling manually enabled for {}x{} resolution",
+            args.camera_size[0], args.camera_size[1]
+        );
+    }
+
     let session = zenoh::open(args.clone()).await.unwrap();
     let stream_task = stream(cam, session, args);
 
