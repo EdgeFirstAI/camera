@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
+
 mod args;
 mod video;
 
@@ -334,19 +337,19 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         let info_task = publ_info.put(info_msg.clone()).encoding(info_enc.clone());
 
         if args.h264 {
-            let ts = camera_buffer.timestamp();
+            let ts = camera_buffer.timestamp()?;
             let src_img = Image::from_camera(&camera_buffer)?;
             try_send(&h264_tx, src_img, ts, "H264");
         }
 
         if args.jpeg {
-            let ts = camera_buffer.timestamp();
+            let ts = camera_buffer.timestamp()?;
             let src_img = Image::from_camera(&camera_buffer)?;
             try_send(&jpeg_tx, src_img, ts, "JPEG");
         }
 
         if args.h264_tiles {
-            let ts = camera_buffer.timestamp();
+            let ts = camera_buffer.timestamp()?;
             for (i, tx) in h264_tiles_txs.iter().enumerate() {
                 let src_img = Image::from_camera(&camera_buffer)?;
                 try_send(tx, src_img, ts, &format!("H264_TILE_{}", i));
@@ -687,13 +690,13 @@ fn camera_dma_serialize(
     buf: &CameraBuffer<'_>,
     pid: u32,
     frame_id: String,
-) -> Result<(ZBytes, Encoding), cdr::Error> {
-    let ts = buf.timestamp();
+) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
+    let ts = buf.timestamp()?;
     let width = buf.width() as u32;
     let height = buf.height() as u32;
     let fourcc = buf.format().into();
     let dma_buf = buf.rawfd();
-    let length = buf.length() as u32;
+    let length = buf.length()? as u32;
 
     let msg = DmaBuf {
         header: std_msgs::Header {
@@ -713,7 +716,7 @@ fn camera_dma_serialize(
     };
 
     let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite)?);
-    let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/DmaBuffer");
+    let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/DmaBuf");
 
     Ok((msg, enc))
 }

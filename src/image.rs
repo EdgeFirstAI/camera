@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
+
 use core::fmt;
 use dma_buf::DmaBuf;
 use dma_heap::{Heap, HeapKind};
@@ -24,16 +27,33 @@ use turbojpeg::{
 };
 use videostream::{camera::CameraBuffer, encoder::VSLRect, fourcc::FourCC, frame::Frame};
 
+/// RGB 24-bit pixel format (8 bits per channel, no alpha)
 pub const RGB3: FourCC = FourCC(*b"RGB3");
+
+/// RGBX 32-bit pixel format (8 bits per channel, unused alpha)
 pub const RGBX: FourCC = FourCC(*b"RGBX");
+
+/// RGBA 32-bit pixel format (8 bits per channel, with alpha)
 pub const RGBA: FourCC = FourCC(*b"RGBA");
+
+/// YUYV 4:2:2 YUV packed format (common camera output format)
 pub const YUYV: FourCC = FourCC(*b"YUYV");
+
+/// NV12 4:2:0 YUV semi-planar format (efficient for video encoding)
 pub const NV12: FourCC = FourCC(*b"NV12");
 
+/// Rectangle specification for crop operations.
+///
+/// Defines a rectangular region within an image for cropping,
+/// tiling, or region-of-interest operations.
 pub struct Rect {
+    /// X coordinate of top-left corner
     pub x: i32,
+    /// Y coordinate of top-left corner
     pub y: i32,
+    /// Width of the rectangle in pixels
     pub width: i32,
+    /// Height of the rectangle in pixels
     pub height: i32,
 }
 
@@ -48,12 +68,20 @@ impl From<VSLRect> for Rect {
     }
 }
 
+/// Image rotation angles supported by G2D hardware.
+///
+/// The G2D hardware accelerator supports 90-degree rotations
+/// for efficient image transformation without CPU intervention.
 #[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
 pub enum Rotation {
+    /// No rotation (0 degrees)
     Rotation0 = g2d_rotation_G2D_ROTATION_0 as isize,
+    /// Rotate 90 degrees clockwise
     Rotation90 = g2d_rotation_G2D_ROTATION_90 as isize,
+    /// Rotate 180 degrees
     Rotation180 = g2d_rotation_G2D_ROTATION_180 as isize,
+    /// Rotate 270 degrees clockwise (90 degrees counter-clockwise)
     Rotation270 = g2d_rotation_G2D_ROTATION_270 as isize,
 }
 pub struct G2DBuffer<'a> {
@@ -63,10 +91,32 @@ pub struct G2DBuffer<'a> {
 
 #[allow(dead_code)]
 impl G2DBuffer<'_> {
+    /// Get the DMA buffer handle.
+    ///
+    /// # Safety
+    ///
+    /// This function dereferences a raw pointer to a `g2d_buf` structure.
+    /// The caller must ensure that:
+    /// - The `G2DBuffer` was properly initialized with a valid `g2d_buf`
+    ///   pointer
+    /// - The underlying buffer has not been freed
+    /// - No data races occur when accessing the buffer handle
     pub unsafe fn buf_handle(&self) -> *mut c_void {
         (*self.buf).buf_handle
     }
 
+    /// Get the virtual address of the DMA buffer.
+    ///
+    /// # Safety
+    ///
+    /// This function dereferences a raw pointer to a `g2d_buf` structure.
+    /// The caller must ensure that:
+    /// - The `G2DBuffer` was properly initialized with a valid `g2d_buf`
+    ///   pointer
+    /// - The underlying buffer has not been freed
+    /// - No data races occur when accessing the buffer's virtual address
+    /// - The returned pointer is only dereferenced while the buffer remains
+    ///   valid
     pub unsafe fn buf_vaddr(&self) -> *mut c_void {
         (*self.buf).buf_vaddr
     }
@@ -87,6 +137,32 @@ impl Drop for G2DBuffer<'_> {
     }
 }
 
+/// Manager for NXP G2D hardware accelerator operations.
+///
+/// `ImageManager` provides a safe interface to the NXP i.MX8 G2D hardware
+/// accelerator for efficient image processing operations including format
+/// conversion, scaling, cropping, and rotation.
+///
+/// # Thread Safety
+///
+/// `ImageManager` is **not** thread-safe. Create separate instances for each
+/// thread, or use synchronization primitives to protect shared access.
+///
+/// # Example
+///
+/// ```no_run
+/// use edgefirst_camera::image::{Image, ImageManager, Rotation, NV12, YUYV};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let imgmgr = ImageManager::new()?;
+/// let src = Image::new(1920, 1080, YUYV)?;
+/// let dst = Image::new(1920, 1080, NV12)?;
+///
+/// // Convert YUYV to NV12 using hardware acceleration
+/// imgmgr.convert(&src, &dst, None, Rotation::Rotation0)?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct ImageManager {
     lib: g2d_library,
     version: g2d_sys::Version,
@@ -101,6 +177,18 @@ const G2D_2_3_0: g2d_sys::Version = g2d_sys::Version {
 };
 
 impl ImageManager {
+    /// Creates a new ImageManager instance and opens the G2D hardware device.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The G2D library cannot be loaded (`libg2d.so.2`)
+    /// - The G2D device cannot be opened (usually `/dev/galcore`)
+    /// - Insufficient permissions to access the hardware
+    ///
+    /// # Platform Requirements
+    ///
+    /// Requires NXP i.MX8M Plus with G2D hardware support.
     pub fn new() -> Result<Self, Box<dyn Error>> {
         let lib = unsafe { g2d_library::new("libg2d.so.2") }?;
         let mut handle: *mut c_void = null_mut();
@@ -121,12 +209,23 @@ impl ImageManager {
         self.version
     }
 
+    /// Allocates a G2D buffer for hardware-accelerated operations.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - Buffer width in pixels
+    /// * `height` - Buffer height in pixels
+    /// * `channels` - Number of bytes per pixel
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the G2D driver fails to allocate the buffer.
     pub fn alloc(
         &self,
         width: i32,
         height: i32,
         channels: i32,
-    ) -> Result<G2DBuffer, Box<dyn Error>> {
+    ) -> Result<G2DBuffer<'_>, Box<dyn Error>> {
         let g2d_buf = unsafe { self.lib.g2d_alloc(width * height * channels, 0) };
         if g2d_buf.is_null() {
             return Err(Box::new(io::Error::other("g2d_alloc failed")));
@@ -201,6 +300,24 @@ impl ImageManager {
         Ok(())
     }
 
+    /// Converts an image using the new G2D API (version 2.3.0+).
+    ///
+    /// Performs hardware-accelerated format conversion, with optional cropping
+    /// and rotation. This method is used on newer NXP platforms.
+    ///
+    /// # Arguments
+    ///
+    /// * `from` - Source image (must be DMA-backed)
+    /// * `to` - Destination image (must be DMA-backed)
+    /// * `crop` - Optional cropping rectangle
+    /// * `rot` - Rotation angle (0, 90, 180, or 270 degrees)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - G2D blit operation fails
+    /// - Images are not compatible (invalid formats or dimensions)
+    /// - Hardware operation cannot complete
     pub fn convert_new(
         &self,
         from: &Image,
@@ -345,6 +462,28 @@ impl Drop for ImageManager {
     }
 }
 
+/// DMA-backed image buffer for zero-copy image operations.
+///
+/// `Image` represents an image buffer allocated in DMA (Direct Memory Access)
+/// memory, enabling zero-copy sharing between processes and hardware
+/// accelerators. The buffer is automatically freed when the `Image` is dropped.
+///
+/// # Example
+///
+/// ```no_run
+/// use edgefirst_camera::image::{Image, YUYV};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // Allocate a 1080p YUYV image in DMA memory
+/// let img = Image::new(1920, 1080, YUYV)?;
+///
+/// // Image dimensions and format can be queried
+/// assert_eq!(img.width(), 1920);
+/// assert_eq!(img.height(), 1080);
+/// assert_eq!(img.format(), YUYV);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug)]
 pub struct Image {
     fd: OwnedFd,
@@ -369,6 +508,39 @@ const fn image_size(width: u32, height: u32, format: FourCC) -> usize {
 }
 
 impl Image {
+    /// Allocates a new DMA-backed image buffer.
+    ///
+    /// Creates an image buffer in CMA (Contiguous Memory Allocator) DMA memory,
+    /// suitable for hardware-accelerated operations and zero-copy sharing.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - Image width in pixels
+    /// * `height` - Image height in pixels
+    /// * `format` - Pixel format (YUYV, NV12, RGBA, etc.)
+    ///
+    /// # Returns
+    ///
+    /// A new `Image` with the specified dimensions and format.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - DMA heap allocation fails (out of memory)
+    /// - Invalid dimensions or format specified
+    /// - DMA heap device is not accessible
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use edgefirst_camera::image::{Image, YUYV};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let img = Image::new(1920, 1080, YUYV)?;
+    /// println!("Allocated {} bytes in DMA memory", img.size());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(width: u32, height: u32, format: FourCC) -> Result<Self, Box<dyn Error>> {
         let heap = Heap::new(HeapKind::Cma)?;
         let fd = heap.allocate(image_size(width, height, format))?;
@@ -389,6 +561,18 @@ impl Image {
         }
     }
 
+    /// Creates an `Image` from a V4L2 camera buffer.
+    ///
+    /// Wraps an existing V4L2 camera buffer (from the videostream library)
+    /// in an `Image` structure, enabling G2D operations on camera frames.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - Reference to a V4L2 camera buffer
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file descriptor cannot be duplicated.
     pub fn from_camera(buffer: &CameraBuffer) -> Result<Self, Box<dyn Error>> {
         let fd = buffer.fd();
 
@@ -457,10 +641,7 @@ impl TryFrom<&Image> for Frame {
             0,
             img.format().to_string().as_str(),
         )?;
-        match frame.attach(img.fd().as_raw_fd(), 0, 0) {
-            Ok(_) => (),
-            Err(e) => return Err(e),
-        }
+        frame.attach(img.fd().as_raw_fd(), 0, 0)?;
         Ok(frame)
     }
 }
@@ -523,6 +704,15 @@ impl fmt::Display for Image {
     }
 }
 
+/// Memory-mapped view of an `Image` buffer.
+///
+/// Provides CPU-accessible view of a DMA image buffer through memory mapping.
+/// The mapping is automatically unmapped when dropped.
+///
+/// # Safety
+///
+/// While the API is safe, concurrent access from hardware and CPU can lead to
+/// race conditions. Ensure hardware operations complete before CPU access.
 pub struct MappedImage {
     mmap: *mut u8,
     len: usize,
@@ -545,6 +735,40 @@ impl Drop for MappedImage {
     }
 }
 
+/// Encodes an RGBA image to JPEG format using turbojpeg.
+///
+/// Uses the turbojpeg library with SIMD optimizations for fast JPEG
+/// compression.
+///
+/// # Arguments
+///
+/// * `pix` - Raw RGBA pixel data
+/// * `img` - Image metadata (dimensions and format)
+///
+/// # Returns
+///
+/// JPEG-compressed image as an owned buffer.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Image metadata is not provided
+/// - JPEG compression fails
+/// - Invalid pixel data or dimensions
+///
+/// # Example
+///
+/// ```no_run
+/// use edgefirst_camera::image::{encode_jpeg, Image, RGBA};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut img = Image::new(640, 480, RGBA)?;
+/// let mut mapped = img.mmap();
+/// let jpeg = encode_jpeg(mapped.as_slice(), Some(&img))?;
+/// println!("Compressed to {} bytes", jpeg.len());
+/// # Ok(())
+/// # }
+/// ```
 pub fn encode_jpeg(pix: &[u8], img: Option<&Image>) -> Result<OwnedBuf, Box<dyn Error>> {
     let img2 = match img {
         Some(img) => turbojpeg::Image {

@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2013-2016 Freescale Semiconductor, Inc.
+// Copyright 2017-2022 NXP
+// Copyright (c) 2025 Au-Zone Technologies
+
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
@@ -108,15 +113,17 @@ impl From<G2DPhysical> for g2d_phys_addr_t_new {
 
 impl From<&Frame> for g2d_surface {
     fn from(frame: &Frame) -> Self {
-        let from_phys: G2DPhysical = match frame.paddr() {
+        let from_phys: G2DPhysical = match frame.paddr().expect("Failed to get paddr") {
             Some(v) => (v as u64).into(),
-            None => unsafe { DmaBuf::from_raw_fd(frame.handle()).into() },
+            None => unsafe {
+                DmaBuf::from_raw_fd(frame.handle().expect("Failed to get frame handle")).into()
+            },
         };
-        let fourcc = FourCC::from(frame.fourcc());
+        let fourcc = FourCC::from(frame.fourcc().expect("Failed to get fourcc"));
         let planes = match fourcc {
             NV12 => {
-                let width = frame.width();
-                let height = frame.height();
+                let width = frame.width().expect("Failed to get width");
+                let height = frame.height().expect("Failed to get height");
                 let y_size = width * height;
                 let v_size = y_size / 4;
                 let phys = from_phys.into();
@@ -129,11 +136,11 @@ impl From<&Frame> for g2d_surface {
             format: G2DFormat::from(fourcc).format(),
             left: 0,
             top: 0,
-            right: frame.width(),
-            bottom: frame.height(),
-            stride: frame.width(),
-            width: frame.width(),
-            height: frame.height(),
+            right: frame.width().expect("Failed to get width"),
+            bottom: frame.height().expect("Failed to get height"),
+            stride: frame.width().expect("Failed to get width"),
+            width: frame.width().expect("Failed to get width"),
+            height: frame.height().expect("Failed to get height"),
             blendfunc: 0,
             clrcolor: 0,
             rot: 0,
@@ -144,15 +151,17 @@ impl From<&Frame> for g2d_surface {
 
 impl From<&Frame> for g2d_surface_new {
     fn from(frame: &Frame) -> Self {
-        let from_phys: G2DPhysical = match frame.paddr() {
+        let from_phys: G2DPhysical = match frame.paddr().expect("Failed to get paddr") {
             Some(v) => (v as u64).into(),
-            None => unsafe { DmaBuf::from_raw_fd(frame.handle()).into() },
+            None => unsafe {
+                DmaBuf::from_raw_fd(frame.handle().expect("Failed to get frame handle")).into()
+            },
         };
-        let fourcc = FourCC::from(frame.fourcc());
+        let fourcc = FourCC::from(frame.fourcc().expect("Failed to get fourcc"));
         let planes = match fourcc {
             NV12 => {
-                let width = frame.width() as u64;
-                let height = frame.height() as u64;
+                let width = frame.width().expect("Failed to get width") as u64;
+                let height = frame.height().expect("Failed to get height") as u64;
                 let y_size = width * height;
                 let v_size = y_size / 4;
                 let phys = from_phys.into();
@@ -165,11 +174,11 @@ impl From<&Frame> for g2d_surface_new {
             format: G2DFormat::from(fourcc).format(),
             left: 0,
             top: 0,
-            right: frame.width(),
-            bottom: frame.height(),
-            stride: frame.width(),
-            width: frame.width(),
-            height: frame.height(),
+            right: frame.width().expect("Failed to get width"),
+            bottom: frame.height().expect("Failed to get height"),
+            stride: frame.width().expect("Failed to get width"),
+            width: frame.width().expect("Failed to get width"),
+            height: frame.height().expect("Failed to get height"),
             blendfunc: 0,
             clrcolor: 0,
             rot: 0,

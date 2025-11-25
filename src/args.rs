@@ -1,33 +1,71 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
+
 use clap::Parser;
 use serde_json::json;
 use std::path::PathBuf;
 use zenoh::config::{Config, WhatAmI};
 
+/// Camera image mirroring options.
+///
+/// Determines how the camera image should be flipped before processing.
+/// Useful for correcting camera orientation.
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
 pub enum MirrorSetting {
+    /// No mirroring
     None,
+    /// Flip horizontally (left-right)
     Horizontal,
+    /// Flip vertically (top-bottom)
     Vertical,
+    /// Flip both horizontally and vertically (180-degree rotation)
     Both,
 }
 
+/// H.264 encoding bitrate presets.
+///
+/// Controls the trade-off between video quality and file size.
+/// Higher bitrates produce better quality but larger files.
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
 pub enum H264Bitrate {
+    /// Automatic bitrate selection based on resolution
     Auto,
+    /// 5 Mbps (suitable for 720p)
     Mbps5,
+    /// 25 Mbps (suitable for 1080p)
     Mbps25,
+    /// 50 Mbps (suitable for high-quality 1080p)
     Mbps50,
+    /// 100 Mbps (suitable for 4K or very high quality)
     Mbps100,
 }
 
+/// Command-line arguments for EdgeFirst Camera Node.
+///
+/// This structure defines all configuration options for the camera node,
+/// including camera selection, output formats, Zenoh configuration, and
+/// debugging options. Arguments can be specified via command line or
+/// environment variables (with `EDGEFIRST_CAMERA_` prefix).
+///
+/// # Example
+///
+/// ```bash
+/// # Via command line
+/// edgefirst-camera --camera /dev/video0 --jpeg --h264
+///
+/// # Via environment variables
+/// export EDGEFIRST_CAMERA_CAMERA=/dev/video0
+/// export EDGEFIRST_CAMERA_JPEG=true
+/// edgefirst-camera
+/// ```
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
-    /// camera capture device
+    /// Camera capture device path (e.g., /dev/video0)
     #[arg(short, long, env, default_value = "/dev/video3")]
     pub camera: String,
 
-    /// camera capture resolution
+    /// Camera capture resolution in pixels (width height)
     #[arg(
         long,
         env,
@@ -37,43 +75,44 @@ pub struct Args {
     )]
     pub camera_size: Vec<u32>,
 
-    /// camera mirror
+    /// Camera image mirroring setting
     #[arg(long, env, default_value = "both", value_enum)]
     pub mirror: MirrorSetting,
 
-    /// raw dma topic
+    /// Zenoh topic for raw DMA buffer metadata
     #[arg(long, default_value = "rt/camera/dma")]
     pub dma_topic: String,
 
-    /// camera_info topic
+    /// Zenoh topic for camera calibration info (sensor_msgs/CameraInfo)
     #[arg(long, default_value = "rt/camera/info")]
     pub info_topic: String,
 
-    /// stream JPEGs
+    /// Enable JPEG streaming output
     #[arg(long, env)]
     pub jpeg: bool,
 
-    /// jpeg ros topic
+    /// Zenoh topic for JPEG compressed images (sensor_msgs/CompressedImage)
     #[arg(long, default_value = "rt/camera/jpeg")]
     pub jpeg_topic: String,
 
-    /// stream H264
+    /// Enable H.264 video streaming output
     #[arg(long, env)]
     pub h264: bool,
 
-    /// h264 foxglove topic
+    /// Zenoh topic for H.264 video stream (foxglove_msgs/CompressedVideo)
     #[arg(long, default_value = "rt/camera/h264")]
     pub h264_topic: String,
 
-    /// h264 bitrate setting
+    /// H.264 encoding bitrate preset
     #[arg(long, env, default_value = "auto")]
     pub h264_bitrate: H264Bitrate,
 
-    /// stream H264 tiles (4x 1080p tiles for 4K)
+    /// Enable 4K tiling (splits 4K into 4x 1080p tiles for hardware encoding)
     #[arg(long, env)]
     pub h264_tiles: bool,
 
-    /// h264 tiles topics (tl, tr, bl, br)
+    /// Zenoh topics for H.264 tiles: top-left, top-right, bottom-left,
+    /// bottom-right
     #[arg(
         long,
         default_value = "rt/camera/h264/tl rt/camera/h264/tr rt/camera/h264/bl rt/camera/h264/br",
@@ -82,11 +121,12 @@ pub struct Args {
     )]
     pub h264_tiles_topics: Vec<String>,
 
-    /// h264 tiles fps limit (lower than camera fps to reduce artifacts)
+    /// FPS limit for H.264 tiles (lower than camera FPS to reduce compression
+    /// artifacts)
     #[arg(long, env, default_value = "15")]
     pub h264_tiles_fps: u32,
 
-    /// streaming resolution
+    /// Output streaming resolution in pixels (width height)
     #[arg(
         short,
         long,
@@ -97,15 +137,15 @@ pub struct Args {
     )]
     pub stream_size: Vec<u32>,
 
-    /// verbose logging
+    /// Enable verbose debug logging
     #[arg(short, long)]
     pub verbose: bool,
 
-    /// isp-imx data location (json format)
+    /// Path to camera calibration JSON file (isp-imx format)
     #[arg(long, env)]
     pub cam_info_path: Option<PathBuf>,
 
-    /// camera optical frame transform vector from base_link
+    /// Camera optical frame translation from base_link (x y z in meters)
     #[arg(
         long,
         env,
@@ -115,7 +155,7 @@ pub struct Args {
     )]
     pub cam_tf_vec: Vec<f64>,
 
-    /// camera optical frame transform quaternion from base_link
+    /// Camera optical frame rotation quaternion from base_link (x y z w)
     #[arg(
         long,
         env,
@@ -125,35 +165,35 @@ pub struct Args {
     )]
     pub cam_tf_quat: Vec<f64>,
 
-    /// The name of the base frame
+    /// TF frame ID for robot base
     #[arg(long, default_value = "base_link")]
     pub base_frame_id: String,
 
-    /// The name of the camera optical frame
+    /// TF frame ID for camera optical frame
     #[arg(long, default_value = "camera_optical")]
     pub camera_frame_id: String,
 
-    /// Enable tokio console logging
+    /// Enable Tokio async runtime console for debugging
     #[arg(long, env)]
     pub tokio_console: bool,
 
-    /// Enable Tracy profiler broadcast
+    /// Enable Tracy profiler for performance analysis
     #[arg(long, env)]
     pub tracy: bool,
 
-    /// zenoh connection mode
+    /// Zenoh participant mode (peer, client, or router)
     #[arg(long, env, default_value = "peer")]
     mode: WhatAmI,
 
-    /// connect to zenoh endpoints
+    /// Zenoh endpoints to connect to (can specify multiple)
     #[arg(long, env)]
     connect: Vec<String>,
 
-    /// listen to zenoh endpoints
+    /// Zenoh endpoints to listen on (can specify multiple)
     #[arg(long, env)]
     listen: Vec<String>,
 
-    /// disable zenoh multicast scouting
+    /// Disable Zenoh multicast peer discovery
     #[arg(long, env)]
     no_multicast_scouting: bool,
 }

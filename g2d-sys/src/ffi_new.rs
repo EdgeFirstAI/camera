@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (C) 2013-2016 Freescale Semiconductor, Inc.
+// Copyright 2017-2022 NXP
+// Copyright (c) 2025 Au-Zone Technologies
+
 use crate::{g2d_blend_func, g2d_format, g2d_rotation};
 
 // g2d 2.3.0 changed the size of the g2d_phys_addr so we need this for

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
+
 use criterion::{criterion_group, criterion_main, Criterion};
 use edgefirst_camera::{
     image,
