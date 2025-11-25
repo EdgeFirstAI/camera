@@ -132,8 +132,8 @@ jobs:
       - name: Run doc tests
         run: cargo test --doc --workspace
 
-      - name: Run integration tests
-        run: cargo test --test '*' --workspace
+      # Note: Integration tests require hardware (DMA buffers, G2D, camera devices)
+      # and are skipped in CI. Run on target hardware with: cargo test --test '*'
 
       - name: Generate coverage
         run: cargo llvm-cov --workspace --cobertura --output-path coverage.xml
