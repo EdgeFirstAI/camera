@@ -99,6 +99,11 @@ jobs:
         with:
           fetch-depth: 0  # Full history for better analysis
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
