@@ -136,7 +136,11 @@ jobs:
       # and are skipped in CI. Run on target hardware with: cargo test --test '*'
 
       - name: Generate coverage
-        run: cargo llvm-cov --workspace --cobertura --output-path coverage.xml
+        run: |
+          # Only generate coverage for unit tests (--lib) and doc tests (--doc)
+          # Integration tests require hardware and are excluded
+          cargo llvm-cov --lib --workspace --cobertura --output-path coverage.xml
+          cargo llvm-cov --doc --workspace --cobertura --output-path coverage-doc.xml || true
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3

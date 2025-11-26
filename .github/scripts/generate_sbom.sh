@@ -180,7 +180,8 @@ echo "[3/6] Generating dependency SBOM..."
 # For Rust projects with cargo-cyclonedx
 if [ -f "Cargo.toml" ] && command -v cargo-cyclonedx &> /dev/null; then
     echo "  Generating Rust dependencies with cargo-cyclonedx..."
-    cargo cyclonedx --format json --all
+    # Use --all to include dependency graph and all features
+    cargo cyclonedx --format json --all --describe dependencies
     # Rename output to deps-sbom.json
     if [ -f "$PROJECT_NAME.cdx.json" ]; then
         mv "$PROJECT_NAME.cdx.json" deps-sbom.json

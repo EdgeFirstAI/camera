@@ -41,8 +41,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cargo-cyclonedx
-        run: cargo install cargo-cyclonedx --version 0.5.7
+      - name: Install cargo tools
+        run: |
+          cargo install cargo-cyclonedx --version 0.5.7
+          cargo install cargo-license --version 0.7.0
 
       - name: Set up Python
         uses: actions/setup-python@v5
