@@ -43,6 +43,13 @@ PROPRIETARY_LICENSES: Set[str] = {
     "Proprietary",
 }
 
+# Known packages with correct licenses that cargo-cyclonedx fails to detect
+# These are manually verified and should be included in NOTICE validation
+KNOWN_ATTRIBUTION_PACKAGES: Set[str] = {
+    "dma-buf",   # MIT license (cargo-cyclonedx reports as "Unknown")
+    "dma-heap",  # MIT license (cargo-cyclonedx reports as "Unknown")
+}
+
 
 def extract_license_from_component(component: Dict) -> Set[str]:
     """Extract all license identifiers from a component."""
@@ -117,9 +124,10 @@ def get_first_level_dependencies(sbom: Dict) -> Set[str]:
             version = component.get("version", "unknown")
             licenses = extract_license_from_component(component)
 
-            # Include if it requires attribution or is proprietary
+            # Include if it requires attribution, is proprietary, or is in known packages list
             if (licenses.intersection(ATTRIBUTION_REQUIRED_LICENSES) or
-                licenses.intersection(PROPRIETARY_LICENSES)):
+                licenses.intersection(PROPRIETARY_LICENSES) or
+                name in KNOWN_ATTRIBUTION_PACKAGES):
                 first_level.add(f"{name} {version}")
 
     return first_level

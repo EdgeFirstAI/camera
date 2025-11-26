@@ -178,7 +178,7 @@ echo
 echo "[3/6] Generating dependency SBOM..."
 
 # For Rust projects with cargo-cyclonedx
-if [ -f "Cargo.toml" ] && command -v cargo-cyclonedx &> /dev/null; then
+if [ -f "Cargo.toml" ] && cargo cyclonedx --version &> /dev/null; then
     echo "  Generating Rust dependencies with cargo-cyclonedx..."
     # Use --all to include all features and workspace members
     cargo cyclonedx --format json --all
@@ -223,14 +223,19 @@ $CYCLONEDX merge \
     --input-files source-sbom.json deps-sbom.json \
     --output-file sbom-temp.json
 
-# Remove duplicate project component from components list
+# Remove duplicate project component and restore dependency graph
 python3 << EOF
 import json
 
 PROJECT_NAME = "$PROJECT_NAME"
 
+# Load the merged SBOM
 with open('sbom-temp.json', 'r') as f:
     sbom = json.load(f)
+
+# Load the original deps-sbom to get dependency graph and metadata
+with open('deps-sbom.json', 'r') as f:
+    deps_sbom = json.load(f)
 
 # Filter out project name from components (it's defined in metadata, not a dependency)
 if 'components' in sbom:
@@ -238,6 +243,19 @@ if 'components' in sbom:
         c for c in sbom['components']
         if c.get('name') != PROJECT_NAME.lower()
     ]
+
+# Restore dependency graph from deps-sbom (lost during merge)
+if 'dependencies' in deps_sbom:
+    sbom['dependencies'] = deps_sbom['dependencies']
+
+# Restore bom-ref in metadata.component (lost during merge)
+if 'metadata' in deps_sbom and 'component' in deps_sbom['metadata']:
+    if 'bom-ref' in deps_sbom['metadata']['component']:
+        if 'metadata' not in sbom:
+            sbom['metadata'] = {}
+        if 'component' not in sbom['metadata']:
+            sbom['metadata']['component'] = {}
+        sbom['metadata']['component']['bom-ref'] = deps_sbom['metadata']['component']['bom-ref']
 
 with open('sbom.json', 'w') as f:
     json.dump(sbom, f, indent=2)
