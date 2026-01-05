@@ -290,7 +290,8 @@ jobs:
             WIDTH=$(echo $RES | cut -d'x' -f1)
             HEIGHT=$(echo $RES | cut -d'x' -f2)
 
-            timeout 15 ./bin/edgefirst-camera --jpeg --camera-size "$WIDTH $HEIGHT" 2>&1
+            # --camera-size requires two separate arguments (not quoted together)
+            timeout 15 ./bin/edgefirst-camera --jpeg --camera-size $WIDTH $HEIGHT 2>&1
             EXIT_CODE=$?
 
             if [ $EXIT_CODE -eq 124 ]; then
