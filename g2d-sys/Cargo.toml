@@ -12,4 +12,4 @@ edition = "2021"
 libloading = "0.8.1"
 dma-buf = "0.4.0"
 nix = { version = "0.29.0", features = ["ioctl"] }
-videostream = "2.1"
+videostream = "2.1.4"
