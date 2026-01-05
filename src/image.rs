@@ -60,10 +60,10 @@ pub struct Rect {
 impl From<VSLRect> for Rect {
     fn from(value: VSLRect) -> Self {
         Rect {
-            x: value.get_x(),
-            y: value.get_y(),
-            width: value.get_width(),
-            height: value.get_height(),
+            x: value.x(),
+            y: value.y(),
+            width: value.width(),
+            height: value.height(),
         }
     }
 }

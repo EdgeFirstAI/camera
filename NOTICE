@@ -26,7 +26,7 @@ that require attribution:
   * tracy-client 0.18.3 (Apache-2.0 OR MIT)
   * turbojpeg 1.3.3 (MIT OR Unlicense)
   * unix-ts 1.0.0 (MIT)
-  * videostream 1.5.5 (Apache-2.0)
+  * videostream 2.1.4 (Apache-2.0)
   * zenoh 1.6.2 (Apache-2.0 OR EPL-2.0)
 
 For complete license texts, see the individual project repositories.

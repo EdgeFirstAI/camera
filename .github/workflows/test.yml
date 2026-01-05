@@ -8,6 +8,16 @@
 # - dtolnay/rust-toolchain@stable (latest)
 # - actions/upload-artifact@v4 (latest)
 # - codecov/codecov-action@v3 (latest)
+#
+# Runner Notes:
+# - ubuntu-22.04: Standard GitHub-hosted runner (x86_64)
+# - ubuntu-22.04-arm: GitHub-hosted ARM64 runner for native aarch64 builds/tests
+# - nxp-imx8mp-latest: NXP i.MX 8M Plus EVK - hardware test runner (no toolchain)
+#
+# Build Strategy:
+# - x86_64 and aarch64 builds happen on GitHub-hosted runners
+# - imx8mp runner downloads aarch64 artifacts and runs hardware tests only
+# - This allows testing with real camera, G2D, and VPU hardware
 
 name: Test
 
@@ -90,7 +100,8 @@ jobs:
         platform:
           - name: x86_64
             runner: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
+          - name: aarch64
+            runner: ubuntu-22.04-arm
       fail-fast: false
 
     steps:
@@ -116,15 +127,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/registry/index
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-index-
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-index-
 
       - name: Cache cargo build
         uses: actions/cache@v4
         with:
           path: target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-test-
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-test-
 
       - name: Run unit tests
         run: cargo test --lib --workspace
@@ -157,3 +168,161 @@ jobs:
           path: |
             coverage.xml
           retention-days: 30
+
+      - name: Build release binary for hardware testing (aarch64 only)
+        if: matrix.platform.name == 'aarch64'
+        run: cargo build --release
+
+      - name: Upload binary for hardware testing (aarch64 only)
+        uses: actions/upload-artifact@v4
+        if: matrix.platform.name == 'aarch64'
+        with:
+          name: binary-aarch64
+          path: target/release/edgefirst-camera
+          retention-days: 7
+
+  # ===========================================================================
+  # Hardware Testing on NXP i.MX8M Plus (test-only, no build)
+  # ===========================================================================
+  hardware-test:
+    name: Hardware Test (imx8mp)
+    needs: test
+    runs-on: nxp-imx8mp-latest
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+
+    steps:
+      - name: Clean workspace (self-hosted runner)
+        run: |
+          # Self-hosted runners persist state between runs
+          rm -rf target/ 2>/dev/null || true
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download aarch64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: binary-aarch64
+          path: bin/
+
+      - name: Make downloaded binary executable
+        run: |
+          chmod +x bin/edgefirst-camera
+          echo "Binary ready for testing:"
+          ls -la bin/
+          file bin/edgefirst-camera
+
+      - name: Debug environment info
+        run: |
+          echo "=== User and groups ==="
+          whoami
+          id
+          groups
+          echo ""
+          echo "=== DMA heap devices ==="
+          ls -la /dev/dma_heap/ || echo "DMA heap directory not found"
+          echo ""
+          echo "=== G2D device ==="
+          ls -la /dev/galcore 2>/dev/null || echo "G2D device not found"
+          echo ""
+          echo "=== Video devices ==="
+          ls -la /dev/video* 2>/dev/null || echo "No video devices found"
+          v4l2-ctl --list-devices 2>/dev/null || echo "v4l2-ctl not available"
+          echo ""
+          echo "=== Camera device /dev/video3 details ==="
+          v4l2-ctl --device=/dev/video3 --all 2>&1 || echo "Could not query /dev/video3"
+          echo ""
+          echo "=== VPU encoder library ==="
+          ldconfig -p | grep libhantro_vc8000e || echo "libhantro_vc8000e.so not found"
+          echo ""
+          echo "=== VideoStream library ==="
+          ldconfig -p | grep libvideostream || echo "libvideostream.so not found"
+
+      - name: Test camera binary help
+        run: |
+          echo "=== Testing binary help output ==="
+          ./bin/edgefirst-camera --help
+
+      - name: Test camera with JPEG output (10 frames)
+        run: |
+          echo "=== Testing JPEG capture (10 frames) ==="
+          timeout 30 ./bin/edgefirst-camera --jpeg --frames 10 2>&1 || {
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 124 ]; then
+              echo "Test timed out after 30 seconds"
+              exit 1
+            fi
+            # Exit code 0 means we captured frames successfully
+            if [ $EXIT_CODE -ne 0 ]; then
+              echo "Camera test failed with exit code $EXIT_CODE"
+              exit $EXIT_CODE
+            fi
+          }
+          echo "✓ JPEG capture test passed"
+
+      - name: Test camera with H.264 output (10 frames)
+        run: |
+          echo "=== Testing H.264 encoding (10 frames) ==="
+          timeout 30 ./bin/edgefirst-camera --h264 --frames 10 2>&1 || {
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 124 ]; then
+              echo "Test timed out after 30 seconds"
+              exit 1
+            fi
+            if [ $EXIT_CODE -ne 0 ]; then
+              echo "H.264 test failed with exit code $EXIT_CODE"
+              exit $EXIT_CODE
+            fi
+          }
+          echo "✓ H.264 encoding test passed"
+
+      - name: Test camera multi-resolution streaming
+        run: |
+          echo "=== Testing multi-resolution streaming ==="
+
+          # Test resolutions supported by typical cameras
+          RESOLUTIONS="640x480 1280x720 1920x1080"
+          TESTS_PASSED=0
+          TESTS_FAILED=0
+
+          for RES in $RESOLUTIONS; do
+            echo ""
+            echo "--- Testing resolution: $RES ---"
+            if timeout 15 ./bin/edgefirst-camera --jpeg --frames 5 --camera-size $RES 2>&1; then
+              echo "✓ Resolution $RES passed"
+              TESTS_PASSED=$((TESTS_PASSED + 1))
+            else
+              echo "✗ Resolution $RES failed (may not be supported by camera)"
+              TESTS_FAILED=$((TESTS_FAILED + 1))
+            fi
+          done
+
+          echo ""
+          echo "=== Multi-resolution test summary ==="
+          echo "Passed: $TESTS_PASSED"
+          echo "Failed: $TESTS_FAILED"
+
+          # At least one resolution must work
+          if [ $TESTS_PASSED -eq 0 ]; then
+            echo "ERROR: No resolution tests passed!"
+            exit 1
+          fi
+          echo "✓ Multi-resolution test completed"
+
+      - name: Generate test summary
+        if: always()
+        run: |
+          echo "# 🧪 Hardware Test Results (imx8mp)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Environment" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platform**: NXP i.MX 8M Plus EVK" >> $GITHUB_STEP_SUMMARY
+          echo "- **Architecture**: aarch64" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Tests Executed" >> $GITHUB_STEP_SUMMARY
+          echo "- Binary help output" >> $GITHUB_STEP_SUMMARY
+          echo "- JPEG capture (10 frames)" >> $GITHUB_STEP_SUMMARY
+          echo "- H.264 encoding (10 frames)" >> $GITHUB_STEP_SUMMARY
+          echo "- Multi-resolution streaming (640x480, 1280x720, 1920x1080)" >> $GITHUB_STEP_SUMMARY
