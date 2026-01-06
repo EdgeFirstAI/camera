@@ -274,6 +274,7 @@ jobs:
 
       - name: Test camera multi-resolution streaming
         run: |
+          set +e  # Don't exit on error - we handle exit codes manually
           echo "=== Testing multi-resolution streaming ==="
 
           # Test resolutions supported by typical cameras
@@ -317,6 +318,7 @@ jobs:
             exit 1
           fi
           echo "✓ Multi-resolution test completed"
+          exit 0
 
       - name: Generate test summary
         if: always()
