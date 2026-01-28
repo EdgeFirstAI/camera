@@ -5,15 +5,15 @@ mod args;
 mod video;
 
 use args::{Args, MirrorSetting};
-use cdr::{CdrLe, Infinite};
 use clap::Parser;
 use edgefirst_camera::image::{encode_jpeg, Image, ImageManager, Rotation, RGBA};
 use edgefirst_schemas::{
     builtin_interfaces::{self, Time},
-    edgefirst_msgs::DmaBuf,
+    edgefirst_msgs::DmaBuffer,
     foxglove_msgs::FoxgloveCompressedVideo,
     geometry_msgs::{Quaternion, Transform, TransformStamped, Vector3},
     sensor_msgs::{CameraInfo, CompressedImage, RegionOfInterest},
+    serde_cdr,
     std_msgs::{self, Header},
 };
 use kanal::{Receiver, Sender};
@@ -295,13 +295,13 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
 
     let tf_session = session.clone();
     let tf_msg = build_tf_msg(&args);
-    let tf_msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&tf_msg, Infinite).unwrap());
+    let tf_msg = ZBytes::from(serde_cdr::serialize(&tf_msg).unwrap());
     let tf_enc = Encoding::APPLICATION_CDR.with_schema("geometry_msgs/msg/TransformStamped");
     let tf_task = tokio::spawn(async move { tf_static(tf_session, tf_msg, tf_enc).await });
     std::mem::drop(tf_task);
 
     let info_msg = build_info_msg(&args)?;
-    let info_msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&info_msg, Infinite)?);
+    let info_msg = ZBytes::from(serde_cdr::serialize(&info_msg)?);
     let info_enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/CameraInfo");
 
     let src_pid = process::id();
@@ -621,7 +621,7 @@ fn build_jpeg_msg(
             data: jpeg.to_vec(),
         };
 
-        let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
+        let msg = ZBytes::from(serde_cdr::serialize(&msg).unwrap());
         let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/CompressedImage");
 
         Ok((msg, enc))
@@ -650,7 +650,7 @@ fn build_video_msg(
             data,
         };
 
-        let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
+        let msg = ZBytes::from(serde_cdr::serialize(&msg).unwrap());
         let enc = Encoding::APPLICATION_CDR.with_schema("foxglove_msgs/msg/CompressedVideo");
 
         Ok((msg, enc))
@@ -678,7 +678,7 @@ fn build_tile_video_msg(
             data: data.to_vec(),
         };
 
-        let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
+        let msg = ZBytes::from(serde_cdr::serialize(&msg).unwrap());
         let enc = Encoding::APPLICATION_CDR.with_schema("foxglove_msgs/msg/CompressedVideo");
 
         Ok((msg, enc))
@@ -698,7 +698,7 @@ fn camera_dma_serialize(
     let dma_buf = buf.rawfd();
     let length = buf.length()? as u32;
 
-    let msg = DmaBuf {
+    let msg = DmaBuffer {
         header: std_msgs::Header {
             stamp: builtin_interfaces::Time {
                 sec: ts.seconds() as i32,
@@ -715,8 +715,8 @@ fn camera_dma_serialize(
         length,
     };
 
-    let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite)?);
-    let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/DmaBuf");
+    let msg = ZBytes::from(serde_cdr::serialize(&msg)?);
+    let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/DmaBuffer");
 
     Ok((msg, enc))
 }
