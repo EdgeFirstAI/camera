@@ -144,10 +144,15 @@ jobs:
 
       - name: Run unit tests with coverage
         run: |
-          # Run tests with LCOV coverage output using profiling profile
-          # Note: Integration tests require hardware and are excluded
-          cargo llvm-cov nextest --lib --workspace --lcov --output-path coverage.lcov \
-            --profile profiling --cargo-profile profiling --no-fail-fast || true
+          # This is a binary-only crate with no library unit tests
+          # Integration tests require hardware (DMA heap) and run on imx8mp runner
+          # Generate a minimal coverage report for CI purposes
+          echo "Note: No library unit tests in this crate (binary-only)"
+          echo "Coverage is collected from integration tests on hardware runner"
+          
+          # Create empty coverage file so artifact upload doesn't fail
+          # Real coverage comes from hardware tests
+          touch coverage.lcov
 
       - name: Build instrumented binary for integration tests (aarch64 only)
         if: matrix.platform.name == 'aarch64'
@@ -227,22 +232,24 @@ jobs:
         run: chmod +x instrumented-binaries/*
 
       - name: Run hardware integration tests
+        env:
+          # Set up profraw collection for coverage
+          LLVM_PROFILE_FILE: ${{ github.workspace }}/coverage/profraw/imx8mp-%p-%m.profraw
+          LD_LIBRARY_PATH: /root/videostream/lib/aarch64-linux-gnu
         run: |
-          # Set up profraw collection directory for coverage
+          # Set up profraw collection directory
           mkdir -p coverage/profraw coverage/test-output
-          export LLVM_PROFILE_FILE="${{ github.workspace }}/coverage/profraw/imx8mp-%p-%m.profraw"
-
-          # Set the binary location for integration tests
-          export CAMERA_BINARY="${{ github.workspace }}/instrumented-binaries/edgefirst-camera"
 
           # Track overall test status
           TEST_FAILED=0
 
-          # Test 1: Binary help output
+          # Test 1: Binary help output (generates profraw on clean exit)
           echo "=== Testing binary help output ==="
           ./instrumented-binaries/edgefirst-camera --help
 
           # Test 2: JPEG capture (15 seconds)
+          # Note: timeout kills the process, so we won't get profraw from this
+          # Coverage comes from integration tests below
           echo ""
           echo "=== Testing JPEG capture (15 seconds) ==="
           timeout 15 ./instrumented-binaries/edgefirst-camera --jpeg 2>&1 || {
@@ -269,6 +276,7 @@ jobs:
           }
 
           # Test 4: Run instrumented integration test binaries
+          # These tests exit cleanly and WILL generate profraw coverage files
           echo ""
           echo "=== Running instrumented integration test binaries ==="
           for test_bin in instrumented-binaries/test_image*; do
@@ -285,6 +293,7 @@ jobs:
           echo ""
           echo "=== Profraw files generated ==="
           ls -la coverage/profraw/ || echo "No profraw files generated"
+          find coverage/profraw/ -name "*.profraw" -exec ls -lh {} \; 2>/dev/null || true
 
           # Fail the step if any test failed
           if [ $TEST_FAILED -ne 0 ]; then
