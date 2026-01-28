@@ -7,15 +7,14 @@ This product includes software developed at Au-Zone Technologies
 This software contains components from the following first-level dependencies
 that require attribution:
 
-  * cdr 0.2.4 (Apache-2.0 OR MIT)
   * clap 4.5.53 (Apache-2.0 OR MIT)
   * console-subscriber 0.5.0 (MIT)
   * dma-buf 0.4.0 (Custom License - see repository)
   * dma-heap 0.4.1 (Custom License - see repository)
-  * edgefirst-schemas 1.4.1 (Apache-2.0)
+  * edgefirst-schemas 1.5.2 (Apache-2.0)
   * g2d-sys 1.0.1 (MIT)
   * kanal 0.1.0-pre8 (MIT)
-  * libc 0.2.177 (Apache-2.0 OR MIT)
+  * libc 0.2.180 (Apache-2.0 OR MIT)
   * serde_json 1.0.145 (Apache-2.0 OR MIT)
   * tokio 1.48.0 (MIT)
   * tracing 0.1.41 (MIT)
