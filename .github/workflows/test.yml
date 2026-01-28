@@ -144,10 +144,10 @@ jobs:
 
       - name: Run unit tests with coverage
         run: |
-          # Run tests with LCOV coverage output
+          # Run tests with LCOV coverage output using profiling profile
           # Note: Integration tests require hardware and are excluded
           cargo llvm-cov nextest --lib --workspace --lcov --output-path coverage.lcov \
-            --no-fail-fast || true
+            --profile profiling --cargo-profile profiling --no-fail-fast || true
 
       - name: Build instrumented binary for integration tests (aarch64 only)
         if: matrix.platform.name == 'aarch64'
@@ -156,18 +156,18 @@ jobs:
           source <(cargo llvm-cov show-env --export-prefix)
           export CARGO_TARGET_DIR=target/llvm-cov-target
 
-          # Build the main binary with coverage instrumentation
-          cargo build --release
+          # Build the main binary with coverage instrumentation using profiling profile
+          cargo build --profile profiling
 
           # Build integration tests with coverage instrumentation
-          cargo nextest run --workspace --no-run --run-ignored=all || true
+          cargo nextest run --workspace --no-run --run-ignored=all --cargo-profile profiling || true
 
           # Prepare artifacts
           mkdir -p instrumented-binaries
-          cp target/llvm-cov-target/release/edgefirst-camera instrumented-binaries/
+          cp target/llvm-cov-target/profiling/edgefirst-camera instrumented-binaries/
 
           # Copy instrumented integration test binaries
-          find target/llvm-cov-target/release/deps -name "test_image*" -type f -executable \
+          find target/llvm-cov-target/profiling/deps -name "test_image*" -type f -executable \
             -exec cp {} instrumented-binaries/ \; 2>/dev/null || true
 
           echo "Instrumented binaries prepared:"
@@ -384,7 +384,7 @@ jobs:
           echo ""
           echo "=== Finding instrumented binaries ==="
           OBJECT_FILES=""
-          for obj in $(find target/llvm-cov-target/release -maxdepth 2 -type f ! -name "*.d" ! -name "*.rlib" ! -name "*.rmeta" 2>/dev/null); do
+          for obj in $(find target/llvm-cov-target/profiling -maxdepth 2 -type f ! -name "*.d" ! -name "*.rlib" ! -name "*.rmeta" 2>/dev/null); do
             if file "$obj" | grep -q "ELF"; then
               if [ -z "$OBJECT_FILES" ]; then
                 OBJECT_FILES="$obj"
@@ -395,14 +395,14 @@ jobs:
           done
 
           # Also check deps directory
-          for obj in $(find target/llvm-cov-target/release/deps -maxdepth 1 -type f ! -name "*.d" ! -name "*.rlib" ! -name "*.rmeta" 2>/dev/null); do
+          for obj in $(find target/llvm-cov-target/profiling/deps -maxdepth 1 -type f ! -name "*.d" ! -name "*.rlib" ! -name "*.rmeta" 2>/dev/null); do
             if file "$obj" | grep -q "ELF"; then
               OBJECT_FILES="$OBJECT_FILES --object=$obj"
             fi
           done
 
           if [ -z "$OBJECT_FILES" ]; then
-            echo "ERROR: No ELF binaries found in target/llvm-cov-target/release/"
+            echo "ERROR: No ELF binaries found in target/llvm-cov-target/profiling/"
             exit 1
           fi
 
