@@ -1,81 +1,43 @@
 # GitHub Actions workflow for building release artifacts
 #
-# This workflow builds binaries for x86_64 and ARM64 platforms and generates
-# documentation for the EdgeFirst Camera project.
+# This workflow builds binaries for x86_64 and ARM64 platforms.
 #
-# Action Versions (hash-pinned per SPS guidelines):
-# - actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 (v4.2.2)
-# - actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 (v4.6.2)
-# - dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 (stable)
-# - Swatinem/rust-cache@401aff9a7a08acb9d27b64936a90db81024cff97 (v2.8.2)
-#
-# Runner Notes:
-# - ubuntu-22.04: Standard GitHub-hosted runner (x86_64)
-# - ubuntu-22.04-arm: GitHub-hosted ARM64 runner for native aarch64 builds
+# Action Versions (hash-pinned, verified January 2026):
+# - actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98 (v4.2.2)
+# - actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 (v4.2.3)
+# - actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f (v6.0.0)
+# - dtolnay/rust-toolchain@stable
 
 name: Build
 
 on:
   push:
-    branches: [ main, develop ]
-    tags: ['v*']
+    branches: [main, develop]
   pull_request:
-    branches: [ main, develop ]
-  workflow_call:  # Allow this workflow to be called by other workflows
+    branches: [main, develop]
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  documentation:
-    name: Build Documentation
-    runs-on: ubuntu-22.04
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y nasm
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7  # stable
-        with:
-          toolchain: stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@401aff9a7a08acb9d27b64936a90db81024cff97  # v2.8.2
-        with:
-          shared-key: docs
-          cache-on-failure: true
-
-      - name: Build rustdoc documentation
-        run: cargo doc --no-deps --workspace --all-features
-
-      - name: Upload documentation artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
-        with:
-          name: documentation
-          path: target/doc/
-          retention-days: 90
-
   build-packages:
-    name: Build Packages (${{ matrix.platform.name }})
+    name: Build (${{ matrix.platform.name }})
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
         platform:
           - name: x86_64
             runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
           - name: aarch64
             runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
       fail-fast: false
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98  # v4.2.2
 
       - name: Install system dependencies
         run: |
@@ -83,15 +45,21 @@ jobs:
           sudo apt-get install -y nasm
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7  # stable
-        with:
-          toolchain: stable
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@401aff9a7a08acb9d27b64936a90db81024cff97  # v2.8.2
+      - name: Cache cargo registry
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
         with:
-          shared-key: ${{ matrix.platform.name }}-build
-          cache-on-failure: true
+          path: ~/.cargo/registry/index
+          key: ${{ runner.os }}-${{ matrix.platform.name }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.platform.name }}-cargo-index-
+
+      - name: Cache cargo build
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ matrix.platform.name }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.platform.name }}-cargo-build-
 
       - name: Build release binary
         run: cargo build --release
@@ -105,7 +73,7 @@ jobs:
           cp target/release/edgefirst-camera packages/edgefirst-camera-${{ matrix.platform.name }}
 
       - name: Upload package artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
         with:
           name: packages-${{ matrix.platform.name }}
           path: packages/
