@@ -85,6 +85,19 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - name: Generate Clippy report for SonarCloud
+        run: |
+          # Generate JSON report for SonarCloud (allow warnings for report generation)
+          cargo clippy --workspace --all-targets --all-features --message-format=json 2>&1 \
+            | tee clippy-report.json || true
+
+      - name: Upload Clippy report
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: clippy-report
+          path: clippy-report.json
+          retention-days: 7
+
   # ==========================================================================
   # Phase 1: Build & Unit Test on GitHub-hosted runners
   # ==========================================================================
@@ -467,7 +480,7 @@ jobs:
   sonarcloud:
     name: SonarCloud Analysis
     runs-on: ubuntu-22.04
-    needs: [test, hardware-test, process-hardware-coverage]
+    needs: [clippy, test, hardware-test, process-hardware-coverage]
     # Run if test succeeded, even if hardware tests were skipped
     if: |
       always() &&
@@ -486,6 +499,12 @@ jobs:
           pattern: coverage-*
           path: coverage/
 
+      - name: Download Clippy report
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          name: clippy-report
+          path: .
+
       - name: Organize coverage files for SonarCloud
         run: |
           echo "=== Downloaded coverage artifacts ==="
@@ -500,6 +519,10 @@ jobs:
           # Export for SonarCloud
           echo "COVERAGE_PATHS=$COVERAGE_REPORTS" >> $GITHUB_ENV
 
+          echo ""
+          echo "=== Clippy report ==="
+          ls -la clippy-report.json || echo "No Clippy report found"
+
       - name: SonarCloud Scan
         uses: SonarSource/sonarqube-scan-action@a31c9398be7ace6bbfaf30c0bd5d415f843d45e9  # master
         env:
@@ -508,6 +531,7 @@ jobs:
         with:
           args: >
             -Dsonar.rust.lcov.reportPaths=${{ env.COVERAGE_PATHS }}
+            -Dsonar.rust.clippy.reportPaths=clippy-report.json
 
       - name: Generate coverage summary
         if: always()
@@ -536,11 +560,15 @@ jobs:
             if [ -f "$coverage_file" ]; then
               platform=$(basename "$(dirname "$coverage_file")" | sed 's/coverage-//')
 
-              # Extract coverage metrics from LCOV
+              # Extract coverage metrics from LCOV (trim whitespace from wc output)
               lines_found=$(grep -c "^DA:" "$coverage_file" 2>/dev/null || echo 0)
-              lines_hit=$(grep "^DA:" "$coverage_file" | grep -v ",0$" | wc -l 2>/dev/null || echo 0)
+              lines_hit=$(grep "^DA:" "$coverage_file" 2>/dev/null | grep -v ",0$" | wc -l | tr -d ' ')
 
-              if [ "$lines_found" -gt 0 ]; then
+              # Ensure numeric values
+              lines_found=${lines_found:-0}
+              lines_hit=${lines_hit:-0}
+
+              if [ "$lines_found" -gt 0 ] 2>/dev/null; then
                 line_pct=$(awk "BEGIN {printf \"%.1f\", ($lines_hit / $lines_found) * 100}")
 
                 echo "**$platform**:" >> $GITHUB_STEP_SUMMARY
