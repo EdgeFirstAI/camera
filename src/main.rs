@@ -22,6 +22,7 @@ use std::{
     error::Error,
     fs::File,
     process,
+    sync::atomic::{AtomicBool, Ordering},
     thread::{self},
     time::{Duration, Instant},
 };
@@ -39,6 +40,9 @@ use zenoh::{
     qos::{CongestionControl, Priority},
     Session,
 };
+
+/// Global shutdown flag for graceful termination
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "profiling")]
 #[global_allocator]
@@ -102,6 +106,24 @@ fn get_env_filter() -> EnvFilter {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // Set up signal handler for graceful shutdown (SIGTERM/SIGINT)
+    // This enables profraw coverage file generation when terminated
+    tokio::spawn(async {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to register SIGTERM handler");
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .expect("Failed to register SIGINT handler");
+        tokio::select! {
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM, initiating graceful shutdown");
+            }
+            _ = sigint.recv() => {
+                info!("Received SIGINT, initiating graceful shutdown");
+            }
+        }
+        SHUTDOWN.store(true, Ordering::SeqCst);
+    });
+
     let mut args = Args::parse();
 
     args.tracy.then(tracy_client::Client::start);
@@ -310,7 +332,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     let mut history = vec![0.0; 60];
     let mut index = 0;
 
-    loop {
+    while !SHUTDOWN.load(Ordering::SeqCst) {
         let camera_buffer = info_span!("camera_read").in_scope(|| cam.read())?;
 
         let fps = update_fps(&mut prev, &mut history, &mut index);
@@ -361,6 +383,9 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
 
         args.tracy.then(frame_mark);
     }
+
+    info!("Shutdown complete");
+    Ok(())
 }
 
 fn try_send(tx: &Sender<(Image, Timestamp)>, img: Image, ts: Timestamp, _name: &str) {

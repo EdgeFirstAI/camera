@@ -271,11 +271,11 @@ jobs:
           ./instrumented-binaries/edgefirst-camera --help
 
           # Test 2: JPEG capture (15 seconds)
-          # Note: timeout kills the process, so we won't get profraw from this
-          # Coverage comes from integration tests below
+          # Use timeout with SIGTERM first (signal 15) to allow graceful shutdown
+          # and profraw file generation. SIGKILL (signal 9) only after 5s grace period.
           echo ""
           echo "=== Testing JPEG capture (15 seconds) ==="
-          timeout 15 ./instrumented-binaries/edgefirst-camera --jpeg 2>&1 || {
+          timeout --signal=TERM --kill-after=5 15 ./instrumented-binaries/edgefirst-camera --jpeg 2>&1 || {
             EXIT_CODE=$?
             if [ $EXIT_CODE -eq 124 ]; then
               echo "✓ Camera ran successfully for 15 seconds"
@@ -288,7 +288,7 @@ jobs:
           # Test 3: H.264 encoding (15 seconds)
           echo ""
           echo "=== Testing H.264 encoding (15 seconds) ==="
-          timeout 15 ./instrumented-binaries/edgefirst-camera --h264 2>&1 || {
+          timeout --signal=TERM --kill-after=5 15 ./instrumented-binaries/edgefirst-camera --h264 2>&1 || {
             EXIT_CODE=$?
             if [ $EXIT_CODE -eq 124 ]; then
               echo "✓ Camera ran successfully for 15 seconds"
