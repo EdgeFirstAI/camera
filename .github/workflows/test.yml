@@ -233,11 +233,19 @@ jobs:
       - name: Make binaries executable
         run: chmod +x instrumented-binaries/*
 
+      - name: Download VideoStream library
+        run: |
+          # Download VideoStream release for aarch64
+          curl -sL https://github.com/EdgeFirstAI/videostream/releases/download/v2.1.4/videostream-2.1.4-linux-aarch64.zip -o videostream.zip
+          unzip -q videostream.zip -d videostream
+          echo "VideoStream library extracted:"
+          find videostream -name "*.so*" -type f
+
       - name: Run hardware integration tests
         env:
           # Set up profraw collection for coverage
           LLVM_PROFILE_FILE: ${{ github.workspace }}/coverage/profraw/imx8mp-%p-%m.profraw
-          LD_LIBRARY_PATH: /root/videostream/lib/aarch64-linux-gnu
+          LD_LIBRARY_PATH: ${{ github.workspace }}/videostream/lib/aarch64-linux-gnu
         run: |
           # Set up profraw collection directory
           mkdir -p coverage/profraw coverage/test-output
@@ -320,7 +328,7 @@ jobs:
           # Clean /tmp to avoid filling memory filesystem on self-hosted runner
           rm -rf /tmp/test_* /tmp/edgefirst-camera* /tmp/profraw 2>/dev/null || true
           # Clean workspace as well
-          rm -rf instrumented-binaries/ coverage/ 2>/dev/null || true
+          rm -rf instrumented-binaries/ coverage/ videostream/ videostream.zip 2>/dev/null || true
 
   # ==========================================================================
   # Phase 3: Process Hardware Coverage
