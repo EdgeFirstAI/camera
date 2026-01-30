@@ -228,9 +228,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let console_task = console_server.serve();
         let (console_task, stream_task) = tokio::join!(console_task, stream_task);
         console_task.unwrap();
-        stream_task.unwrap();
+        stream_task?;
     } else {
-        stream_task.await.unwrap();
+        stream_task.await?;
     }
 
     Ok(())
@@ -333,7 +333,18 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     let mut index = 0;
 
     while !SHUTDOWN.load(Ordering::SeqCst) {
-        let camera_buffer = info_span!("camera_read").in_scope(|| cam.read())?;
+        let camera_buffer = match info_span!("camera_read").in_scope(|| cam.read()) {
+            Ok(buf) => buf,
+            Err(videostream::Error::Io(e)) if e.kind() == std::io::ErrorKind::Interrupted => {
+                // System call was interrupted by signal - check if shutdown requested
+                if SHUTDOWN.load(Ordering::SeqCst) {
+                    info!("Camera read interrupted by shutdown signal");
+                    break;
+                }
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         let fps = update_fps(&mut prev, &mut history, &mut index);
         if fps < TARGET_FPS as f64 * 0.9 {
