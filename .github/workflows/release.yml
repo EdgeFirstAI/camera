@@ -9,7 +9,7 @@
 # 1. Update version in Cargo.toml
 # 2. Update CHANGELOG.md with version entry
 # 3. Commit and push changes (triggers build.yml and sbom.yml)
-# 4. Create and push tag: git tag v1.4.0 && git push --tags
+# 4. Create and push tag: git tag v2.4.0 && git push --tags
 #    (release.yml waits for build.yml and sbom.yml to complete)
 #
 # Action Versions (hash-pinned, verified January 2026):

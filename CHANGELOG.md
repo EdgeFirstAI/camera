@@ -7,38 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-- Updated videostream from 1.5.5 to 2.1.4 with V4L2 CODEC API support
-  - Enables hardware encoder backend selection via `VSL_CODEC_BACKEND` env var
-  - V4L2 backend provides an alternative to the Hantro backend
-  - Auto-detects available backend, configurable via environment variable
-- CI: Switched aarch64 builds from cross-compilation to native `ubuntu-22.04-arm` runner
-- CI: Added native aarch64 testing on `ubuntu-22.04-arm` runner
-
-### Added
-- CI: On-target hardware testing with `nxp-imx8mp-latest` runner
-  - Tests JPEG capture, H.264 encoding, and multi-resolution streaming
-  - Validates real camera, G2D, and VPU hardware integration
-
-## [1.4.0] - 2025-11-25
+## [2.4.0] - 2026-01-30
 
 ### Changed
 - Migrated repository from Bitbucket to GitHub (EdgeFirstAI/camera)
 - Updated all documentation to reference GitHub URLs
 - Renamed project to EdgeFirst Camera
-- Updated dependencies: edgefirst-schemas 1.4.1 (Apache-2.0), videostream 1.5.5 (Apache-2.0)
-- Updated license policy script with verified MIT licenses for dma-buf and dma-heap
+- Updated videostream from 1.5.5 to 2.1.4 with V4L2 CODEC API support
+  - Enables hardware encoder backend selection via `VSL_CODEC_BACKEND` env var
+  - V4L2 backend provides an alternative to the Hantro backend
+  - Auto-detects available backend, configurable via environment variable
+- Updated edgefirst-schemas to 1.5.2 with serde_cdr support
+- Updated license policy with verified MIT licenses for dma-buf and dma-heap
 - Moved EPL-2.0 (Zenoh) to allowed licenses category
-- Updated ARCHITECTURE.md to remove code duplication and unverified timing claims (SPS compliance)
+- CI: Switched aarch64 builds from cross-compilation to native `ubuntu-22.04-arm` runner
+- CI: Added native aarch64 testing on `ubuntu-22.04-arm` runner
 
 ### Added
-- Comprehensive CHANGELOG.md with full release history
 - Complete GitHub Actions CI/CD workflows (test, build, SBOM, release)
 - GitHub issue templates (bug report, feature request, hardware compatibility)
 - Pull request template with comprehensive checklist
 - SBOM generation and license compliance automation
+- Graceful shutdown handling for SIGTERM and SIGINT signals
+  - Enables proper coverage collection during CI testing
+  - Clean exit when terminated by process managers (systemd, timeout)
+- CI: On-target hardware testing with `nxp-imx8mp-latest` runner
+  - Tests JPEG capture, H.264 encoding, and integration tests
+  - Validates real camera, G2D, and VPU hardware integration
+- CI: Coverage collection from on-target hardware tests
 
 ### Fixed
+- Handle EINTR (Interrupted system call) during camera read gracefully
+- Improved error propagation during shutdown sequence
 - License compliance: All dependencies now Apache-2.0/MIT/EPL-2.0 compatible
 - Code formatting consistency across all source files
 
@@ -134,15 +134,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Environment variable control for H264 streaming
 - Flexible runtime configuration
 
-[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/2.4.0...HEAD
-[2.4.0]: https://github.com/EdgeFirstAI/camera/compare/2.3.1...2.4.0
-[2.3.1]: https://github.com/EdgeFirstAI/camera/compare/2.3.0...2.3.1
-[2.3.0]: https://github.com/EdgeFirstAI/camera/compare/2.2.3...2.3.0
-[2.2.3]: https://github.com/EdgeFirstAI/camera/compare/2.2.2...2.2.3
-[2.2.2]: https://github.com/EdgeFirstAI/camera/compare/2.2.1...2.2.2
-[2.2.1]: https://github.com/EdgeFirstAI/camera/compare/2.2.0...2.2.1
-[2.2.0]: https://github.com/EdgeFirstAI/camera/compare/2.1.5...2.2.0
-[2.1.5]: https://github.com/EdgeFirstAI/camera/compare/2.1.4...2.1.5
+[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.4.0...HEAD
+[2.4.0]: https://github.com/EdgeFirstAI/camera/compare/v2.3.1...v2.4.0
+[2.3.1]: https://github.com/EdgeFirstAI/camera/compare/v2.3.0...v2.3.1
+[2.3.0]: https://github.com/EdgeFirstAI/camera/compare/v2.2.3...v2.3.0
+[2.2.3]: https://github.com/EdgeFirstAI/camera/compare/v2.2.2...v2.2.3
+[2.2.2]: https://github.com/EdgeFirstAI/camera/compare/v2.2.1...v2.2.2
+[2.2.1]: https://github.com/EdgeFirstAI/camera/compare/v2.2.0...v2.2.1
+[2.2.0]: https://github.com/EdgeFirstAI/camera/compare/v2.1.5...v2.2.0
+[2.1.5]: https://github.com/EdgeFirstAI/camera/compare/v2.1.4...v2.1.5
 [2.1.4]: https://github.com/EdgeFirstAI/camera/compare/2.1.3...2.1.4
 [2.1.3]: https://github.com/EdgeFirstAI/camera/compare/2.1.2...2.1.3
 [2.1.2]: https://github.com/EdgeFirstAI/camera/compare/2.1.1...2.1.2
