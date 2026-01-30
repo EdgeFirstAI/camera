@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Updated videostream from 1.5.5 to 2.1.4 with V4L2 CODEC API support
+  - Enables hardware encoder backend selection via `VSL_CODEC_BACKEND` env var
+  - V4L2 backend provides an alternative to the Hantro backend
+  - Auto-detects available backend, configurable via environment variable
+- CI: Switched aarch64 builds from cross-compilation to native `ubuntu-22.04-arm` runner
+- CI: Added native aarch64 testing on `ubuntu-22.04-arm` runner
+
+### Added
+- CI: On-target hardware testing with `nxp-imx8mp-latest` runner
+  - Tests JPEG capture, H.264 encoding, and multi-resolution streaming
+  - Validates real camera, G2D, and VPU hardware integration
+
 ## [1.4.0] - 2025-11-25
 
 ### Changed

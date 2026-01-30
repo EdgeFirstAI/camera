@@ -5,15 +5,15 @@ mod args;
 mod video;
 
 use args::{Args, MirrorSetting};
-use cdr::{CdrLe, Infinite};
 use clap::Parser;
 use edgefirst_camera::image::{encode_jpeg, Image, ImageManager, Rotation, RGBA};
 use edgefirst_schemas::{
     builtin_interfaces::{self, Time},
-    edgefirst_msgs::DmaBuf,
+    edgefirst_msgs::DmaBuffer,
     foxglove_msgs::FoxgloveCompressedVideo,
     geometry_msgs::{Quaternion, Transform, TransformStamped, Vector3},
     sensor_msgs::{CameraInfo, CompressedImage, RegionOfInterest},
+    serde_cdr,
     std_msgs::{self, Header},
 };
 use kanal::{Receiver, Sender};
@@ -22,6 +22,7 @@ use std::{
     error::Error,
     fs::File,
     process,
+    sync::atomic::{AtomicBool, Ordering},
     thread::{self},
     time::{Duration, Instant},
 };
@@ -39,6 +40,9 @@ use zenoh::{
     qos::{CongestionControl, Priority},
     Session,
 };
+
+/// Global shutdown flag for graceful termination
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "profiling")]
 #[global_allocator]
@@ -102,6 +106,24 @@ fn get_env_filter() -> EnvFilter {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // Set up signal handler for graceful shutdown (SIGTERM/SIGINT)
+    // This enables profraw coverage file generation when terminated
+    tokio::spawn(async {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to register SIGTERM handler");
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .expect("Failed to register SIGINT handler");
+        tokio::select! {
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM, initiating graceful shutdown");
+            }
+            _ = sigint.recv() => {
+                info!("Received SIGINT, initiating graceful shutdown");
+            }
+        }
+        SHUTDOWN.store(true, Ordering::SeqCst);
+    });
+
     let mut args = Args::parse();
 
     args.tracy.then(tracy_client::Client::start);
@@ -206,9 +228,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let console_task = console_server.serve();
         let (console_task, stream_task) = tokio::join!(console_task, stream_task);
         console_task.unwrap();
-        stream_task.unwrap();
+        stream_task?;
     } else {
-        stream_task.await.unwrap();
+        stream_task.await?;
     }
 
     Ok(())
@@ -295,13 +317,13 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
 
     let tf_session = session.clone();
     let tf_msg = build_tf_msg(&args);
-    let tf_msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&tf_msg, Infinite).unwrap());
+    let tf_msg = ZBytes::from(serde_cdr::serialize(&tf_msg).unwrap());
     let tf_enc = Encoding::APPLICATION_CDR.with_schema("geometry_msgs/msg/TransformStamped");
     let tf_task = tokio::spawn(async move { tf_static(tf_session, tf_msg, tf_enc).await });
     std::mem::drop(tf_task);
 
     let info_msg = build_info_msg(&args)?;
-    let info_msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&info_msg, Infinite)?);
+    let info_msg = ZBytes::from(serde_cdr::serialize(&info_msg)?);
     let info_enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/CameraInfo");
 
     let src_pid = process::id();
@@ -310,8 +332,19 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     let mut history = vec![0.0; 60];
     let mut index = 0;
 
-    loop {
-        let camera_buffer = info_span!("camera_read").in_scope(|| cam.read())?;
+    while !SHUTDOWN.load(Ordering::SeqCst) {
+        let camera_buffer = match info_span!("camera_read").in_scope(|| cam.read()) {
+            Ok(buf) => buf,
+            Err(videostream::Error::Io(e)) if e.kind() == std::io::ErrorKind::Interrupted => {
+                // System call was interrupted by signal - check if shutdown requested
+                if SHUTDOWN.load(Ordering::SeqCst) {
+                    info!("Camera read interrupted by shutdown signal");
+                    break;
+                }
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         let fps = update_fps(&mut prev, &mut history, &mut index);
         if fps < TARGET_FPS as f64 * 0.9 {
@@ -361,6 +394,9 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
 
         args.tracy.then(frame_mark);
     }
+
+    info!("Shutdown complete");
+    Ok(())
 }
 
 fn try_send(tx: &Sender<(Image, Timestamp)>, img: Image, ts: Timestamp, _name: &str) {
@@ -621,7 +657,7 @@ fn build_jpeg_msg(
             data: jpeg.to_vec(),
         };
 
-        let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
+        let msg = ZBytes::from(serde_cdr::serialize(&msg).unwrap());
         let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/CompressedImage");
 
         Ok((msg, enc))
@@ -650,7 +686,7 @@ fn build_video_msg(
             data,
         };
 
-        let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
+        let msg = ZBytes::from(serde_cdr::serialize(&msg).unwrap());
         let enc = Encoding::APPLICATION_CDR.with_schema("foxglove_msgs/msg/CompressedVideo");
 
         Ok((msg, enc))
@@ -678,7 +714,7 @@ fn build_tile_video_msg(
             data: data.to_vec(),
         };
 
-        let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
+        let msg = ZBytes::from(serde_cdr::serialize(&msg).unwrap());
         let enc = Encoding::APPLICATION_CDR.with_schema("foxglove_msgs/msg/CompressedVideo");
 
         Ok((msg, enc))
@@ -698,7 +734,7 @@ fn camera_dma_serialize(
     let dma_buf = buf.rawfd();
     let length = buf.length()? as u32;
 
-    let msg = DmaBuf {
+    let msg = DmaBuffer {
         header: std_msgs::Header {
             stamp: builtin_interfaces::Time {
                 sec: ts.seconds() as i32,
@@ -715,8 +751,8 @@ fn camera_dma_serialize(
         length,
     };
 
-    let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite)?);
-    let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/DmaBuf");
+    let msg = ZBytes::from(serde_cdr::serialize(&msg)?);
+    let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/DmaBuffer");
 
     Ok((msg, enc))
 }
