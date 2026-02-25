@@ -155,6 +155,9 @@ jobs:
                release-assets/edgefirst-camera-v${VERSION}-sbom.json
           fi
 
+          # Copy default configuration file
+          cp camera.default release-assets/camera.default
+
           echo "Release assets prepared:"
           ls -lh release-assets/
 
@@ -173,12 +176,16 @@ jobs:
             |----------|--------|
             | Linux x86_64 | `edgefirst-camera-linux-x86_64` |
             | Linux ARM64 | `edgefirst-camera-linux-aarch64` |
+            | Configuration | `camera.default` |
 
             ```bash
             # Download and install (ARM64 example)
             wget https://github.com/EdgeFirstAI/camera/releases/download/v${{ needs.prepare-release.outputs.version }}/edgefirst-camera-linux-aarch64
             chmod +x edgefirst-camera-linux-aarch64
             sudo mv edgefirst-camera-linux-aarch64 /usr/local/bin/edgefirst-camera
+
+            # Install default configuration (optional)
+            sudo cp camera.default /etc/default/camera
             ```
 
             ## What's Changed
