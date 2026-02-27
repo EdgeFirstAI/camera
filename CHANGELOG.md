@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-02-26
+
+### Changed
+- Shortened environment variable names from `EDGEFIRST_CAMERA_*` prefix to direct names
+  (e.g., `CAMERA`, `H264`, `JPEG`, `STREAM_SIZE`, `MODE`) for simpler systemd and shell configuration
+
+### Added
+- Complete `camera.default` configuration reference file for systemd EnvironmentFile usage
+- Published `camera.default` as a release artifact alongside platform binaries
+
 ## [2.4.0] - 2026-01-30
 
 ### Changed
@@ -134,7 +144,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Environment variable control for H264 streaming
 - Flexible runtime configuration
 
-[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.4.0...HEAD
+[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.5.0...HEAD
+[2.5.0]: https://github.com/EdgeFirstAI/camera/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/EdgeFirstAI/camera/compare/v2.3.1...v2.4.0
 [2.3.1]: https://github.com/EdgeFirstAI/camera/compare/v2.3.0...v2.3.1
 [2.3.0]: https://github.com/EdgeFirstAI/camera/compare/v2.2.3...v2.3.0
