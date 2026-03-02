@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.1] - 2026-03-02
+
+### Fixed
+- Handle empty string environment variables in `camera.default` configuration
+  (e.g., `CAM_INFO_PATH=""`, `CONNECT=""`, `LISTEN=""`) which caused the service
+  to crash with "a value is required for '--cam-info-path'" on startup
+
+### Changed
+- Removed nightly-only options from `rustfmt.toml` so `cargo fmt` works with
+  stable Rust toolchain
+- Simplified Makefile format target to use `cargo fmt` directly
+
 ## [2.5.0] - 2026-02-26
 
 ### Changed
@@ -144,7 +156,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Environment variable control for H264 streaming
 - Flexible runtime configuration
 
-[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.5.0...HEAD
+[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.5.1...HEAD
+[2.5.1]: https://github.com/EdgeFirstAI/camera/compare/v2.5.0...v2.5.1
 [2.5.0]: https://github.com/EdgeFirstAI/camera/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/EdgeFirstAI/camera/compare/v2.3.1...v2.4.0
 [2.3.1]: https://github.com/EdgeFirstAI/camera/compare/v2.3.0...v2.3.1

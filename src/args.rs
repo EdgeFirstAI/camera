@@ -3,7 +3,6 @@
 
 use clap::Parser;
 use serde_json::json;
-use std::path::PathBuf;
 use zenoh::config::{Config, WhatAmI};
 
 /// Camera image mirroring options.
@@ -142,8 +141,8 @@ pub struct Args {
     pub verbose: bool,
 
     /// Path to camera calibration JSON file (isp-imx format)
-    #[arg(long, env = "CAM_INFO_PATH")]
-    pub cam_info_path: Option<PathBuf>,
+    #[arg(long, env = "CAM_INFO_PATH", default_value = "")]
+    pub cam_info_path: String,
 
     /// Camera optical frame translation from base_link (x y z in meters)
     #[arg(
@@ -206,15 +205,17 @@ impl From<Args> for Config {
             .insert_json5("mode", &json!(args.mode).to_string())
             .unwrap();
 
-        if !args.connect.is_empty() {
+        let connect: Vec<_> = args.connect.into_iter().filter(|s| !s.is_empty()).collect();
+        if !connect.is_empty() {
             config
-                .insert_json5("connect/endpoints", &json!(args.connect).to_string())
+                .insert_json5("connect/endpoints", &json!(connect).to_string())
                 .unwrap();
         }
 
-        if !args.listen.is_empty() {
+        let listen: Vec<_> = args.listen.into_iter().filter(|s| !s.is_empty()).collect();
+        if !listen.is_empty() {
             config
-                .insert_json5("listen/endpoints", &json!(args.listen).to_string())
+                .insert_json5("listen/endpoints", &json!(listen).to_string())
                 .unwrap();
         }
 

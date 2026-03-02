@@ -758,8 +758,8 @@ fn camera_dma_serialize(
 }
 
 fn build_info_msg(args: &Args) -> Result<CameraInfo, Box<dyn Error>> {
-    let msg = if let Some(p) = args.cam_info_path.clone() {
-        let file = match File::open(p) {
+    let msg = if !args.cam_info_path.is_empty() {
+        let file = match File::open(&args.cam_info_path) {
             Ok(v) => v,
             Err(e) => {
                 return Err(Box::from(format!(
