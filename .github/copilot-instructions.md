@@ -1,11 +1,11 @@
-# AGENTS.md - AI Assistant Development Guidelines
+# AI Assistant Development Guidelines - EdgeFirst Camera
 
 **Purpose:** Project-specific instructions for AI coding assistants (GitHub Copilot, Claude, Cursor, etc.)
 
 **Organization Standards:** See SPS repository for Au-Zone universal rules (Git/JIRA workflow, license policy, security practices)
 
-**Version:** 2.0
-**Last Updated:** 2025-11-24
+**Version:** 3.0
+**Last Updated:** 2026-03-12
 
 ---
 
@@ -29,23 +29,23 @@ This file provides **project-specific** guidelines for the EdgeFirst Camera proj
 
 ---
 
-## ⚠️ CRITICAL RULES
+## CRITICAL RULES
 
 ### #1: NEVER Use cd Commands
 
 ```bash
-# ✅ Modern tools work from root
+# Modern tools work from project root
 cargo build --release
 cargo test --workspace
 cargo clippy -- -D warnings
 
-# ❌ AI loses context
+# AI loses context with cd
 cd src && cargo build  # Where are we now?
 ```
 
 ### #2: Code Quality Standards
 
-- **Rust:** Latest stable (1.90.0+), `cargo fmt`, `cargo clippy -- -D warnings`
+- **Rust:** Latest stable (edition 2021), `cargo fmt`, `cargo clippy -- -D warnings`
 - **Performance:** Edge-first (512MB-2GB RAM, ARM64, <50ms latency, 5-10yr lifecycle)
 - **Testing:** 70% min coverage, 80%+ for core modules (image, video)
 - **Hardware:** Profile on target NXP i.MX8 platforms
@@ -54,9 +54,9 @@ cd src && cargo build  # Where are we now?
 
 ## License Policy (ZERO TOLERANCE)
 
-**✅ Allowed:** MIT, Apache-2.0, BSD-2/3, ISC, 0BSD, Unlicense, Zlib
-**⚠️ Conditional:** MPL-2.0 (deps ONLY), LGPL (**FORBIDDEN in Rust**)
-**❌ BLOCKED:** GPL, AGPL, SSPL, Commons Clause
+**Allowed:** MIT, Apache-2.0, BSD-2/3, ISC, 0BSD, Unlicense, Zlib, EPL-2.0
+**Conditional:** MPL-2.0 (deps ONLY), LGPL (**FORBIDDEN in Rust**)
+**BLOCKED:** GPL, AGPL, SSPL, Commons Clause
 
 **SBOM:** `make sbom` (scancode→CycloneDX). CI/CD blocks violations.
 
@@ -83,19 +83,21 @@ cd src && cargo build  # Where are we now?
 
 ### Technology Stack
 
-- **Language**: Rust 1.90.0+
+- **Language**: Rust (edition 2021)
 - **Build system**: Cargo with workspace configuration (includes `g2d-sys` member)
 - **Key dependencies**:
-  - `zenoh 1.5.1` - Transport and ROS2 bridge compatibility
-  - `tokio 1.47.1` - Async runtime with multi-threaded executor
-  - `videostream 0.9.1` - Camera interface (V4L2 backend)
-  - `edgefirst-schemas 1.3.1` - ROS2 message schemas
-  - `tracing-tracy` - Performance profiling
-  - `turbojpeg` - JPEG encoding with SIMD
+  - `zenoh 1.6.2` - Transport and ROS2 bridge compatibility
+  - `tokio 1.48.0` - Async runtime with multi-threaded executor
+  - `videostream 2.1.4` - Camera interface (V4L2 backend with codec API support)
+  - `edgefirst-schemas 1.5.2` - ROS2 message schemas with serde_cdr
+  - `tracing-tracy` - Performance profiling (Tracy profiler integration)
+  - `turbojpeg` - JPEG encoding with SIMD (require-simd feature)
   - `dma-heap/dma-buf` - Zero-copy DMA buffer management
-  - `g2d-sys` - NXP G2D hardware acceleration bindings (local crate)
+  - `g2d-sys` - NXP G2D hardware acceleration bindings (local crate, MIT licensed)
+  - `kanal` - Fast bounded SPSC/MPMC channels for inter-thread communication
+  - `clap` - CLI argument parsing with derive and env features
 - **Target platforms**:
-  - Primary: Linux aarch64 (NXP i.MX8, ARM Cortex-A53/A72)
+  - Primary: Linux aarch64 (NXP i.MX8M Plus, ARM Cortex-A53/A72)
   - Secondary: Linux x86_64 (development and testing)
   - **Not supported**: macOS, Windows, RISC-V (hardware-specific dependencies)
 - **Cross-platform**: This is a hardware-specific camera service requiring Linux V4L2, DMA support, and NXP G2D acceleration
@@ -105,18 +107,22 @@ cd src && cargo build  # Where are we now?
 - **Pattern**: Producer-consumer pipeline with hardware acceleration
 - **Components**:
   - Camera Interface → Image Processing → Video Encoding → Publishing
-  - Main loop (tokio async) + dedicated encoder threads (JPEG, H264)
+  - Main loop (tokio async) + dedicated encoder threads (JPEG, H264, 4K tiles)
 - **Data flow**:
   - Camera (V4L2) → DMA Buffer → G2D Conversion → JPEG/H264 Encoding → Zenoh Publishing
-- **Key abstractions**:
-  - `src/image.rs` - DMA buffer allocation, G2D operations, JPEG encoding
-  - `src/video.rs` - H264 encoding, 4K tiling
-  - `src/main.rs` - Main loop, Zenoh publishers, frame capture
-  - `src/args.rs` - CLI arguments with clap
+- **Key source files**:
+  - `src/image.rs` - DMA buffer allocation, G2D operations, JPEG encoding (public module via lib.rs)
+  - `src/video.rs` - H264 encoding, 4K tiling (binary-only, not exported via lib.rs)
+  - `src/main.rs` - Main loop, Zenoh publishers, thread coordination, frame capture
+  - `src/args.rs` - CLI arguments with clap (env var support for all options)
+  - `src/lib.rs` - Public library interface (exports `image` module only)
+  - `g2d-sys/` - NXP G2D FFI bindings (unsafe, platform-specific)
 - **Error handling**:
   - Uses `Result<T, Box<dyn Error>>` pattern
   - Logging via `tracing` with journald backend
   - Frame drop warnings when FPS falls below threshold
+  - Graceful shutdown on SIGTERM/SIGINT signals
+  - EINTR handling during camera reads
 
 ### Build and Deployment
 
@@ -147,6 +153,15 @@ cargo fmt
 
 # Lint code
 cargo clippy -- -D warnings
+
+# Generate SBOM and check license policy
+make sbom
+
+# Pre-release checks (format, lint, test, sbom, version verify)
+make pre-release
+
+# Coverage report
+cargo llvm-cov --all-features --workspace --html
 ```
 
 **Yocto Integration:**
@@ -154,12 +169,48 @@ cargo clippy -- -D warnings
 - Deployed via Yocto recipes in separate meta-edgefirst repository
 - Binary installed to `/usr/bin/edgefirst-camera`
 - Typically run as systemd service on Maivin/Raivin platforms
+- Configuration via `camera.default` EnvironmentFile for systemd
+
+**CI/CD Workflows** (`.github/workflows/`):
+
+- `test.yml` - Run tests and linting
+- `build.yml` - Build release binaries (native aarch64 + x86_64)
+- `sbom.yml` - SBOM generation and license compliance
+- `release.yml` - Automated release with binary artifacts
 
 **Development Tips:**
 
 - Use `tracy` profiler for performance analysis (feature enabled by default)
 - Optional `tokio-console` for async task debugging
 - Most hardware-dependent tests are `#[ignore]` by default - use `cargo test -- --ignored` on device
+- Cross-compilation can use `cargo-zigbuild` (`.cargo/config.toml` is no longer used)
+
+### CLI Arguments and Environment Variables
+
+All options can be set via command line or environment variables. Environment variables use short names (no prefix). See `camera.default` for the complete reference.
+
+**Key environment variable mapping:**
+
+| CLI Flag | Env Var | Default | Description |
+|----------|---------|---------|-------------|
+| `--camera` | `CAMERA` | `/dev/video3` | V4L2 device path |
+| `--camera-size` | `CAMERA_SIZE` | `1920 1080` | Capture resolution |
+| `--stream-size` | `STREAM_SIZE` | `1920 1080` | Output encoding resolution |
+| `--mirror` | `MIRROR` | `both` | Image mirroring (none/horizontal/vertical/both) |
+| `--jpeg` | `JPEG` | false | Enable JPEG streaming |
+| `--h264` | `H264` | false | Enable H.264 streaming |
+| `--h264-bitrate` | `H264_BITRATE` | `auto` | Bitrate preset (auto/mbps5/mbps25/mbps50/mbps100) |
+| `--h264-tiles` | `H264_TILES` | false | Enable 4K tiling |
+| `--h264-tiles-fps` | `H264_TILES_FPS` | `15` | Tile FPS limit |
+| `--cam-info-path` | `CAM_INFO_PATH` | `""` | Camera calibration JSON path |
+| `--cam-tf-vec` | `CAM_TF_VEC` | `0 0 0` | Camera translation (x y z meters) |
+| `--cam-tf-quat` | `CAM_TF_QUAT` | `-1 1 -1 1` | Camera rotation quaternion (x y z w) |
+| `--mode` | `MODE` | `peer` | Zenoh mode (peer/client/router) |
+| `--connect` | `CONNECT` | `""` | Zenoh connect endpoints |
+| `--listen` | `LISTEN` | `""` | Zenoh listen endpoints |
+| `--no-multicast-scouting` | `NO_MULTICAST_SCOUTING` | false | Disable Zenoh multicast |
+| `--tokio-console` | `TOKIO_CONSOLE` | false | Enable async debugging |
+| `--tracy` | `TRACY` | false | Enable Tracy profiler |
 
 ### Performance Targets
 
@@ -188,10 +239,11 @@ cargo clippy -- -D warnings
 - **G2D Acceleration**:
   - Format conversion (YUYV → NV12/RGB/RGBA)
   - Image scaling and rotation
-  - FFI bindings in `g2d-sys` crate
+  - FFI bindings in `g2d-sys` crate (dynamically loaded via `libloading`)
 - **H264 Encoder**:
-  - Hardware encoder via V4L2 M2M interface
-  - 4K tiling: splits 3840x2160 into 4× 1920x1080 tiles
+  - Hardware encoder via V4L2 M2M interface (`/dev/mxc-hantro-h1`)
+  - Backend selectable via `VSL_CODEC_BACKEND` environment variable
+  - Max resolution 1920×1080 (4K requires tiling into 4× 1080p tiles)
 - **Camera interfaces**:
   - MIPI CSI-2 (primary, via V4L2)
   - USB UVC (secondary, via V4L2)
@@ -203,12 +255,14 @@ cargo clippy -- -D warnings
   - G2D requires physically contiguous memory (DMA heap)
   - V4L2 MMAP buffers for camera capture
   - H264 encoder requires specific V4L2 controls for bitrate/GOP
+  - Empty string env vars must be handled (v2.5.1 fix)
 
 **Supported Hardware:**
 
 - **Maivin & Raivin**: NXP i.MX8M Plus, MIPI CSI-2 cameras
 - **NXP i.MX 8M Plus EVK**: i.MX8M Plus evaluation kits
 - **Testing**: x86_64 for software-only tests (no hardware acceleration)
+- **CI**: Native `ubuntu-22.04-arm` runners for aarch64 builds, `nxp-imx8mp-latest` for on-target hardware tests
 
 ### Testing Conventions
 
@@ -218,15 +272,12 @@ cargo clippy -- -D warnings
   - Location: `src/image.rs`, `src/video.rs`, etc.
   - Most hardware tests are `#[ignore]` - run on device with `cargo test -- --ignored`
 - **Integration tests**: Separate `tests/` directory at project root
-  - Current: `tests/test_image.rs` (7 tests for image allocation and processing)
-  - **TODO**: Add Zenoh publisher/subscriber integration tests
+  - Current: `tests/test_image.rs` (image allocation and processing tests)
 - **Benchmarks**: `benches/` directory with criterion
   - `benches/encode.rs` - JPEG/H264 encoding performance
   - `benches/convert.rs` - G2D format conversion performance
 - **Test naming**: `test_<module>_<scenario>` format
-- **Hardware mocking**:
-  - Use `#[cfg(test)]` to conditionally compile mock implementations
-  - Future: Add DMA buffer mocks for CI testing without hardware
+- **Serial tests**: Use `serial_test` crate for tests that require exclusive hardware access
 
 **Test Organization:**
 
@@ -237,8 +288,7 @@ camera/
 │   ├── video.rs          # Unit tests at bottom with #[cfg(test)]
 │   └── main.rs           # Minimal tests (mostly integration)
 ├── tests/
-│   ├── test_image.rs     # Integration tests for image library
-│   └── common/           # Shared test fixtures (TODO)
+│   └── test_image.rs     # Integration tests for image library
 └── benches/
     ├── encode.rs         # Performance benchmarks
     └── convert.rs        # G2D conversion benchmarks
@@ -271,14 +321,13 @@ cargo llvm-cov --all-features --workspace --html
 - Minimum coverage: 70% overall, 80% for core modules (image, video)
 - All public APIs must have unit tests
 - Hardware-specific code should have both mocked and hardware tests
-- Integration tests should verify Zenoh publishing (TODO)
 - Performance benchmarks should be run before releases
 
 **Hardware Testing:**
 
-- **QA Team**: Manual testing on Maivin/Raivin platforms
-- **Self-hosted runners**: Planned for automated on-target testing
-- **Test plan**: See TODO.md for integration testing strategy
+- **CI**: Native aarch64 testing on `ubuntu-22.04-arm` runner
+- **On-target**: `nxp-imx8mp-latest` self-hosted runner for JPEG, H.264, and integration tests
+- **Coverage**: Collected from on-target tests via `cargo llvm-cov`
 
 ---
 
@@ -297,13 +346,15 @@ cargo llvm-cov --all-features --workspace --html
 **PR:** 2 approvals (main), 1 (develop)
 **Build:** `cargo build --release`, `cargo clippy -- -D warnings`
 **Test:** `cargo test --lib` (unit), `cargo test -- --ignored` (hardware)
-**Licenses:** ✅ MIT/Apache/BSD | ❌ GPL/AGPL
+**Licenses:** MIT/Apache/BSD/EPL-2.0 | GPL/AGPL BLOCKED
 **Security:** support@au-zone.com
 **Coverage:** 70% min, 80%+ core modules
+**Env vars:** Short names, no prefix (e.g., `CAMERA`, `H264`, `JPEG`)
+**Config file:** `camera.default` for systemd EnvironmentFile reference
 
 ---
 
-**SPS Version:** 2.0 (2025-11-24)
+**SPS Version:** 3.0 (2026-03-12)
 **Maintained by:** Sébastien Taylor <sebastien@au-zone.com>
 
 *This document helps AI assistants contribute effectively to EdgeFirst Camera while maintaining quality, security, and consistency. For Au-Zone organization-wide standards, see SPS repository.*
