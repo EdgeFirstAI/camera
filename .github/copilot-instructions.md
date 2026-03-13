@@ -127,11 +127,13 @@ cd src && cargo build  # Where are we now?
 ### Build and Deployment
 
 ```bash
-# Build release binary (native)
-cargo build --release
+# ALWAYS run before committing:
+cargo fmt
+cargo clippy -- -D warnings
 
-# Cross-compile for ARM64 (primary target)
-cargo build --target=aarch64-unknown-linux-gnu --release
+# Build for target (use zigbuild on non-Linux or when cross-compiling):
+cargo zigbuild --target aarch64-unknown-linux-gnu --release  # cross-compile (macOS/x86_64 → aarch64)
+cargo build --release                                        # native build (on aarch64 Linux only)
 
 # Run tests (requires hardware on device, most tests are ignored by default)
 cargo test --workspace
@@ -146,13 +148,7 @@ cargo doc --no-deps --open
 cargo bench
 
 # Build with profiling enabled
-cargo build --release --profile=profiling --features=profiling
-
-# Format code
-cargo fmt
-
-# Lint code
-cargo clippy -- -D warnings
+cargo zigbuild --target aarch64-unknown-linux-gnu --release --profile=profiling --features=profiling
 
 # Generate SBOM and check license policy
 make sbom
@@ -163,6 +159,8 @@ make pre-release
 # Coverage report
 cargo llvm-cov --all-features --workspace --html
 ```
+
+**Build Verification:** Always run `cargo fmt` and `cargo clippy -- -D warnings` before building. Use `cargo zigbuild --target aarch64-unknown-linux-gnu` when developing on a non-Linux platform (macOS, Windows) or when cross-compiling for the aarch64 target. Native `cargo build` only works on Linux aarch64 due to platform-specific dependencies (V4L2, DMA, G2D).
 
 **Yocto Integration:**
 
@@ -183,7 +181,9 @@ cargo llvm-cov --all-features --workspace --html
 - Use `tracy` profiler for performance analysis (feature enabled by default)
 - Optional `tokio-console` for async task debugging
 - Most hardware-dependent tests are `#[ignore]` by default - use `cargo test -- --ignored` on device
-- Cross-compilation can use `cargo-zigbuild` (`.cargo/config.toml` is no longer used)
+- Cross-compilation uses `cargo-zigbuild` (`.cargo/config.toml` is no longer used)
+- **Always run `cargo fmt` and `cargo clippy -- -D warnings`** before building or committing
+- **Always use `cargo zigbuild --target aarch64-unknown-linux-gnu`** when on a non-Linux platform or cross-compiling
 
 ### CLI Arguments and Environment Variables
 
@@ -230,8 +230,8 @@ All options can be set via command line or environment variables. Environment va
 **Performance Profiling:**
 
 - Use Tracy profiler (connect with tracy-profiler GUI)
-- Frame timing tracked with `unix-ts` crate for precise timestamps
-- FPS monitoring with warnings when below threshold
+- V4L2 frame timestamps (CLOCK_MONOTONIC) converted to wall-clock via `ClockOffset` for ROS2 Header stamps
+- FPS monitoring with `Instant::now()` (monotonic) with warnings when below threshold
 
 ### Hardware Specifics
 
@@ -251,6 +251,14 @@ All options can be set via command line or environment variables. Environment va
   - Allocated from `/dev/dma_heap/linux,cma`
   - File descriptor passing for zero-copy between processes
   - RAII cleanup via `dma-buf` crate
+- **Timestamp / Clock Management**:
+  - **CLOCK_REALTIME** for all ROS2 Header stamps (ROS2 convention, human-readable, log-correlatable)
+  - **CLOCK_MONOTONIC** only for internal duration/interval measurements (FPS tracking, rate limiting via `Instant::now()`)
+  - V4L2 provides frame timestamps in CLOCK_MONOTONIC; convert to CLOCK_REALTIME via a cached offset (`ClockOffset` struct)
+  - Offset formula: `offset = CLOCK_REALTIME - CLOCK_MONOTONIC` (computed once at startup, stable after NTP settles)
+  - Conversion: `wall_time = v4l2_monotonic_timestamp + offset` (same pattern as ROS2 `usb_cam` / `image_transport`)
+  - On embedded systems without battery-backed RTC (i.MX8MP), CLOCK_REALTIME may jump once at boot when NTP syncs; after initial correction NTP only slews (gradual adjustment)
+  - **Never use CLOCK_MONOTONIC_RAW** for message timestamps — it is not NTP-adjusted and not compatible with ROS2
 - **Platform quirks**:
   - G2D requires physically contiguous memory (DMA heap)
   - V4L2 MMAP buffers for camera capture
@@ -344,7 +352,7 @@ cargo llvm-cov --all-features --workspace --html
 **Branch:** `feature/EDGEAI-123-desc`
 **Commit:** `EDGEAI-123: Brief description`
 **PR:** 2 approvals (main), 1 (develop)
-**Build:** `cargo build --release`, `cargo clippy -- -D warnings`
+**Build:** `cargo fmt`, `cargo clippy -- -D warnings`, `cargo zigbuild --target aarch64-unknown-linux-gnu --release`
 **Test:** `cargo test --lib` (unit), `cargo test -- --ignored` (hardware)
 **Licenses:** MIT/Apache/BSD/EPL-2.0 | GPL/AGPL BLOCKED
 **Security:** support@au-zone.com

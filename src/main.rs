@@ -237,6 +237,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), Box<dyn Error>> {
+    // Compute monotonic→realtime offset once at startup for V4L2 timestamp conversion
+    let clock_offset = ClockOffset::new()?;
+    info!(
+        "Clock offset: REALTIME - MONOTONIC = {}s {}ns",
+        clock_offset.offset_sec, clock_offset.offset_nsec
+    );
+
     let publ_info = match session
         .declare_publisher(args.info_topic.clone())
         .priority(Priority::Background)
@@ -264,7 +271,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                     .enable_all()
                     .build()
                     .unwrap()
-                    .block_on(h264_task(session, args, rx));
+                    .block_on(h264_task(session, args, rx, clock_offset));
             })?;
     }
 
@@ -279,7 +286,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                     .enable_all()
                     .build()
                     .unwrap()
-                    .block_on(jpeg_task(session, args, rx));
+                    .block_on(jpeg_task(session, args, rx, clock_offset));
             })?;
     }
 
@@ -307,7 +314,12 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                         .build()
                         .unwrap()
                         .block_on(h264_single_tile_task(
-                            session, args, rx, tile_pos, tile_topic,
+                            session,
+                            args,
+                            rx,
+                            tile_pos,
+                            tile_topic,
+                            clock_offset,
                         ));
                 })?;
 
@@ -352,8 +364,12 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         }
         args.tracy.then(|| plot!("fps", fps));
 
-        let (msg, enc) =
-            camera_dma_serialize(&camera_buffer, src_pid, args.camera_frame_id.clone())?;
+        let (msg, enc) = camera_dma_serialize(
+            &camera_buffer,
+            src_pid,
+            args.camera_frame_id.clone(),
+            &clock_offset,
+        )?;
         let span = info_span!("camera_publish");
         let local_session = session.clone();
         let dma_topic = args.dma_topic.clone();
@@ -427,7 +443,12 @@ async fn tf_static(
     }
 }
 
-async fn h264_task(session: Session, args: Args, rx: Receiver<(Image, Timestamp)>) {
+async fn h264_task(
+    session: Session,
+    args: Args,
+    rx: Receiver<(Image, Timestamp)>,
+    clock_offset: ClockOffset,
+) {
     let publisher = match session
         .declare_publisher(args.h264_topic.clone())
         .priority(Priority::Data)
@@ -467,8 +488,16 @@ async fn h264_task(session: Session, args: Args, rx: Receiver<(Image, Timestamp)
 
         let span = info_span!("h264");
         async {
-            let (msg, enc) =
-                build_video_msg(&msg, &ts, &mut vidmgr, &imgmgr, &img_h264, &args).unwrap();
+            let (msg, enc) = build_video_msg(
+                &msg,
+                &ts,
+                &mut vidmgr,
+                &imgmgr,
+                &img_h264,
+                &args,
+                &clock_offset,
+            )
+            .unwrap();
             publisher.put(msg).encoding(enc).await.unwrap();
         }
         .instrument(span)
@@ -477,7 +506,12 @@ async fn h264_task(session: Session, args: Args, rx: Receiver<(Image, Timestamp)
     }
 }
 
-async fn jpeg_task(session: Session, args: Args, rx: Receiver<(Image, Timestamp)>) {
+async fn jpeg_task(
+    session: Session,
+    args: Args,
+    rx: Receiver<(Image, Timestamp)>,
+    clock_offset: ClockOffset,
+) {
     let publisher = match session
         .declare_publisher(args.jpeg_topic.clone())
         .priority(Priority::Data)
@@ -508,7 +542,8 @@ async fn jpeg_task(session: Session, args: Args, rx: Receiver<(Image, Timestamp)
 
         let span = info_span!("jpeg");
         async {
-            let (msg, enc) = build_jpeg_msg(&msg, &ts, &imgmgr, &img_jpeg, &args).unwrap();
+            let (msg, enc) =
+                build_jpeg_msg(&msg, &ts, &imgmgr, &img_jpeg, &args, &clock_offset).unwrap();
             publisher.put(msg).encoding(enc).await.unwrap();
         }
         .instrument(span)
@@ -523,6 +558,7 @@ async fn h264_single_tile_task(
     rx: Receiver<(Image, Timestamp)>,
     tile_pos: TilePosition,
     topic: String,
+    clock_offset: ClockOffset,
 ) {
     let publisher = match session
         .declare_publisher(topic.clone())
@@ -605,16 +641,18 @@ async fn h264_single_tile_task(
             }
 
             match vid_mgr.encode_direct(&source_img) {
-                Ok((data, _is_key)) => match build_tile_video_msg(&data, &ts, &args, tile_pos) {
-                    Ok((msg, enc)) => {
-                        if let Err(e) = publisher.put(msg).encoding(enc).await {
-                            error!("Failed to publish tile {:?}: {:?}", tile_pos, e);
+                Ok((data, _is_key)) => {
+                    match build_tile_video_msg(&data, &ts, &args, tile_pos, &clock_offset) {
+                        Ok((msg, enc)) => {
+                            if let Err(e) = publisher.put(msg).encoding(enc).await {
+                                error!("Failed to publish tile {:?}: {:?}", tile_pos, e);
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to build tile video message: {:?}", e);
                         }
                     }
-                    Err(e) => {
-                        error!("Failed to build tile video message: {:?}", e);
-                    }
-                },
+                }
                 Err(e) => {
                     error!("Failed to encode tile {:?}: {:?}", tile_pos, e);
                 }
@@ -632,6 +670,7 @@ fn build_jpeg_msg(
     imgmgr: &ImageManager,
     img: &Image,
     args: &Args,
+    clock_offset: &ClockOffset,
 ) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
     info_span!("jpeg_convert").in_scope(|| imgmgr.convert(buf, img, None, Rotation::Rotation0))?;
 
@@ -647,10 +686,7 @@ fn build_jpeg_msg(
     info_span!("jpeg_publish").in_scope(|| {
         let msg = CompressedImage {
             header: std_msgs::Header {
-                stamp: builtin_interfaces::Time {
-                    sec: ts.seconds() as i32,
-                    nanosec: ts.subsec(9),
-                },
+                stamp: clock_offset.to_realtime(ts),
                 frame_id: args.camera_frame_id.clone(),
             },
             format: "jpeg".to_string(),
@@ -671,15 +707,13 @@ fn build_video_msg(
     imgmgr: &ImageManager,
     img: &Image,
     args: &Args,
+    clock_offset: &ClockOffset,
 ) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
     let data = vid.resize_and_encode(buf, imgmgr, img)?.0;
     info_span!("h264_publish").in_scope(|| {
         let msg = FoxgloveCompressedVideo {
             header: std_msgs::Header {
-                stamp: builtin_interfaces::Time {
-                    sec: ts.seconds() as i32,
-                    nanosec: ts.subsec(9),
-                },
+                stamp: clock_offset.to_realtime(ts),
                 frame_id: args.camera_frame_id.clone(),
             },
             format: "h264".to_string(),
@@ -698,16 +732,14 @@ fn build_tile_video_msg(
     ts: &Timestamp,
     args: &Args,
     tile_pos: TilePosition,
+    clock_offset: &ClockOffset,
 ) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
     info_span!("h264_tile_publish").in_scope(|| {
         let frame_id = format!("{}_{:?}", args.camera_frame_id, tile_pos).to_lowercase();
 
         let msg = FoxgloveCompressedVideo {
             header: std_msgs::Header {
-                stamp: builtin_interfaces::Time {
-                    sec: ts.seconds() as i32,
-                    nanosec: ts.subsec(9),
-                },
+                stamp: clock_offset.to_realtime(ts),
                 frame_id,
             },
             format: "h264".to_string(),
@@ -726,6 +758,7 @@ fn camera_dma_serialize(
     buf: &CameraBuffer<'_>,
     pid: u32,
     frame_id: String,
+    clock_offset: &ClockOffset,
 ) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
     let ts = buf.timestamp()?;
     let width = buf.width() as u32;
@@ -736,10 +769,7 @@ fn camera_dma_serialize(
 
     let msg = DmaBuffer {
         header: std_msgs::Header {
-            stamp: builtin_interfaces::Time {
-                sec: ts.seconds() as i32,
-                nanosec: ts.subsec(9),
-            },
+            stamp: clock_offset.to_realtime(&ts),
             frame_id,
         },
         pid,
@@ -901,18 +931,91 @@ fn build_tf_msg(args: &Args) -> TransformStamped {
     }
 }
 
+/// Returns the current wall-clock time as a ROS2-compatible timestamp.
+///
+/// `SystemTime::now()` uses CLOCK_REALTIME on Linux (via vDSO, no actual syscall).
+/// On embedded systems without battery-backed RTC (e.g., i.MX8MP), the wall clock
+/// may jump once at boot when NTP syncs, but is stable afterward (NTP only slews).
 fn timestamp() -> Result<builtin_interfaces::Time, std::io::Error> {
-    let mut tp = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    let err = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_RAW, &mut tp) };
-    if err != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
+    let now = std::time::SystemTime::now();
+    let duration = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
     Ok(builtin_interfaces::Time {
-        sec: tp.tv_sec as i32,
-        nanosec: tp.tv_nsec as u32,
+        sec: duration.as_secs() as i32,
+        nanosec: duration.subsec_nanos(),
     })
+}
+
+/// Cached offset between CLOCK_REALTIME and CLOCK_MONOTONIC for converting V4L2
+/// hardware timestamps to wall-clock time.
+///
+/// V4L2 captures frame timestamps using CLOCK_MONOTONIC, but ROS2 Header stamps
+/// require CLOCK_REALTIME. This offset converts between the two clock domains:
+///
+///   wall_time = v4l2_monotonic_timestamp + offset
+///
+/// This is the same pattern used by ROS2 image_transport and usb_cam drivers.
+/// The offset is stable after NTP settles (typically within 30s of boot).
+#[derive(Clone, Copy)]
+struct ClockOffset {
+    offset_sec: i64,
+    offset_nsec: i64,
+}
+
+impl ClockOffset {
+    /// Compute the offset by reading both clocks back-to-back.
+    fn new() -> Result<Self, std::io::Error> {
+        let mut realtime = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let mut monotonic = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+
+        unsafe {
+            if libc::clock_gettime(libc::CLOCK_REALTIME, &mut realtime) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut monotonic) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+
+        // offset = realtime - monotonic (using i128 to avoid overflow during subtraction)
+        let real_ns = realtime.tv_sec as i128 * 1_000_000_000 + realtime.tv_nsec as i128;
+        let mono_ns = monotonic.tv_sec as i128 * 1_000_000_000 + monotonic.tv_nsec as i128;
+        let offset_ns = real_ns - mono_ns;
+
+        Ok(Self {
+            offset_sec: (offset_ns / 1_000_000_000) as i64,
+            offset_nsec: (offset_ns % 1_000_000_000) as i64,
+        })
+    }
+
+    /// Convert a V4L2 CLOCK_MONOTONIC timestamp to CLOCK_REALTIME for ROS2 Header stamps.
+    fn to_realtime(&self, ts: &Timestamp) -> builtin_interfaces::Time {
+        let mono_sec = ts.seconds();
+        let mono_nsec = ts.subsec(9) as i64;
+
+        let mut real_sec = mono_sec + self.offset_sec;
+        let mut real_nsec = mono_nsec + self.offset_nsec;
+
+        // Normalize nanoseconds into [0, 999_999_999]
+        if real_nsec >= 1_000_000_000 {
+            real_sec += 1;
+            real_nsec -= 1_000_000_000;
+        } else if real_nsec < 0 {
+            real_sec -= 1;
+            real_nsec += 1_000_000_000;
+        }
+
+        builtin_interfaces::Time {
+            sec: real_sec as i32,
+            nanosec: real_nsec as u32,
+        }
+    }
 }
