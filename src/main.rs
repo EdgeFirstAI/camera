@@ -940,7 +940,7 @@ fn timestamp() -> Result<builtin_interfaces::Time, std::io::Error> {
     let now = std::time::SystemTime::now();
     let duration = now
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
 
     Ok(builtin_interfaces::Time {
         sec: duration.as_secs() as i32,
@@ -997,7 +997,7 @@ impl ClockOffset {
     }
 
     /// Convert a V4L2 CLOCK_MONOTONIC timestamp to CLOCK_REALTIME for ROS2 Header stamps.
-    fn to_realtime(&self, ts: &Timestamp) -> builtin_interfaces::Time {
+    fn to_realtime(self, ts: &Timestamp) -> builtin_interfaces::Time {
         let mono_sec = ts.seconds();
         let mono_nsec = ts.subsec(9) as i64;
 
