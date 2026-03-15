@@ -787,7 +787,22 @@ fn camera_dma_serialize(
     Ok((msg, enc))
 }
 
+/// Saturated timestamp used when the system clock exceeds the ROS 2 Y2038 limit.
+const SATURATED_TIME: builtin_interfaces::Time = builtin_interfaces::Time {
+    sec: i32::MAX,
+    nanosec: 999_999_999,
+};
+
 fn build_info_msg(args: &Args) -> Result<CameraInfo, Box<dyn Error>> {
+    let stamp = match timestamp() {
+        Ok(t) => t,
+        Err(TimestampError::Overflow) => {
+            warn!("Timestamp overflow: system clock exceeds i32 range (Y2038), saturating");
+            SATURATED_TIME
+        }
+        Err(e) => return Err(e.into()),
+    };
+
     let msg = if !args.cam_info_path.is_empty() {
         let file = match File::open(&args.cam_info_path) {
             Ok(v) => v,
@@ -854,7 +869,7 @@ fn build_info_msg(args: &Args) -> Result<CameraInfo, Box<dyn Error>> {
 
         CameraInfo {
             header: std_msgs::Header {
-                stamp: timestamp()?,
+                stamp,
                 frame_id: args.camera_frame_id.clone(),
             },
             width,
@@ -883,7 +898,7 @@ fn build_info_msg(args: &Args) -> Result<CameraInfo, Box<dyn Error>> {
         let height = 1080;
         CameraInfo {
             header: std_msgs::Header {
-                stamp: timestamp()?,
+                stamp,
                 frame_id: args.camera_frame_id.clone(),
             },
             width,
@@ -909,10 +924,22 @@ fn build_info_msg(args: &Args) -> Result<CameraInfo, Box<dyn Error>> {
 }
 
 fn build_tf_msg(args: &Args) -> TransformStamped {
+    let stamp = match timestamp() {
+        Ok(t) => t,
+        Err(TimestampError::Overflow) => {
+            warn!("Timestamp overflow: system clock exceeds i32 range (Y2038), saturating");
+            SATURATED_TIME
+        }
+        Err(e) => {
+            warn!("Failed to get timestamp: {e}");
+            Time { sec: 0, nanosec: 0 }
+        }
+    };
+
     TransformStamped {
         header: Header {
             frame_id: args.base_frame_id.clone(),
-            stamp: timestamp().unwrap_or(Time { sec: 0, nanosec: 0 }),
+            stamp,
         },
         child_frame_id: args.camera_frame_id.clone(),
         transform: Transform {
@@ -931,19 +958,53 @@ fn build_tf_msg(args: &Args) -> TransformStamped {
     }
 }
 
+/// Errors that can occur when generating timestamps.
+#[derive(Debug)]
+enum TimestampError {
+    /// System clock is before Unix epoch.
+    BeforeEpoch(std::time::SystemTimeError),
+    /// System clock seconds exceed i32 range (Y2038).
+    Overflow,
+}
+
+impl std::fmt::Display for TimestampError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BeforeEpoch(e) => write!(f, "system clock is before Unix epoch: {e}"),
+            Self::Overflow => write!(f, "system clock seconds exceed i32::MAX (Y2038)"),
+        }
+    }
+}
+
+impl std::error::Error for TimestampError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::BeforeEpoch(e) => Some(e),
+            Self::Overflow => None,
+        }
+    }
+}
+
 /// Returns the current wall-clock time as a ROS2-compatible timestamp.
 ///
 /// `SystemTime::now()` uses CLOCK_REALTIME on Linux (via vDSO, no actual syscall).
 /// On embedded systems without battery-backed RTC (e.g., i.MX8MP), the wall clock
 /// may jump once at boot when NTP syncs, but is stable afterward (NTP only slews).
-fn timestamp() -> Result<builtin_interfaces::Time, std::io::Error> {
-    let now = std::time::SystemTime::now();
-    let duration = now
+///
+/// Returns `TimestampError::Overflow` if the system clock exceeds `i32::MAX` seconds
+/// (2038-01-19T03:14:07Z), which is the ROS 2 `builtin_interfaces/msg/Time` limit.
+fn timestamp() -> Result<builtin_interfaces::Time, TimestampError> {
+    let duration = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(std::io::Error::other)?;
+        .map_err(TimestampError::BeforeEpoch)?;
+
+    let secs = duration.as_secs();
+    if secs > i32::MAX as u64 {
+        return Err(TimestampError::Overflow);
+    }
 
     Ok(builtin_interfaces::Time {
-        sec: duration.as_secs() as i32,
+        sec: secs as i32,
         nanosec: duration.subsec_nanos(),
     })
 }
@@ -1013,8 +1074,16 @@ impl ClockOffset {
             real_nsec += 1_000_000_000;
         }
 
+        // Clamp to i32 range for ROS2 builtin_interfaces::Time (Y2038 limit)
+        let sec = if real_sec > i32::MAX as i64 {
+            warn!("Timestamp overflow: V4L2 converted time exceeds i32 range (Y2038), saturating");
+            return SATURATED_TIME;
+        } else {
+            real_sec as i32
+        };
+
         builtin_interfaces::Time {
-            sec: real_sec as i32,
+            sec,
             nanosec: real_nsec as u32,
         }
     }

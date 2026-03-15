@@ -133,7 +133,7 @@ cargo clippy -- -D warnings
 
 # Build for target (use zigbuild on non-Linux or when cross-compiling):
 cargo zigbuild --target aarch64-unknown-linux-gnu --release  # cross-compile (macOS/x86_64 → aarch64)
-cargo build --release                                        # native build (on aarch64 Linux only)
+cargo build --release                                        # native build (Linux x86_64 or aarch64)
 
 # Run tests (requires hardware on device, most tests are ignored by default)
 cargo test --workspace

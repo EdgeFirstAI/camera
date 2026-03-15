@@ -608,6 +608,21 @@ Each span appears as a zone in Tracy with timing information.
 
 ---
 
+## ROS 2 Year 2038 Limit
+
+The ROS 2 `builtin_interfaces/msg/Time` message uses `int32` for the `sec` field, which overflows on 2038-01-19T03:14:07Z. This is an inherent limitation of the ROS 2 message definition.
+
+The camera node handles this as follows:
+
+1. The `timestamp()` function detects when `SystemTime` seconds exceed `i32::MAX` and returns a `TimestampError::Overflow` error.
+2. The `ClockOffset::to_realtime()` method clamps converted V4L2 timestamps to `i32::MAX` with a warning.
+3. Callers log a warning and publish messages with a saturated timestamp (`sec = i32::MAX`, `nanosec = 999_999_999`).
+4. Camera data (frames, calibration, transforms) is still published — only the header timestamp is clamped.
+
+This ensures the service continues delivering camera data past 2038 rather than silently dropping frames. Downstream consumers should be aware that saturated timestamps indicate the Y2038 limit has been reached.
+
+---
+
 ## References
 
 **Rust Crates:**
