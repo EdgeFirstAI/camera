@@ -1044,6 +1044,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "four-char-code"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42da99970737c0150e3c5cd1cdc510735a2511739f5c3aa3c6bfc9f31441488d"
+
+[[package]]
 name = "futures"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1134,12 +1140,14 @@ dependencies = [
 
 [[package]]
 name = "g2d-sys"
-version = "1.0.1"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e36940773868c0e387a2c0f21d24bd7ae940531dc84bc96f34f471583e94e129"
 dependencies = [
- "dma-buf 0.4.0",
+ "four-char-code",
  "libloading 0.8.9",
+ "log",
  "nix",
- "videostream",
 ]
 
 [[package]]

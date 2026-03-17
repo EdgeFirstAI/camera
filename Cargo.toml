@@ -18,7 +18,6 @@ strip = false
 debug = true
 
 [workspace]
-members = ["g2d-sys"]
 
 [[bench]]
 name = "encode"
@@ -44,7 +43,7 @@ console-subscriber = "0.5.0"
 dma-buf = "0.4.0"
 dma-heap = "0.4.1"
 edgefirst-schemas = "1.5.2"
-g2d-sys = { version = "1.0.1", path = "g2d-sys" }
+g2d-sys = "1.2.0"
 kanal = { git = "https://github.com/fereidani/kanal", rev = "b6aeab2" }
 libc = "0.2.177"
 serde_json = "1.0.145"
