@@ -84,7 +84,7 @@ cd src && cargo build  # Where are we now?
 ### Technology Stack
 
 - **Language**: Rust (edition 2021)
-- **Build system**: Cargo with workspace configuration (includes `g2d-sys` member)
+- **Build system**: Cargo with workspace configuration
 - **Key dependencies**:
   - `zenoh 1.6.2` - Transport and ROS2 bridge compatibility
   - `tokio 1.48.0` - Async runtime with multi-threaded executor
@@ -93,7 +93,7 @@ cd src && cargo build  # Where are we now?
   - `tracing-tracy` - Performance profiling (Tracy profiler integration)
   - `turbojpeg` - JPEG encoding with SIMD (require-simd feature)
   - `dma-heap/dma-buf` - Zero-copy DMA buffer management
-  - `g2d-sys` - NXP G2D hardware acceleration bindings (local crate, MIT licensed)
+  - `g2d-sys 1.2.0` - NXP G2D hardware acceleration bindings (crates.io, Apache-2.0)
   - `kanal` - Fast bounded SPSC/MPMC channels for inter-thread communication
   - `clap` - CLI argument parsing with derive and env features
 - **Target platforms**:
@@ -116,7 +116,7 @@ cd src && cargo build  # Where are we now?
   - `src/main.rs` - Main loop, Zenoh publishers, thread coordination, frame capture
   - `src/args.rs` - CLI arguments with clap (env var support for all options)
   - `src/lib.rs` - Public library interface (exports `image` module only)
-  - `g2d-sys/` - NXP G2D FFI bindings (unsafe, platform-specific)
+  - `g2d-sys` - NXP G2D FFI bindings from crates.io (unsafe, platform-specific)
 - **Error handling**:
   - Uses `Result<T, Box<dyn Error>>` pattern
   - Logging via `tracing` with journald backend
@@ -239,7 +239,7 @@ All options can be set via command line or environment variables. Environment va
 - **G2D Acceleration**:
   - Format conversion (YUYV → NV12/RGB/RGBA)
   - Image scaling and rotation
-  - FFI bindings in `g2d-sys` crate (dynamically loaded via `libloading`)
+  - FFI bindings via `g2d-sys` crate from crates.io (dynamically loaded via `libloading`)
 - **H264 Encoder**:
   - Hardware encoder via V4L2 M2M interface (`/dev/mxc-hantro-h1`)
   - Backend selectable via `VSL_CODEC_BACKEND` environment variable
