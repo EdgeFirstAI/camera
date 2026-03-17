@@ -139,14 +139,17 @@ impl Drop for G2DBuffer<'_> {
 }
 
 /// Map a V4L2/videostream FourCC to the corresponding G2D format constant.
-fn fourcc_to_g2d_format(fourcc: FourCC) -> g2d_format {
+fn fourcc_to_g2d_format(fourcc: FourCC) -> Result<g2d_format, io::Error> {
     match fourcc {
-        RGB3 => g2d_format_G2D_RGB888,
-        RGBX => g2d_format_G2D_RGBX8888,
-        RGBA => g2d_format_G2D_RGBA8888,
-        YUYV => g2d_format_G2D_YUYV,
-        NV12 => g2d_format_G2D_NV12,
-        _ => todo!(),
+        RGB3 => Ok(g2d_format_G2D_RGB888),
+        RGBX => Ok(g2d_format_G2D_RGBX8888),
+        RGBA => Ok(g2d_format_G2D_RGBA8888),
+        YUYV => Ok(g2d_format_G2D_YUYV),
+        NV12 => Ok(g2d_format_G2D_NV12),
+        _ => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("unsupported G2D pixel format: {fourcc}"),
+        )),
     }
 }
 
@@ -163,7 +166,7 @@ fn surface_from_image(img: &Image) -> Result<G2DSurface, Box<dyn Error>> {
     };
     Ok(G2DSurface {
         planes,
-        format: fourcc_to_g2d_format(img.format),
+        format: fourcc_to_g2d_format(img.format)?,
         left: 0,
         top: 0,
         right: img.width as i32,
@@ -197,7 +200,7 @@ fn surface_from_frame(frame: &Frame) -> Result<G2DSurface, Box<dyn Error>> {
     };
     Ok(G2DSurface {
         planes,
-        format: fourcc_to_g2d_format(fourcc),
+        format: fourcc_to_g2d_format(fourcc)?,
         left: 0,
         top: 0,
         right: width,

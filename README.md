@@ -462,7 +462,6 @@ camera/
 │   ├── video.rs         # H264 encoding, 4K tiling
 │   ├── args.rs          # CLI argument parsing
 │   └── lib.rs           # Public library interface
-├── g2d-sys/             # NXP G2D FFI bindings (unsafe, platform-specific)
 ├── tests/               # Integration tests
 ├── benches/             # Performance benchmarks
 ├── Cargo.toml           # Project dependencies
