@@ -12,7 +12,7 @@ that require attribution:
   * dma-buf 0.4.0 (Custom License - see repository)
   * dma-heap 0.4.1 (Custom License - see repository)
   * edgefirst-schemas 1.5.2 (Apache-2.0)
-  * g2d-sys 1.0.1 (MIT)
+  * g2d-sys 1.2.0 (Apache-2.0)
   * kanal 0.1.0-pre8 (MIT)
   * libc 0.2.180 (Apache-2.0 OR MIT)
   * serde_json 1.0.145 (Apache-2.0 OR MIT)
