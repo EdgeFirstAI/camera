@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-03-19
+
+### Changed
+- Use CLOCK_REALTIME for ROS2 Header stamps instead of CLOCK_MONOTONIC,
+  matching ROS2 conventions (EDGEAI-1131)
+- Convert V4L2 monotonic timestamps to wall-clock time via cached
+  ClockOffset for accurate ROS2 message timestamps (EDGEAI-1131)
+- Migrated g2d-sys from local workspace crate to crates.io v1.2.0 (MVN2-164)
+- Simplified ImageManager using high-level G2D API with automatic
+  version-aware dispatch
+
+### Fixed
+- NV12 plane offsets: correctly set planes[1] for UV data and
+  clear unused planes[2] (MVN2-164)
+- Y2038 overflow handling for ROS2 timestamps (EDGEAI-1131)
+- Proper error propagation in surface_from_frame instead of panicking (MVN2-164)
+- Return proper error for unsupported pixel formats instead of
+  panicking with todo!() (MVN2-164)
+
+### Removed
+- Local g2d-sys/ workspace crate (replaced by crates.io dependency)
+- ImageManager::g2d_buf_fd() (g2d_buf_export_fd not available in
+  crates.io g2d-sys)
+
 ## [2.5.1] - 2026-03-02
 
 ### Fixed
@@ -156,7 +180,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Environment variable control for H264 streaming
 - Flexible runtime configuration
 
-[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.5.1...HEAD
+[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.6.0...HEAD
+[2.6.0]: https://github.com/EdgeFirstAI/camera/compare/v2.5.1...v2.6.0
 [2.5.1]: https://github.com/EdgeFirstAI/camera/compare/v2.5.0...v2.5.1
 [2.5.0]: https://github.com/EdgeFirstAI/camera/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/EdgeFirstAI/camera/compare/v2.3.1...v2.4.0
