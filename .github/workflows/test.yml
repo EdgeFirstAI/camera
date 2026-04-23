@@ -271,7 +271,9 @@ jobs:
         env:
           # Set up profraw collection for coverage
           LLVM_PROFILE_FILE: ${{ github.workspace }}/coverage/profraw/imx8mp-%p-%m.profraw
-          LD_LIBRARY_PATH: ${{ github.workspace }}/videostream/lib/aarch64-linux-gnu
+          # videostream 2.4.0 zip extracts the library to lib/ (no arch subdir),
+          # with libvideostream.so → libvideostream.so.2 → libvideostream.so.2.4.0
+          LD_LIBRARY_PATH: ${{ github.workspace }}/videostream/lib
         run: |
           # Set up profraw collection directory
           mkdir -p coverage/profraw coverage/test-output
