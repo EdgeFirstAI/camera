@@ -259,7 +259,7 @@ jobs:
         run: |
           set -euo pipefail
           ARCHIVE="videostream-${VIDEOSTREAM_VERSION}-linux-aarch64.zip"
-          curl --fail --show-error --location \
+          curl --fail --show-error --location --proto '=https' --tlsv1.2 \
             "https://github.com/EdgeFirstAI/videostream/releases/download/v${VIDEOSTREAM_VERSION}/${ARCHIVE}" \
             -o videostream.zip
           echo "${VIDEOSTREAM_SHA256}  videostream.zip" | sha256sum --check --strict
