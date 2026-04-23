@@ -38,6 +38,7 @@ use videostream::{
 use zenoh::{
     bytes::{Encoding, ZBytes},
     qos::{CongestionControl, Priority},
+    time::{Timestamp as ZenohTimestamp, NTP64},
     Session,
 };
 
@@ -364,8 +365,11 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         }
         args.tracy.then(|| plot!("fps", fps));
 
+        let cam_ts = camera_buffer.timestamp()?;
+        let dma_sample_ts = zenoh_ts_for_frame(&session, &clock_offset, &cam_ts);
         let (msg, enc) = camera_dma_serialize(
             &camera_buffer,
+            &cam_ts,
             src_pid,
             args.camera_frame_id.clone(),
             &clock_offset,
@@ -377,13 +381,17 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             local_session
                 .put(dma_topic, msg)
                 .encoding(enc)
+                .timestamp(dma_sample_ts)
                 .priority(Priority::Data)
                 .congestion_control(CongestionControl::Drop)
                 .await
                 .unwrap();
         }
         .instrument(span);
-        let info_task = publ_info.put(info_msg.clone()).encoding(info_enc.clone());
+        let info_task = publ_info
+            .put(info_msg.clone())
+            .encoding(info_enc.clone())
+            .timestamp(session.new_timestamp());
 
         if args.h264 {
             let ts = camera_buffer.timestamp()?;
@@ -439,6 +447,7 @@ async fn tf_static(
         session
             .put(&topic, msg.clone())
             .encoding(enc.clone())
+            .timestamp(session.new_timestamp())
             .await?;
     }
 }
@@ -487,6 +496,7 @@ async fn h264_task(
         };
 
         let span = info_span!("h264");
+        let sample_ts = zenoh_ts_for_frame(&session, &clock_offset, &ts);
         async {
             let (msg, enc) = build_video_msg(
                 &msg,
@@ -498,7 +508,12 @@ async fn h264_task(
                 &clock_offset,
             )
             .unwrap();
-            publisher.put(msg).encoding(enc).await.unwrap();
+            publisher
+                .put(msg)
+                .encoding(enc)
+                .timestamp(sample_ts)
+                .await
+                .unwrap();
         }
         .instrument(span)
         .await;
@@ -541,10 +556,16 @@ async fn jpeg_task(
         };
 
         let span = info_span!("jpeg");
+        let sample_ts = zenoh_ts_for_frame(&session, &clock_offset, &ts);
         async {
             let (msg, enc) =
                 build_jpeg_msg(&msg, &ts, &imgmgr, &img_jpeg, &args, &clock_offset).unwrap();
-            publisher.put(msg).encoding(enc).await.unwrap();
+            publisher
+                .put(msg)
+                .encoding(enc)
+                .timestamp(sample_ts)
+                .await
+                .unwrap();
         }
         .instrument(span)
         .await;
@@ -644,7 +665,10 @@ async fn h264_single_tile_task(
                 Ok((data, _is_key)) => {
                     match build_tile_video_msg(&data, &ts, &args, tile_pos, &clock_offset) {
                         Ok((msg, enc)) => {
-                            if let Err(e) = publisher.put(msg).encoding(enc).await {
+                            let sample_ts = zenoh_ts_for_frame(&session, &clock_offset, &ts);
+                            if let Err(e) =
+                                publisher.put(msg).encoding(enc).timestamp(sample_ts).await
+                            {
                                 error!("Failed to publish tile {:?}: {:?}", tile_pos, e);
                             }
                         }
@@ -756,27 +780,28 @@ fn build_tile_video_msg(
 #[instrument(skip_all, fields(width = buf.width(), height = buf.height(), format = buf.format().to_string()))]
 fn camera_dma_serialize(
     buf: &CameraBuffer<'_>,
+    ts: &Timestamp,
     pid: u32,
     frame_id: String,
     clock_offset: &ClockOffset,
 ) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
-    let ts = buf.timestamp()?;
     let width = buf.width() as u32;
     let height = buf.height() as u32;
     let fourcc = buf.format().into();
     let dma_buf = buf.rawfd();
     let length = buf.length()? as u32;
+    let stride = buf.bytes_per_line()?;
 
     let msg = DmaBuffer {
         header: std_msgs::Header {
-            stamp: clock_offset.to_realtime(&ts),
+            stamp: clock_offset.to_realtime(ts),
             frame_id,
         },
         pid,
         fd: dma_buf,
         width,
         height,
-        stride: width, // FIXME: stride is not always equal to width!
+        stride,
         fourcc,
         length,
     };
@@ -785,6 +810,31 @@ fn camera_dma_serialize(
     let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/DmaBuffer");
 
     Ok((msg, enc))
+}
+
+/// Build a Zenoh sample Timestamp from a ROS2 wall-clock `Time` (sec, nanosec
+/// since Unix epoch). Uses the session's ZenohId as the timestamp ID so the
+/// sample is attributable to this producer. Pre-epoch times (negative sec)
+/// saturate both fields to the Unix epoch so the sample timestamp cannot
+/// drift from the payload `Header.stamp` via partial clamping.
+fn zenoh_ts_from_ros_time(session: &Session, t: builtin_interfaces::Time) -> ZenohTimestamp {
+    let dur = if t.sec < 0 {
+        Duration::new(0, 0)
+    } else {
+        Duration::new(t.sec as u64, t.nanosec)
+    };
+    ZenohTimestamp::new(NTP64::from(dur), session.zid().into())
+}
+
+/// Convenience: derive a Zenoh sample Timestamp from a V4L2 camera frame
+/// timestamp, converting monotonic → wall-clock via the cached ClockOffset.
+/// Matches the `Header.stamp` used in the CDR payload.
+fn zenoh_ts_for_frame(
+    session: &Session,
+    clock_offset: &ClockOffset,
+    cam_ts: &Timestamp,
+) -> ZenohTimestamp {
+    zenoh_ts_from_ros_time(session, clock_offset.to_realtime(cam_ts))
 }
 
 /// Saturated timestamp used when the system clock exceeds the ROS 2 Y2038 limit.
