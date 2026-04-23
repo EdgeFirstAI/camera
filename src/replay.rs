@@ -1,0 +1,347 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Au-Zone Technologies. All Rights Reserved.
+
+//! Replay an H.264 Annex-B file as if it were a live V4L2 camera.
+//!
+//! The replay path mirrors the live capture path on the wire: consumers
+//! see the same Zenoh topics, same CDR schemas, and a monotonic
+//! `CameraFrame.seq` that does not reset on loop. Everything not
+//! recoverable from the bitstream (`/camera/info`, `/tf_static`,
+//! colorimetry) comes from the `.json` sidecar written at record time.
+//!
+//! The top-level [`run_replay`] function takes the place of the live
+//! `stream()` path in `main.rs` when `--replay` is set.
+
+use std::{
+    error::Error,
+    fs::File,
+    io::{BufReader, Read, Seek, SeekFrom},
+    sync::atomic::Ordering,
+    time::Duration,
+};
+
+/// Coerce the `Box<dyn StdError + Send + Sync>` that Zenoh returns into
+/// the `Box<dyn Error>` the rest of this binary uses.
+fn zerr<E: std::fmt::Display>(e: E) -> Box<dyn Error> {
+    e.to_string().into()
+}
+
+use tracing::{info, info_span, warn};
+use videostream::{
+    decoder::{DecodeReturnCode, Decoder, DecoderCodec},
+    frame::Frame,
+};
+use zenoh::{
+    bytes::{Encoding, ZBytes},
+    qos::{CongestionControl, Priority},
+    Session,
+};
+
+use crate::{
+    args::Args, build_camera_frame_msg, build_h264_msg, sidecar::Sidecar, zenoh_ts_from_ros_time,
+    CameraInfoFields, ClockOffset, TfStaticFields, SHUTDOWN,
+};
+
+/// Read-chunk size for pulling Annex-B bytes off disk. Matches the
+/// BufWriter size used on the record side.
+const READ_CHUNK: usize = 256 * 1024;
+
+/// Replay the recorded file at `args.replay` until EOF (or indefinitely
+/// when `--replay-loop` is set). Publishes on the same topics and
+/// schemas as the live capture path.
+pub(crate) async fn run_replay(session: Session, args: Args) -> Result<(), Box<dyn Error>> {
+    let replay_path = args
+        .replay
+        .clone()
+        .expect("run_replay called without --replay");
+
+    let sidecar = Sidecar::load_paired(&replay_path)?;
+    info!(
+        "Replay: {:?} ({} x {} @ {} fps, codec {})",
+        replay_path, sidecar.width, sidecar.height, sidecar.fps, sidecar.codec
+    );
+
+    // The sidecar owns /camera/info and /tf_static — flags that would
+    // have affected these in live mode are ignored with a warning so
+    // operators do not silently get the CLI values instead of the
+    // recorded ones.
+    if !args.cam_info_path.is_empty() {
+        warn!(
+            "--cam-info-path {:?} is ignored in replay mode; the sidecar's camera_info is used",
+            args.cam_info_path
+        );
+    }
+
+    let clock_offset = ClockOffset::new()?;
+    info!(
+        "Clock offset: REALTIME - MONOTONIC = {}s {}ns",
+        clock_offset.offset_sec, clock_offset.offset_nsec
+    );
+
+    // Camera info and tf static are published from the sidecar values
+    // rather than CLI defaults; we build the CDR payloads once here and
+    // reuse the bytes per publish, same pattern as the live path.
+    let info_fields: CameraInfoFields = sidecar.camera_info.clone();
+    let tf_fields: TfStaticFields = sidecar.tf_static.clone();
+
+    let publ_info = session
+        .declare_publisher(args.info_topic.clone())
+        .priority(Priority::Background)
+        .congestion_control(CongestionControl::Drop)
+        .await
+        .map_err(zerr)?;
+
+    // tf_static runs on its own loop exactly like the live path.
+    let tf_session = session.clone();
+    let tf_bytes = ZBytes::from(tf_fields.build_msg()?.into_cdr());
+    let tf_enc = Encoding::APPLICATION_CDR.with_schema("geometry_msgs/msg/TransformStamped");
+    let tf_task = tokio::spawn(async move { tf_static_loop(tf_session, tf_bytes, tf_enc).await });
+    std::mem::drop(tf_task);
+
+    let info_bytes = ZBytes::from(info_fields.build_msg()?.into_cdr());
+    let info_enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/CameraInfo");
+
+    let publ_h264 = if args.h264 {
+        Some(
+            session
+                .declare_publisher(args.h264_topic.clone())
+                .priority(Priority::Data)
+                .congestion_control(CongestionControl::Drop)
+                .await
+                .map_err(zerr)?,
+        )
+    } else {
+        None
+    };
+
+    // Decoder + file reader
+    let fps = args.replay_fps.unwrap_or(sidecar.fps).max(1);
+    let decoder = Decoder::create(DecoderCodec::H264, fps as i32)?;
+    let mut reader = BufReader::with_capacity(READ_CHUNK, File::open(&replay_path)?);
+
+    // Running state
+    let mut ticker = tokio::time::interval(Duration::from_micros(1_000_000 / u64::from(fps)));
+    let mut carry: Vec<u8> = Vec::with_capacity(READ_CHUNK * 2);
+    let mut last_data: Vec<u8> = Vec::with_capacity(READ_CHUNK);
+    let mut seq: u64 = 0;
+    let src_pid = std::process::id();
+
+    // Base monotonic timestamp for synthesizing Header.stamp at replay
+    // rate. The on-wire Time value comes from clock_offset.to_realtime
+    // applied to a synthesized unix-ts::Timestamp built from this base +
+    // seq/fps, so the CDR and Zenoh stamps match the live-path shape.
+    let replay_start = std::time::Instant::now();
+
+    loop {
+        if SHUTDOWN.load(Ordering::SeqCst) {
+            break;
+        }
+
+        // Accumulate bytes fed into the decoder this frame. Forwarded
+        // verbatim to rt/camera/h264 so consumers get the same
+        // Annex-B that was originally published on record.
+        last_data.clear();
+
+        let frame = loop {
+            match decoder.decode_frame(&carry) {
+                Ok((code, used, Some(frame))) => {
+                    last_data.extend_from_slice(&carry[..used]);
+                    carry.drain(..used);
+                    if matches!(code, DecodeReturnCode::Initialized) {
+                        // decoder just consumed SPS/PPS and told us the
+                        // format is known; loop again to pull an IDR.
+                        continue;
+                    }
+                    break frame;
+                }
+                Ok((_code, used, None)) => {
+                    last_data.extend_from_slice(&carry[..used]);
+                    carry.drain(..used);
+                    if !fill_from_reader(&mut reader, &mut carry)? {
+                        // EOF.
+                        if args.replay_loop {
+                            info!("Replay: looping back to start of {:?}", replay_path);
+                            reader.seek(SeekFrom::Start(0))?;
+                            carry.clear();
+                            continue;
+                        }
+                        info!("Replay: reached end of file, exiting");
+                        return Ok(());
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Replay: decode error near byte offset {} in {:?}: {e}. \
+                         Dropping 1 byte and resyncing on the next NAL start code.",
+                        reader.stream_position().unwrap_or_default(),
+                        replay_path
+                    );
+                    if !carry.is_empty() {
+                        carry.drain(..1);
+                    } else if !fill_from_reader(&mut reader, &mut carry)? {
+                        if args.replay_loop {
+                            reader.seek(SeekFrom::Start(0))?;
+                            carry.clear();
+                            continue;
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        };
+
+        ticker.tick().await;
+
+        // Synthesize ROS time from replay_start + seq/fps. The sidecar
+        // owns colorimetry so it matches what the live producer sent.
+        let elapsed = replay_start.elapsed();
+        let stamp = elapsed_to_ros_time(elapsed);
+
+        publish_replayed_frame(
+            &session,
+            &publ_info,
+            publ_h264.as_ref(),
+            &info_bytes,
+            &info_enc,
+            &frame,
+            &last_data,
+            stamp,
+            src_pid,
+            seq,
+            &args,
+            &sidecar,
+        )
+        .await?;
+
+        seq += 1;
+    }
+
+    Ok(())
+}
+
+/// Pull one READ_CHUNK-sized block off the reader and append it to
+/// `carry`. Returns `false` at EOF.
+fn fill_from_reader<R: Read>(reader: &mut R, carry: &mut Vec<u8>) -> std::io::Result<bool> {
+    let mut buf = [0u8; READ_CHUNK];
+    let n = reader.read(&mut buf)?;
+    if n == 0 {
+        Ok(false)
+    } else {
+        carry.extend_from_slice(&buf[..n]);
+        Ok(true)
+    }
+}
+
+/// Convert a `Duration` since replay start into a ROS2 `Time`. Saturates
+/// negative / overflow cases the same way the live path does.
+fn elapsed_to_ros_time(elapsed: Duration) -> edgefirst_schemas::builtin_interfaces::Time {
+    let secs = elapsed.as_secs();
+    let nanos = elapsed.subsec_nanos();
+    // i32::MAX seconds is well beyond any sensible replay duration;
+    // clamp defensively.
+    let sec = i32::try_from(secs).unwrap_or(i32::MAX);
+    edgefirst_schemas::builtin_interfaces::Time {
+        sec,
+        nanosec: nanos,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_replayed_frame(
+    session: &Session,
+    publ_info: &zenoh::pubsub::Publisher<'_>,
+    publ_h264: Option<&zenoh::pubsub::Publisher<'_>>,
+    info_bytes: &ZBytes,
+    info_enc: &Encoding,
+    frame: &Frame,
+    h264_bytes: &[u8],
+    stamp: edgefirst_schemas::builtin_interfaces::Time,
+    src_pid: u32,
+    seq: u64,
+    args: &Args,
+    sidecar: &Sidecar,
+) -> Result<(), Box<dyn Error>> {
+    let _span = info_span!("replay_publish").entered();
+
+    let width = frame.width()? as u32;
+    let height = frame.height()? as u32;
+    let stride = frame.stride()? as u32;
+    let length = frame.size()? as u32;
+    let fd = frame.handle()?;
+    let fourcc_raw = frame.fourcc()?;
+    let fourcc = fourcc_u32_to_string(fourcc_raw);
+    let sample_ts = zenoh_ts_from_ros_time(session, stamp);
+
+    // camera/frame
+    let (frame_msg, frame_enc) = build_camera_frame_msg(
+        stamp,
+        &args.camera_frame_id,
+        seq,
+        src_pid,
+        width,
+        height,
+        &fourcc,
+        fd,
+        stride,
+        length,
+        &sidecar.colorimetry,
+    )?;
+    session
+        .put(args.frame_topic.clone(), frame_msg)
+        .encoding(frame_enc)
+        .timestamp(sample_ts)
+        .priority(Priority::Data)
+        .congestion_control(CongestionControl::Drop)
+        .await
+        .map_err(zerr)?;
+
+    // rt/camera/info — same content every frame, same cadence as the live path.
+    publ_info
+        .put(info_bytes.clone())
+        .encoding(info_enc.clone())
+        .timestamp(session.new_timestamp())
+        .await
+        .map_err(zerr)?;
+
+    // rt/camera/h264 — forward the Annex-B bytes verbatim. We have them
+    // in h264_bytes because the replay loop collected every byte the
+    // decoder consumed for this frame.
+    if let Some(publ) = publ_h264 {
+        if !h264_bytes.is_empty() {
+            let (msg, enc) = build_h264_msg(h264_bytes, stamp, &args.camera_frame_id)?;
+            publ.put(msg)
+                .encoding(enc)
+                .timestamp(sample_ts)
+                .await
+                .map_err(zerr)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Convert a `u32` fourcc (little-endian packed) into a 4-character
+/// string. `videostream::fourcc::FourCC::to_string` does the same thing
+/// but lives behind a constructor we do not use here; inlining keeps
+/// the replay module self-contained.
+fn fourcc_u32_to_string(v: u32) -> String {
+    let bytes = v.to_le_bytes();
+    bytes.iter().map(|b| *b as char).collect()
+}
+
+async fn tf_static_loop(
+    session: Session,
+    msg: ZBytes,
+    enc: Encoding,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let topic = "rt/tf_static".to_string();
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        interval.tick().await;
+        session
+            .put(&topic, msg.clone())
+            .encoding(enc.clone())
+            .timestamp(session.new_timestamp())
+            .await?;
+    }
+}

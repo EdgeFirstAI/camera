@@ -13,8 +13,9 @@ This document describes the internal architecture of the EdgeFirst Camera Node, 
 3. [Data Flow](#data-flow)
 4. [Message Formats](#message-formats)
 5. [Hardware Integration](#hardware-integration)
-6. [Instrumentation and Profiling](#instrumentation-and-profiling)
-7. [References](#references)
+6. [Record and Replay](#record-and-replay)
+7. [Instrumentation and Profiling](#instrumentation-and-profiling)
+8. [References](#references)
 
 ---
 
@@ -508,6 +509,140 @@ See `src/video.rs` for complete encoder implementation.
 - **Bitrate Range:** 1-100 Mbps
 - **Profiles:** Baseline, Main, High
 - **Latency:** Implementation-dependent, varies with resolution and system load
+
+---
+
+## Record and Replay
+
+Two built-in operating modes let the camera service run the same Zenoh
+publish path against either a live V4L2 device or a recorded file. The
+intent is reproducible tests and demos — byte-identical CameraFrame,
+CameraInfo, and TF streams from a known input.
+
+### File format
+
+A recording is a **pair** of files with a shared basename:
+
+| File | Contents |
+|---|---|
+| `<name>.h264` | Raw H.264 Annex-B bitstream. NAL units back-to-back; no container, no index. |
+| `<name>.json` | Sidecar metadata. Written once at record start, read once at replay start. |
+
+The `.h264` file is power-loss resilient by design — every NAL unit is
+written via `write_all`, so any prefix is a valid partial decode. The
+recorder flushes the `BufWriter` on every keyframe, bounding the
+power-loss window to ~1 s at default GOP settings. VLC / mpv / ffplay
+all play the raw file directly; `ffmpeg -i in.h264 -c copy out.mp4`
+muxes into MP4 without re-encoding.
+
+The `.json` sidecar carries every piece of producer-global state that
+cannot be recovered from the bitstream itself. It is **stateless
+metadata only** — no per-frame index, no timestamps.
+
+#### Sidecar v1 schema
+
+```jsonc
+{
+  "version":     1,               // bump on any incompatible change
+  "codec":       "h264",          // fixed in v1
+  "fps":         30,              // nominal recorded frame rate
+  "width":       1920,            // bitstream resolution
+  "height":      1080,
+  "colorimetry": {                // empty strings = unknown
+    "color_space":    "bt709",
+    "color_transfer": "bt709",
+    "color_encoding": "bt601",
+    "color_range":    "limited"
+  },
+  "camera_info": { /* full CameraInfoFields — k, r, p, roi, etc. */ },
+  "tf_static":   { /* full TfStaticFields — frames, translation, rotation */ }
+}
+```
+
+Intentionally no `format` field: the hardware decoder always produces
+NV12 regardless of the original capture fourcc, so recording the
+source fourcc would mislead consumers on replay. Colorimetry is
+captured verbatim from the live camera path; on replay it is what the
+original capture side would have reported, not necessarily what the
+NV12 decode output precisely implies. Acceptable tradeoff for the
+reproducible-test scope.
+
+### Record mode (`--record <path>`)
+
+The recorder taps `h264_task` **before** the Zenoh publish. Every
+frame the encoder emits flows to both the file and the publish path —
+if Zenoh drops a publish under congestion, the recorder still captures
+it. Flow in record mode:
+
+```
+CameraBuffer → [G2D convert → H.264 encode]
+                     │
+         ┌───────────┴───────────┐
+         ▼                       ▼
+  BufWriter<File>           build_h264_msg()
+   (.h264 on disk)                │
+                                  ▼
+                         Publisher.put (rt/camera/h264)
+```
+
+The sidecar is written once at `stream()` entry, before the first
+frame, via a single `fs::write` — if a torn write happens we fail
+fast at launch time rather than silently producing an unreadable
+recording.
+
+### Replay mode (`--replay <path>`)
+
+In replay mode, the V4L2 device is not opened. A `videostream::Decoder`
+reads the `.h264` file in 256 KiB chunks and emits decoded `Frame`s
+(NV12) that stand in for `CameraBuffer` on the publish path:
+
+```
+  BufReader<File>
+       │
+       ▼
+  Decoder.decode_frame (H.264 → NV12 Frame)
+       │
+   ┌───┴──────────────┬────────────────────┬─────────────────┐
+   ▼                  ▼                    ▼                 ▼
+camera/frame     rt/camera/h264     rt/camera/info      rt/tf_static
+(CameraFrame)    (Annex-B bytes     (from sidecar,      (from sidecar,
+                  forwarded          built at start,     built at start,
+                  verbatim)          published/frame)    1 Hz background)
+```
+
+Key semantics:
+
+- **`rt/camera/h264` is byte-for-byte identical** to the recording —
+  the replay loop collects every byte the decoder consumes for each
+  frame and forwards those bytes verbatim. No re-encode.
+- **`CameraFrame.seq` continues incrementing across loop boundaries**.
+  V4L2 / libcamera frame sequence counters do not reset across a
+  session; neither does ours under `--replay-loop`. Consumers see
+  one continuous monotonic stream.
+- **Pacing** is `tokio::time::interval(1/fps)`. Under load replay can
+  lag but never runs ahead. The `--replay-fps` flag overrides the
+  sidecar's recorded `fps`.
+- **Malformed bytes**: a `decode_frame` error causes the loop to drop
+  one byte and retry — the Annex-B NAL start-code search resyncs on
+  the next valid boundary. Logs a warning with the file offset.
+
+### Limitations
+
+- **Multi-fd planes are not supported.** Recorded files carry a
+  single H.264 stream; on replay, the decoded Frame is published with
+  a single `CameraPlane` entry covering the whole dma-buf, matching
+  the live path's behavior. Non-contiguous MPLANE fourccs cannot be
+  fully expressed until `videostream` exposes per-plane fds.
+- **No seek.** Replay is forward-only.
+- **`--replay` + `--jpeg` / `--h264-tiles`** is rejected at launch.
+  Only the main H.264 stream is recorded, so those outputs would
+  require a re-encode path that is out of scope for this release.
+- **`/camera/info` and `/tf_static` flags are overridden** during
+  replay — the sidecar is the source of truth. `--cam-info-path`,
+  `--cam-tf-vec`, `--base-frame-id`, etc. emit a warning and are
+  ignored when replaying.
+
+See `README.md` for end-user docs and example invocations.
 
 ---
 

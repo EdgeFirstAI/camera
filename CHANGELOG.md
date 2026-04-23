@@ -10,9 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.7.0] - 2026-04-23
 
 Full cutover to the `edgefirst_msgs/CameraFrame` schema from the legacy
-`DmaBuffer`. Producer-side only; consumers must migrate to
-`edgefirst-schemas` 3.1 and subscribe to `camera/frame` to ingest camera
-data from this release forward.
+`DmaBuffer`, plus new built-in record / replay of the H.264 stream for
+reproducible tests and demos. Producer-side only; consumers must
+migrate to `edgefirst-schemas` 3.1 and subscribe to `camera/frame` to
+ingest camera data from this release forward.
 
 ### Added
 - Publish `edgefirst_msgs/CameraFrame` on the new `camera/frame` topic
@@ -23,6 +24,29 @@ data from this release forward.
   time via `CameraReader::color_{space,transfer,encoding,range}`, and a
   single `CameraPlane` entry describing the plane-0 dma-buf fd, offset,
   stride, size, and used bytes.
+- `--record <path>` (env `RECORD`): tap the live H.264 bitstream and
+  write it to `<path>` as a raw Annex-B file. A `<path>.json` sidecar
+  is written alongside at session start carrying colorimetry,
+  `/camera/info`, and `/tf_static` — every piece of producer-global
+  state not recoverable from the bitstream. Requires `--h264`. The
+  file is flushed on every keyframe, bounding power-loss to at most
+  one GOP.
+- `--replay <path>` (env `REPLAY`): play back a previously recorded
+  `.h264` + `.json` pair in place of a live V4L2 camera. Publishes on
+  the same Zenoh topics and schemas as live capture — consumers
+  cannot tell replay from live on the wire. The `rt/camera/h264`
+  topic forwards the recorded Annex-B bytes verbatim (no re-encode);
+  `camera/frame` is built from the decoded `videostream::frame::Frame`
+  with colorimetry, `/camera/info`, and `/tf_static` sourced from the
+  sidecar.
+- `--replay-loop` (env `REPLAY_LOOP`): loop the replay back to the
+  start on EOF instead of exiting. `CameraFrame.seq` continues to
+  increment across loop boundaries — consumers see a single
+  continuous monotonic stream matching the V4L2 / libcamera contract.
+- `--replay-fps <N>` (env `REPLAY_FPS`): override the playback rate;
+  defaults to the sidecar's recorded `fps`.
+- See `ARCHITECTURE.md § Record and replay` for the sidecar JSON v1
+  schema and the power-loss design rationale.
 
 ### Changed
 - Bumped `videostream` dependency from 2.4.0 to 2.5.0 for the sequence
@@ -31,6 +55,8 @@ data from this release forward.
   messages (`CompressedImage`, `CompressedVideo`, `CameraInfo`,
   `TransformStamped`) now use the constructor + `into_cdr()` API; the
   runtime `serde_cdr::serialize` path is gone.
+- Added `serde` as a direct dependency for sidecar serialization
+  (previously pulled in transitively via `serde_json`).
 
 ### Removed
 - **Breaking**: `--dma-topic` CLI argument and the `rt/camera/dma`
@@ -53,6 +79,15 @@ data from this release forward.
   reuse a single allocation per topic. No per-frame allocation
   regression relative to 2.6.1, which also allocated via
   `serde_cdr::serialize`.
+- Replay is forward-only (no seek). `--replay` + `--jpeg` and
+  `--replay` + `--h264-tiles` are rejected — recorded files carry
+  only the main H.264 stream.
+- Replay publishes a synthesized monotonic timestamp at the replay
+  rate; the original V4L2 monotonic cadence is not preserved (the
+  sidecar is stateless producer-global metadata only). Acceptable
+  for the target use case of reproducible tests and demos; a future
+  sidecar v2 could add per-frame timestamps if consumers need
+  millisecond-accurate timing fidelity.
 
 ## [2.6.1] - 2026-04-22
 

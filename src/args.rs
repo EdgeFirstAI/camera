@@ -3,6 +3,7 @@
 
 use clap::Parser;
 use serde_json::json;
+use std::path::PathBuf;
 use zenoh::config::{Config, WhatAmI};
 
 /// Camera image mirroring options.
@@ -126,6 +127,37 @@ pub struct Args {
     /// artifacts)
     #[arg(long, env = "H264_TILES_FPS", default_value = "15")]
     pub h264_tiles_fps: u32,
+
+    /// Record the live H.264 stream to this file (raw Annex-B `.h264`).
+    ///
+    /// A matching `<path>.json` sidecar is written alongside at startup
+    /// carrying colorimetry, `/camera/info`, and `/tf_static` — every
+    /// piece of producer-global state that is not recoverable from the
+    /// bitstream. Requires `--h264`; mutually exclusive with `--replay`.
+    #[arg(long, env = "RECORD", conflicts_with = "replay")]
+    pub record: Option<PathBuf>,
+
+    /// Replay a previously recorded H.264 file instead of opening a V4L2
+    /// camera device.
+    ///
+    /// Requires the matching `<path>.json` sidecar alongside the `.h264`
+    /// file. Mutually exclusive with `--record`. When enabled, `--jpeg`
+    /// and `--h264-tiles` are rejected because the recorded file carries
+    /// only the main H.264 bitstream.
+    #[arg(long, env = "REPLAY")]
+    pub replay: Option<PathBuf>,
+
+    /// Loop the replay back to the start on EOF instead of exiting.
+    ///
+    /// The `CameraFrame.seq` counter continues to increment across loop
+    /// boundaries so consumers see one continuous monotonic stream,
+    /// matching the contract of a live camera session.
+    #[arg(long, env = "REPLAY_LOOP", default_value_t = false)]
+    pub replay_loop: bool,
+
+    /// Override the playback frame rate. Defaults to the sidecar's `fps`.
+    #[arg(long, env = "REPLAY_FPS")]
+    pub replay_fps: Option<u32>,
 
     /// Output streaming resolution in pixels (width height)
     #[arg(
