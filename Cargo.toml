@@ -3,7 +3,7 @@ name = "edgefirst-camera"
 description = "EdgeFirst Camera Publisher"
 repository = "https://github.com/EdgeFirstAI/camera"
 license = "Apache-2.0"
-version = "2.6.0"
+version = "2.6.1"
 edition = "2021"
 
 [profile.release]
@@ -72,7 +72,7 @@ tracy-client = { version = "0.18.3", default-features = false, features = [
 ] }
 turbojpeg = { version = "1.3.3", features = ["image", "require-simd"] }
 unix-ts = "1.0.0"
-videostream = "2.1.4"
+videostream = "2.4.0"
 zenoh = "1.6.2"
 
 [dev-dependencies]

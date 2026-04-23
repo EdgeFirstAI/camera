@@ -891,7 +891,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "edgefirst-camera"
-version = "2.6.0"
+version = "2.6.1"
 dependencies = [
  "clap",
  "console-subscriber",
@@ -4074,9 +4074,9 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "videostream"
-version = "2.1.4"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "665c76556892eb817240384656c5a5eb1aac72e2f3757d99109bb442ba7f2474"
+checksum = "18bdae562ac87fdf352413c6b7c706dec40843dc32e8b78e7f5f460222e6ad15"
 dependencies = [
  "dma-buf 0.5.0",
  "log",
@@ -4086,9 +4086,9 @@ dependencies = [
 
 [[package]]
 name = "videostream-sys"
-version = "2.1.4"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cbd8fc6b733e50c974c989cb2bb89c84d5bec3a85fcb32d6c4d97523d238367"
+checksum = "65c0ca6ec83cde3c5250c1ed999723140a085f247113fd1bd42bee31a334adbf"
 dependencies = [
  "bindgen",
  "libloading 0.9.0",

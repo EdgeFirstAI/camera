@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.1] - 2026-04-22
+
+### Fixed
+- `rt/camera/dma` now publishes `DmaBuffer.stride` as the exact
+  V4L2-negotiated bytes-per-line reported by the driver (plane 0), via
+  the new `CameraBuffer::bytes_per_line()` accessor in videostream
+  2.4.0 (EDGEAI-1239). Previously hard-coded to `width`, which produced
+  sheared frames on drivers with hardware row alignment (Mali/Vivante
+  i.MX targets) (EDGEAI-1237).
+- Zenoh sample timestamps are now attached at publish time on every
+  producer path. Frame-tied topics (`rt/camera/dma`, `rt/camera/jpeg`,
+  `rt/camera/h264`, tiled H.264) source-stamp from the V4L2 frame
+  timestamp via `ClockOffset::to_realtime`; non-frame topics
+  (`rt/camera/info`, `rt/tf_static`) stamp with current wall-clock via
+  `Session::new_timestamp`. MCAP `publish_time` now reflects producer
+  timing instead of falling back to recorder receive time.
+
+### Changed
+- Bumped `videostream` dependency from 2.1.4 to 2.4.0 for the
+  `CameraBuffer::bytes_per_line()` accessor.
+
 ## [2.6.0] - 2026-03-19
 
 ### Changed
