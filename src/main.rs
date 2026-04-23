@@ -369,6 +369,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         let dma_sample_ts = zenoh_ts_for_frame(&session, &clock_offset, &cam_ts);
         let (msg, enc) = camera_dma_serialize(
             &camera_buffer,
+            &cam_ts,
             src_pid,
             args.camera_frame_id.clone(),
             &clock_offset,
@@ -779,11 +780,11 @@ fn build_tile_video_msg(
 #[instrument(skip_all, fields(width = buf.width(), height = buf.height(), format = buf.format().to_string()))]
 fn camera_dma_serialize(
     buf: &CameraBuffer<'_>,
+    ts: &Timestamp,
     pid: u32,
     frame_id: String,
     clock_offset: &ClockOffset,
 ) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
-    let ts = buf.timestamp()?;
     let width = buf.width() as u32;
     let height = buf.height() as u32;
     let fourcc = buf.format().into();
@@ -793,7 +794,7 @@ fn camera_dma_serialize(
 
     let msg = DmaBuffer {
         header: std_msgs::Header {
-            stamp: clock_offset.to_realtime(&ts),
+            stamp: clock_offset.to_realtime(ts),
             frame_id,
         },
         pid,
@@ -813,10 +814,15 @@ fn camera_dma_serialize(
 
 /// Build a Zenoh sample Timestamp from a ROS2 wall-clock `Time` (sec, nanosec
 /// since Unix epoch). Uses the session's ZenohId as the timestamp ID so the
-/// sample is attributable to this producer.
+/// sample is attributable to this producer. Pre-epoch times (negative sec)
+/// saturate both fields to the Unix epoch so the sample timestamp cannot
+/// drift from the payload `Header.stamp` via partial clamping.
 fn zenoh_ts_from_ros_time(session: &Session, t: builtin_interfaces::Time) -> ZenohTimestamp {
-    let sec = t.sec.max(0) as u64;
-    let dur = Duration::new(sec, t.nanosec);
+    let dur = if t.sec < 0 {
+        Duration::new(0, 0)
+    } else {
+        Duration::new(t.sec as u64, t.nanosec)
+    };
     ZenohTimestamp::new(NTP64::from(dur), session.zid().into())
 }
 

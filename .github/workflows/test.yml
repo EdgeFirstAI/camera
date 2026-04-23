@@ -252,8 +252,17 @@ jobs:
           # The on-target runtime library must expose every symbol the binary
           # calls — e.g. vsl_camera_buffer_bytes_per_line added in 2.4.
           VIDEOSTREAM_VERSION: 2.4.0
+          # SHA-256 of videostream-${VIDEOSTREAM_VERSION}-linux-aarch64.zip
+          # from the GitHub release assets. Pins the runtime library against
+          # tampering or silent re-issue. Update alongside VIDEOSTREAM_VERSION.
+          VIDEOSTREAM_SHA256: e7a2787f591cb9ca9bc93eb36402a88ab8bac5ef478248383b9bc8015e665235
         run: |
-          curl -sL "https://github.com/EdgeFirstAI/videostream/releases/download/v${VIDEOSTREAM_VERSION}/videostream-${VIDEOSTREAM_VERSION}-linux-aarch64.zip" -o videostream.zip
+          set -euo pipefail
+          ARCHIVE="videostream-${VIDEOSTREAM_VERSION}-linux-aarch64.zip"
+          curl --fail --show-error --location \
+            "https://github.com/EdgeFirstAI/videostream/releases/download/v${VIDEOSTREAM_VERSION}/${ARCHIVE}" \
+            -o videostream.zip
+          echo "${VIDEOSTREAM_SHA256}  videostream.zip" | sha256sum --check --strict
           unzip -q videostream.zip -d videostream
           echo "VideoStream library extracted:"
           find videostream -name "*.so*" -type f
