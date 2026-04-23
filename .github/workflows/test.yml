@@ -247,9 +247,13 @@ jobs:
         run: chmod +x instrumented-binaries/*
 
       - name: Download VideoStream library
+        env:
+          # Keep in sync with the videostream crate version in Cargo.toml.
+          # The on-target runtime library must expose every symbol the binary
+          # calls — e.g. vsl_camera_buffer_bytes_per_line added in 2.4.
+          VIDEOSTREAM_VERSION: 2.4.0
         run: |
-          # Download VideoStream release for aarch64
-          curl -sL https://github.com/EdgeFirstAI/videostream/releases/download/v2.1.4/videostream-2.1.4-linux-aarch64.zip -o videostream.zip
+          curl -sL "https://github.com/EdgeFirstAI/videostream/releases/download/v${VIDEOSTREAM_VERSION}/videostream-${VIDEOSTREAM_VERSION}-linux-aarch64.zip" -o videostream.zip
           unzip -q videostream.zip -d videostream
           echo "VideoStream library extracted:"
           find videostream -name "*.so*" -type f
