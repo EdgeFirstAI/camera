@@ -927,8 +927,8 @@ fn build_info_msg(args: &Args) -> Result<CameraInfo<Vec<u8>>, Box<dyn Error>> {
         };
         if kv.len() != 9 {
             return Err(Box::from(format!(
-                "Expected exactly 9 elements in distortion_coeff array but found {}",
-                d.len()
+                "Expected exactly 9 elements in camera_matrix array but found {}",
+                kv.len()
             )));
         }
         let p = [
