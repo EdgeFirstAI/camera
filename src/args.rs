@@ -78,9 +78,11 @@ pub struct Args {
     #[arg(long, env = "MIRROR", default_value = "both", value_enum)]
     pub mirror: MirrorSetting,
 
-    /// Zenoh topic for raw DMA buffer metadata
-    #[arg(long, default_value = "rt/camera/dma")]
-    pub dma_topic: String,
+    /// Zenoh topic for multi-plane camera frame (edgefirst_msgs/CameraFrame).
+    /// Supersedes `--dma-topic` from 2.6.x. The new topic drops the `rt/`
+    /// prefix per the schemas 3.1 convention for newly introduced topics.
+    #[arg(long, default_value = "camera/frame")]
+    pub frame_topic: String,
 
     /// Zenoh topic for camera calibration info (sensor_msgs/CameraInfo)
     #[arg(long, default_value = "rt/camera/info")]

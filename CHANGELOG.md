@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-04-23
+
+Full cutover to the `edgefirst_msgs/CameraFrame` schema from the legacy
+`DmaBuffer`. Producer-side only; consumers must migrate to
+`edgefirst-schemas` 3.1 and subscribe to `camera/frame` to ingest camera
+data from this release forward.
+
+### Added
+- Publish `edgefirst_msgs/CameraFrame` on the new `camera/frame` topic
+  (note: no `rt/` prefix per the schemas 3.1 convention for newly
+  introduced topics). Each frame carries the V4L2 sequence counter via
+  `CameraBuffer::sequence()`, camera-level colorimetry (color space,
+  transfer, encoding, range) resolved once at `vsl_camera_init_device`
+  time via `CameraReader::color_{space,transfer,encoding,range}`, and a
+  single `CameraPlane` entry describing the plane-0 dma-buf fd, offset,
+  stride, size, and used bytes.
+
+### Changed
+- Bumped `videostream` dependency from 2.4.0 to 2.5.0 for the sequence
+  counter and colorimetry accessors (new in 2.5).
+- Bumped `edgefirst-schemas` dependency from 1.5.2 to 3.1.0. All
+  messages (`CompressedImage`, `CompressedVideo`, `CameraInfo`,
+  `TransformStamped`) now use the constructor + `into_cdr()` API; the
+  runtime `serde_cdr::serialize` path is gone.
+
+### Removed
+- **Breaking**: `--dma-topic` CLI argument and the `rt/camera/dma`
+  topic. `DmaBuffer` is deprecated in schemas 3.1 and will be removed
+  in 4.0; rather than dual-publish, the producer cuts over cleanly to
+  `CameraFrame`. Downstream consumers (recorder, replay, HAL) must
+  migrate to `camera/frame` and `edgefirst_msgs/CameraFrame` to
+  continue receiving camera data.
+
+### Known limitations
+- Multi-fd / non-contiguous plane publishing is not yet supported;
+  `CameraFrame` is emitted with a single `CameraPlane` entry covering
+  the whole dma-buf. For NV12/YU12 on contiguous drivers (current i.MX
+  case) that still exposes the full image correctly via plane-0
+  stride. Deferred pending a videostream API that surfaces per-plane
+  fds and offsets (tracked as a follow-up).
+- Message buffers are allocated per publish by the schema constructor
+  API. A follow-up will add a `serialize_into(&mut Vec<u8>, …)`
+  variant to `edgefirst-schemas` so the steady-state hot path can
+  reuse a single allocation per topic. No per-frame allocation
+  regression relative to 2.6.1, which also allocated via
+  `serde_cdr::serialize`.
+
 ## [2.6.1] - 2026-04-22
 
 ### Fixed
