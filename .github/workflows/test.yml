@@ -313,6 +313,57 @@ jobs:
             fi
           }
 
+          # Test 3b: Record H.264 to file (10 seconds) — exercises the
+          # record tap in h264_task plus the sidecar writer.
+          echo ""
+          echo "=== Recording H.264 to file (10 seconds) ==="
+          RECORD_FILE="/tmp/edgefirst-record-test.h264"
+          rm -f "$RECORD_FILE" "${RECORD_FILE%.h264}.json"
+          timeout --signal=TERM --kill-after=5 10 \
+            ./instrumented-binaries/edgefirst-camera --h264 --record "$RECORD_FILE" 2>&1 || {
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 124 ]; then
+              echo "✓ Record ran for 10 seconds"
+            else
+              echo "Record test failed with exit code $EXIT_CODE"
+              TEST_FAILED=1
+            fi
+          }
+          if [ -s "$RECORD_FILE" ]; then
+            echo "✓ Recorded .h264 non-empty: $(stat -c %s "$RECORD_FILE") bytes"
+          else
+            echo "✗ Recorded .h264 is missing or empty"
+            TEST_FAILED=1
+          fi
+          if [ -s "${RECORD_FILE%.h264}.json" ]; then
+            echo "✓ Sidecar .json present"
+            python3 -c "import json; json.load(open('${RECORD_FILE%.h264}.json'))" && \
+              echo "✓ Sidecar parses as JSON" || { echo "✗ Sidecar not valid JSON"; TEST_FAILED=1; }
+          else
+            echo "✗ Sidecar .json missing"
+            TEST_FAILED=1
+          fi
+
+          # Test 3c: Replay the recorded file (10 seconds) — exercises
+          # the decoder loop, replay publish path, and sidecar loader.
+          echo ""
+          echo "=== Replaying recorded file (10 seconds) ==="
+          if [ -s "$RECORD_FILE" ] && [ -s "${RECORD_FILE%.h264}.json" ]; then
+            timeout --signal=TERM --kill-after=5 10 \
+              ./instrumented-binaries/edgefirst-camera --replay "$RECORD_FILE" --replay-loop 2>&1 || {
+              EXIT_CODE=$?
+              if [ $EXIT_CODE -eq 124 ]; then
+                echo "✓ Replay ran for 10 seconds"
+              else
+                echo "Replay test failed with exit code $EXIT_CODE"
+                TEST_FAILED=1
+              fi
+            }
+          else
+            echo "Skipping replay: record artifacts missing"
+          fi
+          rm -f "$RECORD_FILE" "${RECORD_FILE%.h264}.json"
+
           # Test 4: Run instrumented integration test binaries
           # These tests exit cleanly and WILL generate profraw coverage files
           echo ""

@@ -394,9 +394,15 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
 
     // When --record is set, write the sidecar JSON before any frames flow.
     // Fields are stable for the session so one write at startup is enough.
+    //
+    // Use the encoder's stream dimensions (what the recorded .h264 file
+    // will actually contain), not the camera capture dimensions — those
+    // can differ when --stream-size rescales from --camera-size.
     if let Some(ref record_path) = args.record {
         let sidecar = Sidecar::from_live(
             TARGET_FPS as u32,
+            args.stream_size[0],
+            args.stream_size[1],
             &cam,
             info_fields.clone(),
             tf_fields.clone(),
@@ -1370,5 +1376,187 @@ impl ClockOffset {
             sec,
             nanosec: real_nsec as u32,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Build an `Args` pre-populated with the clap defaults so tests can
+    /// flip individual fields without rebuilding the whole struct.
+    fn default_args() -> Args {
+        Args::parse_from(["edgefirst-camera"])
+    }
+
+    #[test]
+    fn validate_accepts_live_capture_with_no_record_or_replay() {
+        let args = default_args();
+        validate_record_replay_args(&args).expect("plain live path must validate");
+    }
+
+    #[test]
+    fn validate_record_requires_h264() {
+        let mut args = default_args();
+        args.record = Some(PathBuf::from("/tmp/not-written.h264"));
+        args.h264 = false;
+        let err = validate_record_replay_args(&args).unwrap_err().to_string();
+        assert!(
+            err.contains("--record") && err.contains("--h264"),
+            "expected record-requires-h264 error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_record_with_h264_is_ok() {
+        let mut args = default_args();
+        args.record = Some(PathBuf::from("/tmp/not-written.h264"));
+        args.h264 = true;
+        validate_record_replay_args(&args).unwrap();
+    }
+
+    #[test]
+    fn validate_replay_rejects_jpeg() {
+        let mut args = default_args();
+        args.replay = Some(PathBuf::from("/tmp/not-read.h264"));
+        args.jpeg = true;
+        let err = validate_record_replay_args(&args).unwrap_err().to_string();
+        assert!(
+            err.contains("--replay") && err.contains("--jpeg"),
+            "expected replay-rejects-jpeg error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_replay_rejects_h264_tiles() {
+        let mut args = default_args();
+        args.replay = Some(PathBuf::from("/tmp/not-read.h264"));
+        args.h264_tiles = true;
+        let err = validate_record_replay_args(&args).unwrap_err().to_string();
+        assert!(
+            err.contains("--replay") && err.contains("--h264-tiles"),
+            "expected replay-rejects-tiles error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_replay_with_h264_forward_is_ok() {
+        let mut args = default_args();
+        args.replay = Some(PathBuf::from("/tmp/not-read.h264"));
+        args.h264 = true;
+        validate_record_replay_args(&args).unwrap();
+    }
+
+    #[test]
+    fn camera_info_fields_from_args_with_no_json_path_uses_defaults() {
+        let mut args = default_args();
+        args.cam_info_path = String::new();
+        let f = CameraInfoFields::from_args(&args).unwrap();
+        assert_eq!(f.width, 1920);
+        assert_eq!(f.height, 1080);
+        assert_eq!(f.distortion_model, "plumb_bob");
+        assert_eq!(f.d.len(), 5);
+        assert!(f.d.iter().all(|&v| v == 0.0));
+        // Default k has 1270 on the principal-axis focals and 960/540 on
+        // the principal point for 1920x1080.
+        assert_eq!(f.k[0], 1270.0);
+        assert_eq!(f.k[4], 1270.0);
+        assert_eq!(f.k[2], 960.0);
+        assert_eq!(f.k[5], 540.0);
+        assert_eq!(f.binning_x, 1);
+        assert_eq!(f.binning_y, 1);
+        assert_eq!(f.roi.width, 1920);
+        assert_eq!(f.roi.height, 1080);
+        assert!(!f.roi.do_rectify);
+    }
+
+    #[test]
+    fn camera_info_fields_rejects_bad_camera_matrix_length() {
+        // Write a calibration JSON with camera_matrix of length 8 to hit
+        // the length-validation branch and confirm the error message
+        // points at camera_matrix (Copilot PR #6 feedback).
+        let tmp = std::env::temp_dir();
+        let pid = std::process::id();
+        let path = tmp.join(format!("edgefirst_cam_info_bad_matrix_{pid}.json"));
+        std::fs::write(
+            &path,
+            r#"{
+                "bypass": false,
+                "dewarpConfigArray": [{
+                    "camera_matrix": [1,2,3,4,5,6,7,8],
+                    "source_image": {"width": 1920, "height": 1080}
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let mut args = default_args();
+        args.cam_info_path = path.to_string_lossy().into_owned();
+        let err = CameraInfoFields::from_args(&args).unwrap_err().to_string();
+        assert!(
+            err.contains("camera_matrix"),
+            "error must reference camera_matrix, got: {err}"
+        );
+        assert!(
+            err.contains("8"),
+            "error must include actual length (8), got: {err}"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn camera_info_fields_rejects_missing_dewarp_array() {
+        let tmp = std::env::temp_dir();
+        let pid = std::process::id();
+        let path = tmp.join(format!("edgefirst_cam_info_no_array_{pid}.json"));
+        std::fs::write(&path, r#"{"dewarpConfigArray": "not_an_array"}"#).unwrap();
+
+        let mut args = default_args();
+        args.cam_info_path = path.to_string_lossy().into_owned();
+        let err = CameraInfoFields::from_args(&args).unwrap_err().to_string();
+        assert!(err.to_lowercase().contains("dewarp"));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn tf_static_fields_from_args_mirrors_cli_shape() {
+        let args = default_args();
+        let tf = TfStaticFields::from_args(&args);
+        // The defaults may evolve, but base/child frame IDs must always
+        // come from the CLI strings and the arrays must have the
+        // expected arity.
+        assert_eq!(tf.base_frame_id, args.base_frame_id);
+        assert_eq!(tf.child_frame_id, args.camera_frame_id);
+        assert_eq!(tf.translation.len(), 3);
+        assert_eq!(tf.rotation.len(), 4);
+    }
+
+    #[test]
+    fn tf_static_fields_build_msg_produces_nonempty_cdr() {
+        let args = default_args();
+        let tf = TfStaticFields::from_args(&args);
+        let msg = tf.build_msg().expect("tf CDR build must succeed");
+        assert!(!msg.as_cdr().is_empty());
+    }
+
+    #[test]
+    fn camera_info_fields_build_msg_produces_nonempty_cdr() {
+        let mut args = default_args();
+        args.cam_info_path = String::new();
+        let info = CameraInfoFields::from_args(&args).unwrap();
+        let msg = info.build_msg().expect("info CDR build must succeed");
+        assert!(!msg.as_cdr().is_empty());
+    }
+
+    #[test]
+    fn colorimetry_default_is_all_unknown_empty_strings() {
+        let c = Colorimetry::default();
+        assert!(c.space.is_empty());
+        assert!(c.transfer.is_empty());
+        assert!(c.encoding.is_empty());
+        assert!(c.range.is_empty());
     }
 }

@@ -62,15 +62,11 @@ pub(crate) async fn run_replay(session: Session, args: Args) -> Result<(), Box<d
     );
 
     // The sidecar owns /camera/info and /tf_static — flags that would
-    // have affected these in live mode are ignored with a warning so
-    // operators do not silently get the CLI values instead of the
-    // recorded ones.
-    if !args.cam_info_path.is_empty() {
-        warn!(
-            "--cam-info-path {:?} is ignored in replay mode; the sidecar's camera_info is used",
-            args.cam_info_path
-        );
-    }
+    // have affected these in live mode are ignored. Compare the args
+    // against the sidecar values and warn on any divergence so that an
+    // operator who thinks they're overriding the recording gets a clear
+    // signal that the sidecar won.
+    warn_on_sidecar_overrides(&args, &sidecar);
 
     let clock_offset = ClockOffset::new()?;
     info!(
@@ -121,7 +117,7 @@ pub(crate) async fn run_replay(session: Session, args: Args) -> Result<(), Box<d
 
     // Running state
     let mut ticker = tokio::time::interval(Duration::from_micros(1_000_000 / u64::from(fps)));
-    let mut carry: Vec<u8> = Vec::with_capacity(READ_CHUNK * 2);
+    let mut carry = Carry::new();
     let mut last_data: Vec<u8> = Vec::with_capacity(READ_CHUNK);
     let mut seq: u64 = 0;
     let src_pid = std::process::id();
@@ -143,10 +139,10 @@ pub(crate) async fn run_replay(session: Session, args: Args) -> Result<(), Box<d
         last_data.clear();
 
         let frame = loop {
-            match decoder.decode_frame(&carry) {
+            match decoder.decode_frame(carry.pending()) {
                 Ok((code, used, Some(frame))) => {
-                    last_data.extend_from_slice(&carry[..used]);
-                    carry.drain(..used);
+                    last_data.extend_from_slice(&carry.pending()[..used]);
+                    carry.consume(used);
                     if matches!(code, DecodeReturnCode::Initialized) {
                         // decoder just consumed SPS/PPS and told us the
                         // format is known; loop again to pull an IDR.
@@ -155,9 +151,9 @@ pub(crate) async fn run_replay(session: Session, args: Args) -> Result<(), Box<d
                     break frame;
                 }
                 Ok((_code, used, None)) => {
-                    last_data.extend_from_slice(&carry[..used]);
-                    carry.drain(..used);
-                    if !fill_from_reader(&mut reader, &mut carry)? {
+                    last_data.extend_from_slice(&carry.pending()[..used]);
+                    carry.consume(used);
+                    if !carry.fill_from(&mut reader)? {
                         // EOF.
                         if args.replay_loop {
                             info!("Replay: looping back to start of {:?}", replay_path);
@@ -176,9 +172,9 @@ pub(crate) async fn run_replay(session: Session, args: Args) -> Result<(), Box<d
                         reader.stream_position().unwrap_or_default(),
                         replay_path
                     );
-                    if !carry.is_empty() {
-                        carry.drain(..1);
-                    } else if !fill_from_reader(&mut reader, &mut carry)? {
+                    if !carry.pending().is_empty() {
+                        carry.consume(1);
+                    } else if !carry.fill_from(&mut reader)? {
                         if args.replay_loop {
                             reader.seek(SeekFrom::Start(0))?;
                             carry.clear();
@@ -219,16 +215,59 @@ pub(crate) async fn run_replay(session: Session, args: Args) -> Result<(), Box<d
     Ok(())
 }
 
-/// Pull one READ_CHUNK-sized block off the reader and append it to
-/// `carry`. Returns `false` at EOF.
-fn fill_from_reader<R: Read>(reader: &mut R, carry: &mut Vec<u8>) -> std::io::Result<bool> {
-    let mut buf = [0u8; READ_CHUNK];
-    let n = reader.read(&mut buf)?;
-    if n == 0 {
-        Ok(false)
-    } else {
-        carry.extend_from_slice(&buf[..n]);
-        Ok(true)
+/// A growing byte buffer with an amortized O(1) consume, for feeding
+/// the `Decoder::decode_frame` loop without repeatedly shifting the
+/// head of a `Vec<u8>` on every consumed chunk.
+///
+/// The decoder returns `bytes_used` and we need to advance past that
+/// many bytes — but `decode_frame` also needs a contiguous `&[u8]` of
+/// the unconsumed tail. We keep both the underlying `Vec<u8>` and a
+/// read offset; `pending()` returns the slice from the offset onward,
+/// and `consume(n)` just bumps the offset. When enough has been
+/// consumed to be worth reclaiming, `consume` compacts in one shot,
+/// amortizing the cost across many `consume` calls.
+struct Carry {
+    buf: Vec<u8>,
+    read_offset: usize,
+}
+
+impl Carry {
+    fn new() -> Self {
+        Self {
+            buf: Vec::with_capacity(READ_CHUNK * 2),
+            read_offset: 0,
+        }
+    }
+
+    #[inline]
+    fn pending(&self) -> &[u8] {
+        &self.buf[self.read_offset..]
+    }
+
+    fn consume(&mut self, n: usize) {
+        self.read_offset += n;
+        // Compact once the head waste exceeds one read chunk; the drain
+        // cost (one memmove of the tail) is then amortized over at
+        // least READ_CHUNK consume calls.
+        if self.read_offset > READ_CHUNK {
+            self.buf.drain(..self.read_offset);
+            self.read_offset = 0;
+        }
+    }
+
+    fn clear(&mut self) {
+        self.buf.clear();
+        self.read_offset = 0;
+    }
+
+    /// Read one chunk directly into the tail of `buf` — no intermediate
+    /// stack allocation. Returns `false` at EOF.
+    fn fill_from<R: Read>(&mut self, reader: &mut R) -> std::io::Result<bool> {
+        let start = self.buf.len();
+        self.buf.resize(start + READ_CHUNK, 0);
+        let n = reader.read(&mut self.buf[start..])?;
+        self.buf.truncate(start + n);
+        Ok(n > 0)
     }
 }
 
@@ -327,6 +366,49 @@ async fn publish_replayed_frame(
 fn fourcc_u32_to_string(v: u32) -> String {
     let bytes = v.to_le_bytes();
     bytes.iter().map(|b| *b as char).collect()
+}
+
+/// Emit a `warn!` for every CLI arg whose value would differ from what
+/// the sidecar carries, so a replay run surfaces the ignored flags
+/// rather than silently acting on the sidecar's values.
+fn warn_on_sidecar_overrides(args: &Args, sidecar: &Sidecar) {
+    if !args.cam_info_path.is_empty() {
+        warn!(
+            "--cam-info-path {:?} is ignored in replay mode; the sidecar's camera_info is used",
+            args.cam_info_path
+        );
+    }
+    if args.base_frame_id != sidecar.tf_static.base_frame_id {
+        warn!(
+            "--base-frame-id {:?} differs from sidecar tf_static.base_frame_id {:?}; using the sidecar value",
+            args.base_frame_id, sidecar.tf_static.base_frame_id
+        );
+    }
+    if args.camera_frame_id != sidecar.tf_static.child_frame_id {
+        warn!(
+            "--camera-frame-id {:?} differs from sidecar tf_static.child_frame_id {:?}; using the sidecar value",
+            args.camera_frame_id, sidecar.tf_static.child_frame_id
+        );
+    }
+    let arg_t = [args.cam_tf_vec[0], args.cam_tf_vec[1], args.cam_tf_vec[2]];
+    if arg_t != sidecar.tf_static.translation {
+        warn!(
+            "--cam-tf-vec {:?} differs from sidecar tf_static.translation {:?}; using the sidecar value",
+            arg_t, sidecar.tf_static.translation
+        );
+    }
+    let arg_r = [
+        args.cam_tf_quat[0],
+        args.cam_tf_quat[1],
+        args.cam_tf_quat[2],
+        args.cam_tf_quat[3],
+    ];
+    if arg_r != sidecar.tf_static.rotation {
+        warn!(
+            "--cam-tf-quat {:?} differs from sidecar tf_static.rotation {:?}; using the sidecar value",
+            arg_r, sidecar.tf_static.rotation
+        );
+    }
 }
 
 async fn tf_static_loop(
