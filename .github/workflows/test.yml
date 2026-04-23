@@ -157,15 +157,13 @@ jobs:
 
       - name: Run unit tests with coverage
         run: |
-          # This is a binary-only crate with no library unit tests
-          # Integration tests require hardware (DMA heap) and run on imx8mp runner
-          # Generate a minimal coverage report for CI purposes
-          echo "Note: No library unit tests in this crate (binary-only)"
-          echo "Coverage is collected from integration tests on hardware runner"
-          
-          # Create empty coverage file so artifact upload doesn't fail
-          # Real coverage comes from hardware tests
-          touch coverage.lcov
+          # The binary crate has #[cfg(test)] unit tests in src/main.rs
+          # and src/sidecar.rs (sidecar serde round-trip, arg validation,
+          # CameraInfoFields/TfStaticFields behavior). These do not touch
+          # videostream APIs so they run fine on the GH-hosted runners
+          # without the libvideostream.so runtime. cargo-llvm-cov drives
+          # the build + test + lcov-export flow in one shot.
+          cargo llvm-cov --bin edgefirst-camera --lcov --output-path coverage.lcov
 
       - name: Build instrumented binary for integration tests (aarch64 only)
         if: matrix.platform.name == 'aarch64'

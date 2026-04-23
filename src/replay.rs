@@ -138,11 +138,26 @@ pub(crate) async fn run_replay(session: Session, args: Args) -> Result<(), Box<d
         // Annex-B that was originally published on record.
         last_data.clear();
 
+        // Track consecutive `decode_frame` errors on the same input —
+        // the V4L2 decoder returns `VSL_DEC_ERR` when its internal
+        // OUTPUT buffer pool is momentarily full ("no OUTPUT buffer
+        // available"), which is backpressure rather than a malformed
+        // bitstream. We give the hardware a few short sleep windows to
+        // drain before treating an error as a real stream fault.
+        let mut backpressure_retries: u32 = 0;
+
         let frame = loop {
+            if SHUTDOWN.load(Ordering::SeqCst) {
+                // Honour SIGTERM/SIGINT even when the decoder is in a
+                // backpressure retry loop — otherwise a stuck hardware
+                // queue would block shutdown until SIGKILL.
+                return Ok(());
+            }
             match decoder.decode_frame(carry.pending()) {
                 Ok((code, used, Some(frame))) => {
                     last_data.extend_from_slice(&carry.pending()[..used]);
                     carry.consume(used);
+                    backpressure_retries = 0;
                     if matches!(code, DecodeReturnCode::Initialized) {
                         // decoder just consumed SPS/PPS and told us the
                         // format is known; loop again to pull an IDR.
@@ -153,6 +168,7 @@ pub(crate) async fn run_replay(session: Session, args: Args) -> Result<(), Box<d
                 Ok((_code, used, None)) => {
                     last_data.extend_from_slice(&carry.pending()[..used]);
                     carry.consume(used);
+                    backpressure_retries = 0;
                     if !carry.fill_from(&mut reader)? {
                         // EOF.
                         if args.replay_loop {
@@ -166,12 +182,26 @@ pub(crate) async fn run_replay(session: Session, args: Args) -> Result<(), Box<d
                     }
                 }
                 Err(e) => {
+                    // V4L2 decoder backpressure ("no OUTPUT buffer
+                    // available") and real stream errors share this
+                    // code path — the API does not distinguish them.
+                    // Wait briefly and retry the same bytes; only
+                    // escalate to a resync-by-byte-drop after the
+                    // hardware has had a chance to drain.
+                    backpressure_retries += 1;
+                    if backpressure_retries <= 20 {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        continue;
+                    }
                     warn!(
-                        "Replay: decode error near byte offset {} in {:?}: {e}. \
-                         Dropping 1 byte and resyncing on the next NAL start code.",
+                        "Replay: persistent decode error near byte offset {} in {:?} \
+                         after {} retries: {e}. Dropping 1 byte and resyncing on the \
+                         next NAL start code.",
                         reader.stream_position().unwrap_or_default(),
-                        replay_path
+                        replay_path,
+                        backpressure_retries,
                     );
+                    backpressure_retries = 0;
                     if !carry.pending().is_empty() {
                         carry.consume(1);
                     } else if !carry.fill_from(&mut reader)? {
