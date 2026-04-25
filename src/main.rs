@@ -317,20 +317,10 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         }
     };
 
-    let (h264_tx, rx) = kanal::bounded(1);
-    if args.h264 {
-        let session = session.clone();
-        let args = args.clone();
-        thread::Builder::new()
-            .name("h264".to_string())
-            .spawn(move || {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(h264_task(session, args, rx, clock_offset));
-            })?;
-    }
+    // The h264 thread is spawned later (after the recorder file is
+    // opened and the sidecar is written) so a doomed `--record` run
+    // fails the whole process before any thread is running.
+    let (h264_tx, h264_rx) = kanal::bounded(1);
 
     let (jpeg_tx, rx) = kanal::bounded(1);
     if args.jpeg {
@@ -392,26 +382,66 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     let tf_fields = TfStaticFields::from_args(&args);
     let info_fields = CameraInfoFields::from_args(&args)?;
 
-    // When --record is set, write the sidecar JSON before any frames flow.
-    // Fields are stable for the session so one write at startup is enough.
+    // When --record is set, open the H.264 output file and the
+    // matching sidecar before any frames flow. Order matters:
     //
-    // Use the encoder's stream dimensions (what the recorded .h264 file
-    // will actually contain), not the camera capture dimensions — those
-    // can differ when --stream-size rescales from --camera-size.
-    if let Some(ref record_path) = args.record {
-        let sidecar = Sidecar::from_live(
-            TARGET_FPS as u32,
-            args.stream_size[0],
-            args.stream_size[1],
-            &cam,
-            info_fields.clone(),
-            tf_fields.clone(),
-        );
-        let written = sidecar.write_paired(record_path)?;
-        info!(
-            "Recording: H.264 bitstream → {:?}, sidecar → {:?}",
-            record_path, written
-        );
+    //   1. Open the BufWriter on the .h264 file. If creation fails
+    //      (path missing, no perms, FS full) we surface the error
+    //      here and abort the run cleanly — never produce an
+    //      orphaned sidecar for a recording that never started.
+    //   2. Write the .json sidecar. Fields are stable for the
+    //      session so one write at startup is enough.
+    //
+    // Use the encoder's stream dimensions in the sidecar (what the
+    // recorded .h264 file will actually contain), not the camera
+    // capture dimensions — those can differ when --stream-size
+    // rescales from --camera-size.
+    let recorder: Option<std::io::BufWriter<std::fs::File>> = match args.record.as_ref() {
+        Some(path) => {
+            let file = std::fs::File::create(path)
+                .map_err(|e| format!("Cannot create recording file {:?}: {e}", path))?;
+            let bw = std::io::BufWriter::with_capacity(256 * 1024, file);
+
+            let sidecar = Sidecar::from_live(
+                TARGET_FPS as u32,
+                args.stream_size[0],
+                args.stream_size[1],
+                &cam,
+                info_fields.clone(),
+                tf_fields.clone(),
+            );
+            let written = sidecar.write_paired(path)?;
+            info!(
+                "Recording: H.264 bitstream → {:?}, sidecar → {:?}",
+                path, written
+            );
+            Some(bw)
+        }
+        None => None,
+    };
+
+    // Spawn the h264 thread now that the recorder file (if any) is
+    // open. The thread takes ownership of the BufWriter; flushes on
+    // every keyframe; final flush on drop.
+    if args.h264 {
+        let session = session.clone();
+        let args = args.clone();
+        let rx = h264_rx;
+        thread::Builder::new()
+            .name("h264".to_string())
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(h264_task(session, args, rx, clock_offset, recorder));
+            })?;
+    } else {
+        // --record requires --h264 (enforced by validate_record_replay_args),
+        // so an open recorder always pairs with the spawn above. Drop the
+        // unused receiver explicitly to keep the channel from staying open.
+        drop(h264_rx);
+        drop(recorder);
     }
 
     let tf_session = session.clone();
@@ -428,6 +458,13 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     let mut prev = Instant::now();
     let mut history = vec![0.0; 60];
     let mut index = 0;
+
+    // The camera fourcc is set at open() time and constant for the
+    // session, so the CameraFrame.format string can be computed once
+    // and reused. Lazily initialized from the first buffer to avoid an
+    // extra `cam.read()` outside the loop. Avoids a per-frame
+    // allocation in the hot publish path.
+    let mut fourcc_str: Option<String> = None;
 
     while !SHUTDOWN.load(Ordering::SeqCst) {
         let camera_buffer = match info_span!("camera_read").in_scope(|| cam.read()) {
@@ -449,6 +486,8 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         }
         args.tracy.then(|| plot!("fps", fps));
 
+        let fourcc = fourcc_str.get_or_insert_with(|| camera_buffer.format().to_string());
+
         let cam_ts = camera_buffer.timestamp()?;
         let frame_sample_ts = zenoh_ts_for_frame(&session, &clock_offset, &cam_ts);
         let (msg, enc) = camera_frame_serialize(
@@ -458,6 +497,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             &args.camera_frame_id,
             &clock_offset,
             &colorimetry,
+            fourcc,
         )?;
         let span = info_span!("camera_publish");
         let local_session = session.clone();
@@ -542,6 +582,10 @@ async fn h264_task(
     args: Args,
     rx: Receiver<(Image, Timestamp)>,
     clock_offset: ClockOffset,
+    // Pre-opened in `stream()` before the sidecar write so a doomed
+    // record run aborts the whole process before producing orphaned
+    // metadata. `None` when `--record` is not set.
+    mut recorder: Option<std::io::BufWriter<std::fs::File>>,
 ) {
     let publisher = match session
         .declare_publisher(args.h264_topic.clone())
@@ -570,22 +614,6 @@ async fn h264_task(
         args.h264_bitrate,
     )
     .unwrap();
-
-    // When --record is set, open the output file and keep a 256 KiB
-    // BufWriter on it. The bitstream is raw Annex-B (no container) so
-    // any prefix is a valid partial decode target and every NAL unit is
-    // written whole via write_all. We flush on every keyframe, bounding
-    // the power-loss window to one GOP (~1 s at default settings).
-    let mut recorder: Option<std::io::BufWriter<std::fs::File>> = match args.record.as_ref() {
-        Some(path) => match std::fs::File::create(path) {
-            Ok(f) => Some(std::io::BufWriter::with_capacity(256 * 1024, f)),
-            Err(e) => {
-                error!("Failed to create recording file {:?}: {e}", path);
-                return;
-            }
-        },
-        None => None,
-    };
 
     loop {
         let (msg, ts) = match rx.recv() {
@@ -966,7 +994,7 @@ pub(crate) fn build_camera_frame_msg(
     Ok((bytes, enc))
 }
 
-#[instrument(skip_all, fields(width = buf.width(), height = buf.height(), format = buf.format().to_string()))]
+#[instrument(skip_all, fields(width = buf.width(), height = buf.height(), format = fourcc))]
 fn camera_frame_serialize(
     buf: &CameraBuffer<'_>,
     ts: &Timestamp,
@@ -974,6 +1002,7 @@ fn camera_frame_serialize(
     frame_id: &str,
     clock_offset: &ClockOffset,
     colorimetry: &Colorimetry,
+    fourcc: &str,
 ) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
     build_camera_frame_msg(
         clock_offset.to_realtime(ts),
@@ -982,7 +1011,7 @@ fn camera_frame_serialize(
         pid,
         buf.width() as u32,
         buf.height() as u32,
-        &buf.format().to_string(),
+        fourcc,
         buf.rawfd(),
         buf.bytes_per_line()?,
         buf.length()? as u32,
@@ -1071,8 +1100,12 @@ impl CameraInfoFields {
         let (width, height, distortion_model, d, k, r, p) = if !args.cam_info_path.is_empty() {
             let file = File::open(&args.cam_info_path)
                 .map_err(|e| format!("Cannot open file {:?}: {e:?}", &args.cam_info_path))?;
-            let json: serde_json::Value =
-                serde_json::from_reader(file).expect("file should be proper JSON");
+            let json: serde_json::Value = serde_json::from_reader(file).map_err(|e| {
+                format!(
+                    "Cannot parse camera info JSON from {:?}: {e}",
+                    &args.cam_info_path
+                )
+            })?;
             let bypass = json["bypass"].as_bool().unwrap_or(false);
             let dewarp_configs = &json["dewarpConfigArray"];
             if !dewarp_configs.is_array() {
@@ -1501,6 +1534,31 @@ mod tests {
         assert!(
             err.contains("8"),
             "error must include actual length (8), got: {err}"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn camera_info_fields_rejects_malformed_json() {
+        // A non-JSON file at cam_info_path used to panic via
+        // `.expect("file should be proper JSON")`; now it must surface a
+        // structured error that names the offending file.
+        let tmp = std::env::temp_dir();
+        let pid = std::process::id();
+        let path = tmp.join(format!("edgefirst_cam_info_bad_json_{pid}.json"));
+        std::fs::write(&path, b"this is not valid json {").unwrap();
+
+        let mut args = default_args();
+        args.cam_info_path = path.to_string_lossy().into_owned();
+        let err = CameraInfoFields::from_args(&args).unwrap_err().to_string();
+        assert!(
+            err.to_lowercase().contains("parse"),
+            "error must say it failed to parse, got: {err}"
+        );
+        assert!(
+            err.contains(args.cam_info_path.as_str()),
+            "error must include the offending file path, got: {err}"
         );
 
         std::fs::remove_file(&path).ok();

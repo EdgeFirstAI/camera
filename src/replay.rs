@@ -91,26 +91,41 @@ pub(crate) async fn run_replay(session: Session, args: Args) -> Result<(), Box<d
     let info_bytes = ZBytes::from(info_fields.build_msg()?.into_cdr());
     let info_enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/CameraInfo");
 
-    let publ_h264 = if args.h264 {
-        Some(
-            session
-                .declare_publisher(args.h264_topic.clone())
-                .priority(Priority::Data)
-                .congestion_control(CongestionControl::Drop)
-                .await
-                .map_err(zerr)?,
-        )
-    } else {
-        None
-    };
+    // Replay always forwards the recorded Annex-B verbatim on
+    // rt/camera/h264 — the file *is* H.264 by definition, so there is
+    // nothing to gate against. This matches the README's documented UX
+    // (`--replay capture.h264` without `--h264` forwards H.264) and
+    // avoids the trap of a replay run that publishes CameraFrame but
+    // not the bitstream consumers expect.
+    let publ_h264 = session
+        .declare_publisher(args.h264_topic.clone())
+        .priority(Priority::Data)
+        .congestion_control(CongestionControl::Drop)
+        .await
+        .map_err(zerr)?;
 
     // Decoder + file reader
     let fps = args.replay_fps.unwrap_or(sidecar.fps).max(1);
     let decoder = Decoder::create(DecoderCodec::H264, fps as i32)?;
     let mut reader = BufReader::with_capacity(READ_CHUNK, File::open(&replay_path)?);
 
-    // Running state
-    let mut ticker = tokio::time::interval(Duration::from_micros(1_000_000 / u64::from(fps)));
+    // Running state. Clamp fps before computing the tick interval —
+    // 1_000_000 fps is already 1 µs/frame, the smallest non-zero
+    // micros-bucket. Above that, integer division yields a zero-
+    // duration interval and `tokio::time::interval` panics. A
+    // multi-MHz replay is nonsensical for an embedded camera service,
+    // so we cap and warn rather than refusing the run.
+    const MAX_TICKER_FPS: u32 = 1_000_000;
+    let interval_fps = fps.min(MAX_TICKER_FPS);
+    if interval_fps != fps {
+        warn!(
+            requested_fps = fps,
+            clamped_fps = interval_fps,
+            "replay fps exceeds maximum supported ticker rate; clamping to avoid zero-duration interval"
+        );
+    }
+    let mut ticker =
+        tokio::time::interval(Duration::from_micros(1_000_000 / u64::from(interval_fps)));
     let mut carry = Carry::new();
     let mut last_data: Vec<u8> = Vec::with_capacity(READ_CHUNK);
     let mut seq: u64 = 0;
@@ -150,6 +165,29 @@ pub(crate) async fn run_replay(session: Session, args: Args) -> Result<(), Box<d
             let nal_len = match next_nal_unit_len(carry.pending()) {
                 Some(n) => n,
                 None => {
+                    // Two sub-cases: (a) the carry is start-code
+                    // aligned but no terminating start code is in
+                    // view yet — pull more bytes; or (b) the carry
+                    // is *not* start-code aligned, e.g. because we
+                    // dropped 1 byte to recover from a persistent
+                    // decode error. Resync forward to the next
+                    // start code before reading more — otherwise an
+                    // unbounded run of garbage with no SC would
+                    // grow `carry` without ever consuming.
+                    if !starts_with_start_code(carry.pending()) {
+                        if let Some(off) = find_start_code(carry.pending()) {
+                            if off > 0 {
+                                warn!(
+                                    "Replay: resyncing past {} bytes of unrecognized data \
+                                     (no leading Annex-B start code)",
+                                    off
+                                );
+                                carry.consume(off);
+                            }
+                            continue;
+                        }
+                    }
+
                     if !carry.fill_from(&mut reader)? {
                         // EOF with trailing partial NAL — feed what's
                         // left if any, then honour replay_loop.
@@ -203,16 +241,20 @@ pub(crate) async fn run_replay(session: Session, args: Args) -> Result<(), Box<d
                         tokio::time::sleep(Duration::from_millis(5)).await;
                         continue;
                     }
+                    // Drop one byte and resync to the next start code
+                    // on the next iteration. The byte-at-a-time strategy
+                    // (versus skipping the whole NAL) lets us recover
+                    // from an emulation-prevention false-positive in the
+                    // scanner without losing the surrounding access unit.
                     warn!(
                         "Replay: persistent decode error near byte offset {} in {:?} \
-                         after {} retries: {e}. Skipping NAL unit of {} bytes.",
+                         after {} retries: {e}. Dropping 1 byte to resync to the next start code.",
                         reader.stream_position().unwrap_or_default(),
                         replay_path,
                         backpressure_retries,
-                        nal_len,
                     );
                     backpressure_retries = 0;
-                    carry.consume(nal_len);
+                    carry.consume(1);
                 }
             }
         };
@@ -231,7 +273,7 @@ pub(crate) async fn run_replay(session: Session, args: Args) -> Result<(), Box<d
         publish_replayed_frame(
             &session,
             &publ_info,
-            publ_h264.as_ref(),
+            &publ_h264,
             &info_bytes,
             &info_enc,
             &frame,
@@ -308,34 +350,23 @@ impl Carry {
 
 /// Length of the leading NAL unit in `buf`, terminated by the *next*
 /// NAL start code (Annex-B `00 00 01` or `00 00 00 01`), or `None` if
-/// no terminating start code is present yet in `buf`.
+/// either no terminating start code is present yet in `buf` or `buf`
+/// is not start-code-aligned. The caller distinguishes the two cases
+/// via [`starts_with_start_code`] / [`find_start_code`].
 ///
 /// V4L2 decoders expect one access unit per queued OUTPUT buffer.
 /// Feeding a 256 KiB chunk that spans multiple frames is what caused
 /// the "no OUTPUT buffer available" deadlock observed on i.MX8MP —
 /// the hardware never produced any CAPTURE frames because it could
 /// not partition the input. This scanner lets the replay loop feed
-/// one NAL per `decode_frame` call. The caller is still responsible
-/// for filling more bytes when the scanner returns None at a short
-/// carry (EOF is handled by the caller too).
+/// one NAL per `decode_frame` call.
 fn next_nal_unit_len(buf: &[u8]) -> Option<usize> {
     // Every recorded frame starts with a 3- or 4-byte start code
     // (00 00 01 or 00 00 00 01) at offset 0. Skip past that and the
     // next NAL header byte before scanning, otherwise the scanner
     // would trigger on the leading start code itself (its tail
     // 00 00 01 matches the 3-byte form starting at offset 1).
-    if buf.len() < 4 {
-        return None;
-    }
-    let leading_sc_len = if buf[0] == 0 && buf[1] == 0 && buf[2] == 0 && buf[3] == 1 {
-        4
-    } else if buf[0] == 0 && buf[1] == 0 && buf[2] == 1 {
-        3
-    } else {
-        // Caller is out of sync with NAL boundaries; they should skip
-        // bytes until the next start code.
-        return None;
-    };
+    let leading_sc_len = leading_start_code_len(buf)?;
 
     let mut i = leading_sc_len + 1;
     while i + 2 < buf.len() {
@@ -354,11 +385,51 @@ fn next_nal_unit_len(buf: &[u8]) -> Option<usize> {
     None
 }
 
+/// Length of the Annex-B start code at the very front of `buf`, or
+/// `None` if there isn't one. Returns 3 for `00 00 01`, 4 for
+/// `00 00 00 01`. Used to keep [`next_nal_unit_len`] and the resync
+/// path agreeing on what counts as alignment.
+#[inline]
+fn leading_start_code_len(buf: &[u8]) -> Option<usize> {
+    if buf.len() >= 4 && buf[0] == 0 && buf[1] == 0 && buf[2] == 0 && buf[3] == 1 {
+        Some(4)
+    } else if buf.len() >= 3 && buf[0] == 0 && buf[1] == 0 && buf[2] == 1 {
+        Some(3)
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn starts_with_start_code(buf: &[u8]) -> bool {
+    leading_start_code_len(buf).is_some()
+}
+
+/// Find the offset of the next Annex-B start code anywhere in `buf`
+/// (3- or 4-byte form). Returns `None` if the buffer contains no full
+/// start code. Used by the resync path to skip past garbage between
+/// NAL units after a decoder error or a corrupted prefix.
+fn find_start_code(buf: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while i + 2 < buf.len() {
+        if buf[i] == 0 && buf[i + 1] == 0 {
+            if buf[i + 2] == 1 {
+                return Some(i);
+            }
+            if buf[i + 2] == 0 && i + 3 < buf.len() && buf[i + 3] == 1 {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn publish_replayed_frame(
     session: &Session,
     publ_info: &zenoh::pubsub::Publisher<'_>,
-    publ_h264: Option<&zenoh::pubsub::Publisher<'_>>,
+    publ_h264: &zenoh::pubsub::Publisher<'_>,
     info_bytes: &ZBytes,
     info_enc: &Encoding,
     frame: &Frame,
@@ -414,15 +485,14 @@ async fn publish_replayed_frame(
     // rt/camera/h264 — forward the Annex-B bytes verbatim. We have them
     // in h264_bytes because the replay loop collected every byte the
     // decoder consumed for this frame.
-    if let Some(publ) = publ_h264 {
-        if !h264_bytes.is_empty() {
-            let (msg, enc) = build_h264_msg(h264_bytes, stamp, &args.camera_frame_id)?;
-            publ.put(msg)
-                .encoding(enc)
-                .timestamp(sample_ts)
-                .await
-                .map_err(zerr)?;
-        }
+    if !h264_bytes.is_empty() {
+        let (msg, enc) = build_h264_msg(h264_bytes, stamp, &args.camera_frame_id)?;
+        publ_h264
+            .put(msg)
+            .encoding(enc)
+            .timestamp(sample_ts)
+            .await
+            .map_err(zerr)?;
     }
 
     Ok(())
@@ -499,7 +569,7 @@ async fn tf_static_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::next_nal_unit_len;
+    use super::{find_start_code, next_nal_unit_len, starts_with_start_code};
 
     #[test]
     fn returns_none_for_short_input() {
@@ -544,5 +614,51 @@ mod tests {
         buf.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x00, 0x00, 0x03, 0x01]); // NAL #1 (9 bytes)
         buf.extend_from_slice(&[0, 0, 0, 1, 0x28]); // NAL #2
         assert_eq!(next_nal_unit_len(&buf), Some(9));
+    }
+
+    #[test]
+    fn starts_with_start_code_recognizes_both_forms() {
+        assert!(starts_with_start_code(&[0, 0, 1, 0x67]));
+        assert!(starts_with_start_code(&[0, 0, 0, 1, 0x67]));
+        assert!(!starts_with_start_code(&[0, 0, 2, 0x67]));
+        assert!(!starts_with_start_code(&[0xff, 0, 0, 1]));
+        assert!(!starts_with_start_code(&[]));
+    }
+
+    #[test]
+    fn find_start_code_reports_offset_in_garbage() {
+        // 5 bytes of garbage, then a 4-byte SC.
+        let buf = [0xab, 0xcd, 0xef, 0x12, 0x34, 0, 0, 0, 1, 0x67];
+        assert_eq!(find_start_code(&buf), Some(5));
+    }
+
+    #[test]
+    fn find_start_code_returns_none_on_pure_garbage() {
+        let buf = [0xff; 32];
+        assert_eq!(find_start_code(&buf), None);
+    }
+
+    #[test]
+    fn find_start_code_handles_zero_runs_without_one() {
+        // Long run of zeroes without a terminating 0x01 must not be
+        // treated as a start code.
+        let buf = [0u8; 16];
+        assert_eq!(find_start_code(&buf), None);
+    }
+
+    #[test]
+    fn find_start_code_skips_to_3byte_form() {
+        // Garbage prefix + 3-byte SC.
+        let buf = [0xaa, 0xbb, 0, 0, 1, 0x67];
+        assert_eq!(find_start_code(&buf), Some(2));
+    }
+
+    #[test]
+    fn next_nal_unit_len_rejects_unaligned_input() {
+        // No leading start code → caller must resync.
+        let buf = [0xab, 0xcd, 0, 0, 0, 1, 0x67, 0, 0, 0, 1, 0x28];
+        assert_eq!(next_nal_unit_len(&buf), None);
+        // ...but find_start_code still locates the next SC for resync.
+        assert_eq!(find_start_code(&buf), Some(2));
     }
 }
