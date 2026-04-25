@@ -49,8 +49,9 @@ ingest camera data from this release forward.
   schema and the power-loss design rationale.
 
 ### Changed
-- Bumped `videostream` dependency from 2.4.0 to 2.5.0 for the sequence
-  counter and colorimetry accessors (new in 2.5).
+- Bumped `videostream` dependency from 2.4.0 to 2.5.1 for the sequence
+  counter and colorimetry accessors (new in 2.5) and MPLANE V4L2
+  decoder support (new in 2.5.1) needed for the i.MX 95 Wave6 VPU.
 - Bumped `edgefirst-schemas` dependency from 1.5.2 to 3.1.0. All
   messages (`CompressedImage`, `CompressedVideo`, `CameraInfo`,
   `TransformStamped`) now use the constructor + `into_cdr()` API; the

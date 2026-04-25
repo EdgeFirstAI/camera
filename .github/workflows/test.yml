@@ -249,11 +249,11 @@ jobs:
           # Keep in sync with the videostream crate version in Cargo.toml.
           # The on-target runtime library must expose every symbol the binary
           # calls — e.g. vsl_camera_buffer_bytes_per_line added in 2.4.
-          VIDEOSTREAM_VERSION: 2.5.0
+          VIDEOSTREAM_VERSION: 2.5.1
           # SHA-256 of videostream-${VIDEOSTREAM_VERSION}-linux-aarch64.zip
           # from the GitHub release assets. Pins the runtime library against
           # tampering or silent re-issue. Update alongside VIDEOSTREAM_VERSION.
-          VIDEOSTREAM_SHA256: aee338817a76dcf3a1332f0cdc39bec2106237fb0aa0d4c5af385d8931f66c86
+          VIDEOSTREAM_SHA256: a6a0d92d51b3d3d273279000c9eefc5df0e1e2ad965d73205eff035c05b4a981
         run: |
           set -euo pipefail
           ARCHIVE="videostream-${VIDEOSTREAM_VERSION}-linux-aarch64.zip"

@@ -4062,9 +4062,9 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "videostream"
-version = "2.5.0"
+version = "2.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b78d31f64079a58245ecc4a4e88969fd6bbcf7ab9c0097b5a9b3391d020aa8"
+checksum = "10801cddb88f9d6dd3a611472a725702987f302078b45a26f90c64ba853bc6be"
 dependencies = [
  "dma-buf 0.5.0",
  "log",
@@ -4074,9 +4074,9 @@ dependencies = [
 
 [[package]]
 name = "videostream-sys"
-version = "2.5.0"
+version = "2.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d0d59831a8c574f8556fb9c033176d2cca97d29d255fc83ce3f0785b62128d8"
+checksum = "26ab48499fddf4374b9fbbf5460cdeeabfd785730b27f3393af9496c9a8f0044"
 dependencies = [
  "bindgen",
  "libloading 0.9.0",
