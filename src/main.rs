@@ -329,7 +329,15 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         thread::Builder::new()
             .name("jpeg".to_string())
             .spawn(move || {
-                tokio::runtime::Builder::new_current_thread()
+                // Multi-thread with one worker is what Zenoh 1.6+
+                // requires for `Session::drop`'s internal close path —
+                // it calls `block_in_place` from `ZRuntime::Net` and
+                // panics if the surrounding runtime is current-thread
+                // ("Zenoh runtime doesn't support Tokio's current
+                // thread scheduler"). One worker preserves the
+                // single-encoder-per-thread shape we want here.
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
                     .enable_all()
                     .build()
                     .unwrap()
@@ -356,7 +364,11 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             thread::Builder::new()
                 .name(format!("h264_tile_{:?}", tile_pos).to_lowercase())
                 .spawn(move || {
-                    tokio::runtime::Builder::new_current_thread()
+                    // Multi-thread with one worker — see the matching
+                    // comment on the h264 spawn above for why current-
+                    // thread is not viable with Zenoh 1.6+.
+                    tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(1)
                         .enable_all()
                         .build()
                         .unwrap()
@@ -430,7 +442,15 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         thread::Builder::new()
             .name("h264".to_string())
             .spawn(move || {
-                tokio::runtime::Builder::new_current_thread()
+                // Multi-thread with one worker is what Zenoh 1.6+
+                // requires for `Session::drop`'s internal close path —
+                // it calls `block_in_place` from `ZRuntime::Net` and
+                // panics if the surrounding runtime is current-thread
+                // ("Zenoh runtime doesn't support Tokio's current
+                // thread scheduler"). One worker preserves the
+                // single-encoder-per-thread shape we want here.
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
                     .enable_all()
                     .build()
                     .unwrap()
