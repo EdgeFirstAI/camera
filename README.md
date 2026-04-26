@@ -321,7 +321,7 @@ edgefirst-camera --help
 
 **Topic Configuration:**
 
-- `--dma-topic <TOPIC>` - DMA buffer topic (default: `rt/camera/dma`)
+- `--frame-topic <TOPIC>` - CameraFrame topic (default: `camera/frame`, no `rt/` prefix per schemas 3.1 convention)
 - `--info-topic <TOPIC>` - CameraInfo topic (default: `rt/camera/info`)
 - `--jpeg-topic <TOPIC>` - JPEG topic (default: `rt/camera/jpeg`)
 - `--h264-topic <TOPIC>` - H264 topic (default: `rt/camera/h264`)
@@ -330,6 +330,13 @@ edgefirst-camera --help
 
 - `--h264-bitrate <auto|mbps5|mbps25|mbps50|mbps100>` - H264 bitrate (default: `auto`)
 - `--h264-tiles-fps <FPS>` - FPS limit for 4K tiles (default: `15`)
+
+**Recording and Replay:**
+
+- `--record <PATH>` - Record the live H.264 stream to `<PATH>` as raw Annex-B. Writes a `<PATH>.json` sidecar alongside. Requires `--h264`.
+- `--replay <PATH>` - Replay a previously recorded file instead of opening a camera. Requires the matching `.json` sidecar.
+- `--replay-loop` - Loop replay back to the start on EOF. `CameraFrame.seq` keeps incrementing across loops.
+- `--replay-fps <N>` - Override playback rate (defaults to the sidecar's recorded fps).
 
 **Zenoh Configuration:**
 
@@ -379,6 +386,58 @@ For complex deployments, use a Zenoh configuration file:
 ```bash
 edgefirst-camera --zenoh-config /etc/edgefirst/zenoh.json5
 ```
+
+---
+
+## Recording and Replay
+
+The camera node ships built-in recording and replay of the H.264 stream, intended for reproducible tests and demos. Recordings are plain raw Annex-B bitstream files — power-loss resilient, playable in VLC / mpv / ffplay out of the box.
+
+### Recording
+
+```bash
+# Record 30 seconds of H.264 to a file (requires --h264).
+edgefirst-camera --camera /dev/video0 --h264 --record capture.h264
+```
+
+Writes two files:
+
+- `capture.h264` — raw H.264 Annex-B bitstream, appended frame-by-frame. Flushed on every keyframe so a crash loses at most one GOP (~1 s).
+- `capture.json` — sidecar metadata. Written **once at startup**, holds colorimetry + the exact `sensor_msgs/CameraInfo` and `/tf_static` payloads that would have been published live. Stateless; no per-frame data.
+
+The tap is inside the h264 encode thread and runs **before** the Zenoh publish, so the recorder captures every frame even if Zenoh drops a publish under congestion.
+
+### Replaying
+
+```bash
+# Replay the recorded pair — camera device is not opened.
+edgefirst-camera --replay capture.h264
+
+# Loop indefinitely; seq keeps incrementing across loop boundaries.
+edgefirst-camera --replay capture.h264 --replay-loop
+
+# Override playback rate.
+edgefirst-camera --replay capture.h264 --replay-fps 15
+```
+
+Replay publishes on the same topics and schemas as live capture — subscribers see identical on-wire data. `/camera/info`, `/tf_static`, and the `CameraFrame` colorimetry fields come from the sidecar, not from CLI flags (any `--cam-info-path`, `--cam-tf-*`, or `--base-frame-id` flags supplied at replay time are ignored with a warning).
+
+The `rt/camera/h264` topic forwards the recorded Annex-B bytes **verbatim** — no re-encode. `camera/frame` is built from the decoded NV12 frame.
+
+**Not supported with `--replay`:** `--jpeg`, `--h264-tiles` (recorded files carry only the main H.264 stream). Use the live path if you need JPEG or tile output.
+
+### Playback outside the camera service
+
+The raw `.h264` file is directly playable by any standard tool:
+
+```bash
+vlc capture.h264
+mpv --demuxer=h264 capture.h264
+ffplay -f h264 -framerate 30 capture.h264
+ffmpeg -i capture.h264 -c copy capture.mp4   # remux to MP4, no re-encode
+```
+
+See [ARCHITECTURE.md § Record and Replay](ARCHITECTURE.md#record-and-replay) for the sidecar JSON schema and internals.
 
 ---
 

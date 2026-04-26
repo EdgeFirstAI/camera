@@ -2,6 +2,8 @@
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
 mod args;
+mod replay;
+mod sidecar;
 mod video;
 
 use args::{Args, MirrorSetting};
@@ -9,14 +11,13 @@ use clap::Parser;
 use edgefirst_camera::image::{encode_jpeg, Image, ImageManager, Rotation, RGBA};
 use edgefirst_schemas::{
     builtin_interfaces::{self, Time},
-    edgefirst_msgs::DmaBuffer,
+    edgefirst_msgs::{CameraFrame, CameraPlaneView},
     foxglove_msgs::FoxgloveCompressedVideo,
     geometry_msgs::{Quaternion, Transform, TransformStamped, Vector3},
     sensor_msgs::{CameraInfo, CompressedImage, RegionOfInterest},
-    serde_cdr,
-    std_msgs::{self, Header},
 };
 use kanal::{Receiver, Sender};
+use sidecar::Sidecar;
 use std::{
     env,
     error::Error,
@@ -33,6 +34,7 @@ use unix_ts::Timestamp;
 use video::VideoManager;
 use videostream::{
     camera::{create_camera, CameraBuffer, CameraReader, Mirror},
+    colorimetry::{ColorEncoding, ColorRange, ColorSpace, ColorTransfer},
     fourcc::FourCC,
 };
 use zenoh::{
@@ -127,6 +129,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut args = Args::parse();
 
+    // Validate record/replay arg combinations before touching anything.
+    validate_record_replay_args(&args)?;
+
     args.tracy.then(tracy_client::Client::start);
 
     let stdout_log = tracing_subscriber::fmt::layer()
@@ -164,6 +169,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with(tracy);
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
     tracing_log::LogTracer::init()?;
+
+    let session = zenoh::open(args.clone()).await.unwrap();
+
+    if args.replay.is_some() {
+        // Replay mode: source frames from a recorded .h264 file. We do
+        // not open the V4L2 camera device in this mode; the decoder's
+        // output Frame stands in for CameraBuffer on the publish path.
+        let replay_task = replay::run_replay(session, args);
+        if let Some(console_server) = console_server {
+            let console_task = console_server.serve();
+            let (console_task, replay_task) = tokio::join!(console_task, replay_task);
+            console_task.unwrap();
+            replay_task?;
+        } else {
+            replay_task.await?;
+        }
+        return Ok(());
+    }
 
     let mirror = match args.mirror {
         MirrorSetting::None => Mirror::None,
@@ -222,9 +245,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    let session = zenoh::open(args.clone()).await.unwrap();
     let stream_task = stream(cam, session, args);
-
     if let Some(console_server) = console_server {
         let console_task = console_server.serve();
         let (console_task, stream_task) = tokio::join!(console_task, stream_task);
@@ -234,6 +255,41 @@ async fn main() -> Result<(), Box<dyn Error>> {
         stream_task.await?;
     }
 
+    Ok(())
+}
+
+/// Validate the `--record` / `--replay` / `--replay-*` arg combinations up
+/// front so we can fail the process with a single clear message before
+/// opening the camera or any file handles.
+fn validate_record_replay_args(args: &Args) -> Result<(), Box<dyn Error>> {
+    if let Some(ref path) = args.record {
+        if !args.h264 {
+            return Err(Box::from(format!(
+                "--record {:?} requires --h264 (record writes the main H.264 stream)",
+                path
+            )));
+        }
+    }
+    if args.replay.is_some() {
+        if args.jpeg {
+            return Err(Box::from(
+                "--replay does not support --jpeg (recorded files carry H.264 only)",
+            ));
+        }
+        if args.h264_tiles {
+            return Err(Box::from(
+                "--replay does not support --h264-tiles (recorded files carry only the main stream)",
+            ));
+        }
+    } else {
+        // --replay-loop / --replay-fps are only meaningful with --replay.
+        if args.replay_loop {
+            warn!("--replay-loop has no effect without --replay");
+        }
+        if args.replay_fps.is_some() {
+            warn!("--replay-fps has no effect without --replay");
+        }
+    }
     Ok(())
 }
 
@@ -261,20 +317,10 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         }
     };
 
-    let (h264_tx, rx) = kanal::bounded(1);
-    if args.h264 {
-        let session = session.clone();
-        let args = args.clone();
-        thread::Builder::new()
-            .name("h264".to_string())
-            .spawn(move || {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(h264_task(session, args, rx, clock_offset));
-            })?;
-    }
+    // The h264 thread is spawned later (after the recorder file is
+    // opened and the sidecar is written) so a doomed `--record` run
+    // fails the whole process before any thread is running.
+    let (h264_tx, h264_rx) = kanal::bounded(1);
 
     let (jpeg_tx, rx) = kanal::bounded(1);
     if args.jpeg {
@@ -283,7 +329,15 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         thread::Builder::new()
             .name("jpeg".to_string())
             .spawn(move || {
-                tokio::runtime::Builder::new_current_thread()
+                // Multi-thread with one worker is what Zenoh 1.6+
+                // requires for `Session::drop`'s internal close path —
+                // it calls `block_in_place` from `ZRuntime::Net` and
+                // panics if the surrounding runtime is current-thread
+                // ("Zenoh runtime doesn't support Tokio's current
+                // thread scheduler"). One worker preserves the
+                // single-encoder-per-thread shape we want here.
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
                     .enable_all()
                     .build()
                     .unwrap()
@@ -310,7 +364,11 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             thread::Builder::new()
                 .name(format!("h264_tile_{:?}", tile_pos).to_lowercase())
                 .spawn(move || {
-                    tokio::runtime::Builder::new_current_thread()
+                    // Multi-thread with one worker — see the matching
+                    // comment on the h264 spawn above for why current-
+                    // thread is not viable with Zenoh 1.6+.
+                    tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(1)
                         .enable_all()
                         .build()
                         .unwrap()
@@ -328,15 +386,91 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         }
     }
 
+    // Colorimetry is resolved once at camera init time and constant for the
+    // session. Populate CameraFrame's four colorimetry fields from it on
+    // every publish without a per-frame FFI call.
+    let colorimetry = Colorimetry::from_camera(&cam);
+
+    let tf_fields = TfStaticFields::from_args(&args);
+    let info_fields = CameraInfoFields::from_args(&args)?;
+
+    // When --record is set, open the H.264 output file and the
+    // matching sidecar before any frames flow. Order matters:
+    //
+    //   1. Open the BufWriter on the .h264 file. If creation fails
+    //      (path missing, no perms, FS full) we surface the error
+    //      here and abort the run cleanly — never produce an
+    //      orphaned sidecar for a recording that never started.
+    //   2. Write the .json sidecar. Fields are stable for the
+    //      session so one write at startup is enough.
+    //
+    // Use the encoder's stream dimensions in the sidecar (what the
+    // recorded .h264 file will actually contain), not the camera
+    // capture dimensions — those can differ when --stream-size
+    // rescales from --camera-size.
+    let recorder: Option<std::io::BufWriter<std::fs::File>> = match args.record.as_ref() {
+        Some(path) => {
+            let file = std::fs::File::create(path)
+                .map_err(|e| format!("Cannot create recording file {:?}: {e}", path))?;
+            let bw = std::io::BufWriter::with_capacity(256 * 1024, file);
+
+            let sidecar = Sidecar::from_live(
+                TARGET_FPS as u32,
+                args.stream_size[0],
+                args.stream_size[1],
+                &cam,
+                info_fields.clone(),
+                tf_fields.clone(),
+            );
+            let written = sidecar.write_paired(path)?;
+            info!(
+                "Recording: H.264 bitstream → {:?}, sidecar → {:?}",
+                path, written
+            );
+            Some(bw)
+        }
+        None => None,
+    };
+
+    // Spawn the h264 thread now that the recorder file (if any) is
+    // open. The thread takes ownership of the BufWriter; flushes on
+    // every keyframe; final flush on drop.
+    if args.h264 {
+        let session = session.clone();
+        let args = args.clone();
+        let rx = h264_rx;
+        thread::Builder::new()
+            .name("h264".to_string())
+            .spawn(move || {
+                // Multi-thread with one worker is what Zenoh 1.6+
+                // requires for `Session::drop`'s internal close path —
+                // it calls `block_in_place` from `ZRuntime::Net` and
+                // panics if the surrounding runtime is current-thread
+                // ("Zenoh runtime doesn't support Tokio's current
+                // thread scheduler"). One worker preserves the
+                // single-encoder-per-thread shape we want here.
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(h264_task(session, args, rx, clock_offset, recorder));
+            })?;
+    } else {
+        // --record requires --h264 (enforced by validate_record_replay_args),
+        // so an open recorder always pairs with the spawn above. Drop the
+        // unused receiver explicitly to keep the channel from staying open.
+        drop(h264_rx);
+        drop(recorder);
+    }
+
     let tf_session = session.clone();
-    let tf_msg = build_tf_msg(&args);
-    let tf_msg = ZBytes::from(serde_cdr::serialize(&tf_msg).unwrap());
+    let tf_msg = ZBytes::from(tf_fields.build_msg()?.into_cdr());
     let tf_enc = Encoding::APPLICATION_CDR.with_schema("geometry_msgs/msg/TransformStamped");
     let tf_task = tokio::spawn(async move { tf_static(tf_session, tf_msg, tf_enc).await });
     std::mem::drop(tf_task);
 
-    let info_msg = build_info_msg(&args)?;
-    let info_msg = ZBytes::from(serde_cdr::serialize(&info_msg)?);
+    let info_msg = ZBytes::from(info_fields.build_msg()?.into_cdr());
     let info_enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/CameraInfo");
 
     let src_pid = process::id();
@@ -344,6 +478,13 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     let mut prev = Instant::now();
     let mut history = vec![0.0; 60];
     let mut index = 0;
+
+    // The camera fourcc is set at open() time and constant for the
+    // session, so the CameraFrame.format string can be computed once
+    // and reused. Lazily initialized from the first buffer to avoid an
+    // extra `cam.read()` outside the loop. Avoids a per-frame
+    // allocation in the hot publish path.
+    let mut fourcc_str: Option<String> = None;
 
     while !SHUTDOWN.load(Ordering::SeqCst) {
         let camera_buffer = match info_span!("camera_read").in_scope(|| cam.read()) {
@@ -365,23 +506,27 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         }
         args.tracy.then(|| plot!("fps", fps));
 
+        let fourcc = fourcc_str.get_or_insert_with(|| camera_buffer.format().to_string());
+
         let cam_ts = camera_buffer.timestamp()?;
-        let dma_sample_ts = zenoh_ts_for_frame(&session, &clock_offset, &cam_ts);
-        let (msg, enc) = camera_dma_serialize(
+        let frame_sample_ts = zenoh_ts_for_frame(&session, &clock_offset, &cam_ts);
+        let (msg, enc) = camera_frame_serialize(
             &camera_buffer,
             &cam_ts,
             src_pid,
-            args.camera_frame_id.clone(),
+            &args.camera_frame_id,
             &clock_offset,
+            &colorimetry,
+            fourcc,
         )?;
         let span = info_span!("camera_publish");
         let local_session = session.clone();
-        let dma_topic = args.dma_topic.clone();
-        let dma_task = async move {
+        let frame_topic = args.frame_topic.clone();
+        let frame_task = async move {
             local_session
-                .put(dma_topic, msg)
+                .put(frame_topic, msg)
                 .encoding(enc)
-                .timestamp(dma_sample_ts)
+                .timestamp(frame_sample_ts)
                 .priority(Priority::Data)
                 .congestion_control(CongestionControl::Drop)
                 .await
@@ -413,7 +558,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
             }
         }
 
-        let (_dma_task, info_task) = tokio::join!(dma_task, info_task);
+        let (_frame_task, info_task) = tokio::join!(frame_task, info_task);
         info_task.unwrap();
 
         args.tracy.then(frame_mark);
@@ -457,6 +602,10 @@ async fn h264_task(
     args: Args,
     rx: Receiver<(Image, Timestamp)>,
     clock_offset: ClockOffset,
+    // Pre-opened in `stream()` before the sidecar write so a doomed
+    // record run aborts the whole process before producing orphaned
+    // metadata. `None` when `--record` is not set.
+    mut recorder: Option<std::io::BufWriter<std::fs::File>>,
 ) {
     let publisher = match session
         .declare_publisher(args.h264_topic.clone())
@@ -491,23 +640,39 @@ async fn h264_task(
             Ok(v) => v,
             Err(_) => {
                 // main thread exited
-                return;
+                break;
             }
         };
 
         let span = info_span!("h264");
         let sample_ts = zenoh_ts_for_frame(&session, &clock_offset, &ts);
+        let stamp = clock_offset.to_realtime(&ts);
         async {
-            let (msg, enc) = build_video_msg(
-                &msg,
-                &ts,
-                &mut vidmgr,
-                &imgmgr,
-                &img_h264,
-                &args,
-                &clock_offset,
-            )
-            .unwrap();
+            // Encode once. The bytes feed both the recorder tap and the
+            // Zenoh publish path so a late publish-side drop doesn't
+            // cost us a recorded frame.
+            let (data, is_key) = match info_span!("h264_resize_encode")
+                .in_scope(|| vidmgr.resize_and_encode(&msg, &imgmgr, &img_h264))
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("h264 encode failed: {e}");
+                    return;
+                }
+            };
+
+            if let Some(w) = recorder.as_mut() {
+                use std::io::Write;
+                if let Err(e) = w.write_all(&data) {
+                    error!("h264 recorder write failed: {e}");
+                } else if is_key {
+                    if let Err(e) = w.flush() {
+                        error!("h264 recorder flush failed: {e}");
+                    }
+                }
+            }
+
+            let (msg, enc) = build_h264_msg(&data, stamp, &args.camera_frame_id).unwrap();
             publisher
                 .put(msg)
                 .encoding(enc)
@@ -518,6 +683,16 @@ async fn h264_task(
         .instrument(span)
         .await;
         args.tracy.then(|| secondary_frame_mark!("h264"));
+    }
+
+    // BufWriter flushes on drop, but make the ordering explicit so the
+    // last GOP hits disk before we return and the tokio runtime tears
+    // this thread down.
+    if let Some(mut w) = recorder.take() {
+        use std::io::Write;
+        if let Err(e) = w.flush() {
+            error!("h264 recorder final flush failed: {e}");
+        }
     }
 }
 
@@ -708,46 +883,32 @@ fn build_jpeg_msg(
         .then(|| plot!("jpeg_kb", (jpeg.len() / 1024) as f64));
 
     info_span!("jpeg_publish").in_scope(|| {
-        let msg = CompressedImage {
-            header: std_msgs::Header {
-                stamp: clock_offset.to_realtime(ts),
-                frame_id: args.camera_frame_id.clone(),
-            },
-            format: "jpeg".to_string(),
-            data: jpeg.to_vec(),
-        };
-
-        let msg = ZBytes::from(serde_cdr::serialize(&msg).unwrap());
+        let msg = CompressedImage::new(
+            clock_offset.to_realtime(ts),
+            &args.camera_frame_id,
+            "jpeg",
+            &jpeg,
+        )?;
+        let bytes = ZBytes::from(msg.into_cdr());
         let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/CompressedImage");
-
-        Ok((msg, enc))
+        Ok((bytes, enc))
     })
 }
 
-fn build_video_msg(
-    buf: &Image,
-    ts: &Timestamp,
-    vid: &mut VideoManager,
-    imgmgr: &ImageManager,
-    img: &Image,
-    args: &Args,
-    clock_offset: &ClockOffset,
+/// Package already-encoded (or already-read) H.264 Annex-B bytes into a
+/// `foxglove_msgs/CompressedVideo` CDR payload. Shared by the live
+/// encode path and by replay (which reads the bytes from disk and
+/// forwards them verbatim).
+fn build_h264_msg(
+    data: &[u8],
+    stamp: builtin_interfaces::Time,
+    frame_id: &str,
 ) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
-    let data = vid.resize_and_encode(buf, imgmgr, img)?.0;
     info_span!("h264_publish").in_scope(|| {
-        let msg = FoxgloveCompressedVideo {
-            header: std_msgs::Header {
-                stamp: clock_offset.to_realtime(ts),
-                frame_id: args.camera_frame_id.clone(),
-            },
-            format: "h264".to_string(),
-            data,
-        };
-
-        let msg = ZBytes::from(serde_cdr::serialize(&msg).unwrap());
+        let msg = FoxgloveCompressedVideo::new(stamp, frame_id, data, "h264")?;
+        let bytes = ZBytes::from(msg.into_cdr());
         let enc = Encoding::APPLICATION_CDR.with_schema("foxglove_msgs/msg/CompressedVideo");
-
-        Ok((msg, enc))
+        Ok((bytes, enc))
     })
 }
 
@@ -760,56 +921,122 @@ fn build_tile_video_msg(
 ) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
     info_span!("h264_tile_publish").in_scope(|| {
         let frame_id = format!("{}_{:?}", args.camera_frame_id, tile_pos).to_lowercase();
-
-        let msg = FoxgloveCompressedVideo {
-            header: std_msgs::Header {
-                stamp: clock_offset.to_realtime(ts),
-                frame_id,
-            },
-            format: "h264".to_string(),
-            data: data.to_vec(),
-        };
-
-        let msg = ZBytes::from(serde_cdr::serialize(&msg).unwrap());
+        let msg =
+            FoxgloveCompressedVideo::new(clock_offset.to_realtime(ts), &frame_id, data, "h264")?;
+        let bytes = ZBytes::from(msg.into_cdr());
         let enc = Encoding::APPLICATION_CDR.with_schema("foxglove_msgs/msg/CompressedVideo");
-
-        Ok((msg, enc))
+        Ok((bytes, enc))
     })
 }
 
-#[instrument(skip_all, fields(width = buf.width(), height = buf.height(), format = buf.format().to_string()))]
-fn camera_dma_serialize(
+/// Camera-level colorimetry captured once at startup and reused for every
+/// published [`CameraFrame`]. V4L2 resolves these at `vsl_camera_init_device`
+/// time and they are constant for the session, so we pay the FFI cost once.
+/// Fields are empty strings when the driver returned V4L2 `_DEFAULT` or a
+/// value outside the CameraFrame.msg vocabulary — matching the schema's
+/// `""` = unknown convention.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Colorimetry {
+    #[serde(rename = "color_space")]
+    pub space: String,
+    #[serde(rename = "color_transfer")]
+    pub transfer: String,
+    #[serde(rename = "color_encoding")]
+    pub encoding: String,
+    #[serde(rename = "color_range")]
+    pub range: String,
+}
+
+impl Colorimetry {
+    fn from_camera(cam: &CameraReader) -> Self {
+        fn opt_str<T: std::fmt::Display>(r: Result<Option<T>, videostream::Error>) -> String {
+            match r {
+                Ok(Some(v)) => v.to_string(),
+                _ => String::new(),
+            }
+        }
+        Self {
+            space: opt_str::<ColorSpace>(cam.color_space()),
+            transfer: opt_str::<ColorTransfer>(cam.color_transfer()),
+            encoding: opt_str::<ColorEncoding>(cam.color_encoding()),
+            range: opt_str::<ColorRange>(cam.color_range()),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_camera_frame_msg(
+    stamp: builtin_interfaces::Time,
+    frame_id: &str,
+    seq: u64,
+    pid: u32,
+    width: u32,
+    height: u32,
+    format: &str,
+    plane_fd: i32,
+    plane_stride: u32,
+    plane_len: u32,
+    colorimetry: &Colorimetry,
+) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
+    // Single-plane, contiguous DMA-BUF. Plane 0 covers the whole buffer;
+    // for packed formats (YUYV) that is the entire image, for NV12 the
+    // chroma plane lives inside the same fd via its natural offset but
+    // is not described by a second CameraPlane entry until videostream
+    // exposes multi-plane offsets (known limitation, tracked in the
+    // 2.7.0 release notes).
+    let plane = CameraPlaneView {
+        fd: plane_fd,
+        offset: 0,
+        stride: plane_stride,
+        size: plane_len,
+        used: plane_len,
+        data: &[],
+    };
+
+    let msg = CameraFrame::new(
+        stamp,
+        frame_id,
+        seq,
+        pid,
+        width,
+        height,
+        format,
+        &colorimetry.space,
+        &colorimetry.transfer,
+        &colorimetry.encoding,
+        &colorimetry.range,
+        /* fence_fd: */ -1,
+        &[plane],
+    )?;
+
+    let bytes = ZBytes::from(msg.into_cdr());
+    let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/CameraFrame");
+    Ok((bytes, enc))
+}
+
+#[instrument(skip_all, fields(width = buf.width(), height = buf.height(), format = fourcc))]
+fn camera_frame_serialize(
     buf: &CameraBuffer<'_>,
     ts: &Timestamp,
     pid: u32,
-    frame_id: String,
+    frame_id: &str,
     clock_offset: &ClockOffset,
+    colorimetry: &Colorimetry,
+    fourcc: &str,
 ) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
-    let width = buf.width() as u32;
-    let height = buf.height() as u32;
-    let fourcc = buf.format().into();
-    let dma_buf = buf.rawfd();
-    let length = buf.length()? as u32;
-    let stride = buf.bytes_per_line()?;
-
-    let msg = DmaBuffer {
-        header: std_msgs::Header {
-            stamp: clock_offset.to_realtime(ts),
-            frame_id,
-        },
+    build_camera_frame_msg(
+        clock_offset.to_realtime(ts),
+        frame_id,
+        buf.sequence()? as u64,
         pid,
-        fd: dma_buf,
-        width,
-        height,
-        stride,
+        buf.width() as u32,
+        buf.height() as u32,
         fourcc,
-        length,
-    };
-
-    let msg = ZBytes::from(serde_cdr::serialize(&msg)?);
-    let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/DmaBuffer");
-
-    Ok((msg, enc))
+        buf.rawfd(),
+        buf.bytes_per_line()?,
+        buf.length()? as u32,
+        colorimetry,
+    )
 }
 
 /// Build a Zenoh sample Timestamp from a ROS2 wall-clock `Time` (sec, nanosec
@@ -843,168 +1070,234 @@ const SATURATED_TIME: builtin_interfaces::Time = builtin_interfaces::Time {
     nanosec: 999_999_999,
 };
 
-fn build_info_msg(args: &Args) -> Result<CameraInfo, Box<dyn Error>> {
-    let stamp = match timestamp() {
-        Ok(t) => t,
-        Err(TimestampError::Overflow) => {
-            warn!("Timestamp overflow: system clock exceeds i32 range (Y2038), saturating");
-            SATURATED_TIME
-        }
-        Err(e) => return Err(e.into()),
-    };
+/// Plain-Rust projection of a `sensor_msgs/CameraInfo` payload, decoupled
+/// from the CDR-backed wire type. Lets live capture and record/replay
+/// share the same shape: the live path builds it from `Args` at startup,
+/// the record path serializes it into the sidecar, and the replay path
+/// deserializes it back without re-running the JSON / CLI parsers.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CameraInfoFields {
+    pub frame_id: String,
+    pub width: u32,
+    pub height: u32,
+    pub distortion_model: String,
+    pub d: Vec<f64>,
+    pub k: [f64; 9],
+    pub r: [f64; 9],
+    pub p: [f64; 12],
+    pub binning_x: u32,
+    pub binning_y: u32,
+    pub roi: RoiFields,
+}
 
-    let msg = if !args.cam_info_path.is_empty() {
-        let file = match File::open(&args.cam_info_path) {
-            Ok(v) => v,
-            Err(e) => {
-                return Err(Box::from(format!(
-                    "Cannot open file {:?}: {e:?}",
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RoiFields {
+    pub x_offset: u32,
+    pub y_offset: u32,
+    pub height: u32,
+    pub width: u32,
+    pub do_rectify: bool,
+}
+
+impl From<RoiFields> for RegionOfInterest {
+    fn from(r: RoiFields) -> Self {
+        RegionOfInterest {
+            x_offset: r.x_offset,
+            y_offset: r.y_offset,
+            height: r.height,
+            width: r.width,
+            do_rectify: r.do_rectify,
+        }
+    }
+}
+
+impl CameraInfoFields {
+    /// Compute the fields that would populate a live `/camera/info` message
+    /// from `Args`. Reads the optional calibration JSON at
+    /// `args.cam_info_path`; falls back to reasonable defaults when not
+    /// provided.
+    pub(crate) fn from_args(args: &Args) -> Result<Self, Box<dyn Error>> {
+        let (width, height, distortion_model, d, k, r, p) = if !args.cam_info_path.is_empty() {
+            let file = File::open(&args.cam_info_path)
+                .map_err(|e| format!("Cannot open file {:?}: {e:?}", &args.cam_info_path))?;
+            let json: serde_json::Value = serde_json::from_reader(file).map_err(|e| {
+                format!(
+                    "Cannot parse camera info JSON from {:?}: {e}",
                     &args.cam_info_path
+                )
+            })?;
+            let bypass = json["bypass"].as_bool().unwrap_or(false);
+            let dewarp_configs = &json["dewarpConfigArray"];
+            if !dewarp_configs.is_array() {
+                return Err(Box::from("Did not find dewarpConfigArray as an array"));
+            }
+            let dewarp_config = &dewarp_configs[0];
+            let d: Vec<f64> = if bypass {
+                let distortion_coeff = dewarp_config["distortion_coeff"].as_array();
+                match distortion_coeff {
+                    Some(v) => v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect(),
+                    None => {
+                        return Err(Box::from("Did not find distortion_coeff as an array"));
+                    }
+                }
+            } else {
+                // the camera driver already applies this distortion correction, so we
+                // set it to zero, as ROS expects the camera info to contain the distortion
+                // information of the image coming from the camera
+                vec![0.0; 5]
+            };
+
+            let camera_matrix = dewarp_config["camera_matrix"].as_array();
+            let kv: Vec<f64> = match camera_matrix {
+                Some(v) => v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect(),
+                None => return Err(Box::from("Did not find camera_matrix as an array")),
+            };
+            if kv.len() != 9 {
+                return Err(Box::from(format!(
+                    "Expected exactly 9 elements in camera_matrix array but found {}",
+                    kv.len()
                 )));
             }
-        };
-        let json: serde_json::Value =
-            serde_json::from_reader(file).expect("file should be proper JSON");
-        let bypass = json["bypass"].as_bool().unwrap_or(false);
-        let dewarp_configs = &json["dewarpConfigArray"];
-        if !dewarp_configs.is_array() {
-            return Err(Box::from("Did not find dewarpConfigArray as an array"));
-        }
-        let dewarp_config = &dewarp_configs[0];
-        let d = if bypass {
-            let distortion_coeff = dewarp_config["distortion_coeff"].as_array();
-            match distortion_coeff {
-                Some(v) => v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect(),
-                None => {
-                    return Err(Box::from("Did not find distortion_coeff as an array"));
-                }
-            }
+            let p = [
+                kv[0], kv[1], kv[2], 0.0, kv[3], kv[4], kv[5], 0.0, kv[6], kv[7], kv[8], 0.0,
+            ];
+            let k = [
+                kv[0], kv[1], kv[2], kv[3], kv[4], kv[5], kv[6], kv[7], kv[8],
+            ];
+
+            let width = dewarp_config["source_image"]["width"]
+                .as_f64()
+                .unwrap_or_else(|| {
+                    error!("Could not find camera width in camera info json");
+                    1920.0
+                }) as u32;
+            let height = dewarp_config["source_image"]["height"]
+                .as_f64()
+                .unwrap_or_else(|| {
+                    error!("Could not find camera height in camera info json");
+                    1080.0
+                }) as u32;
+            let r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+            (width, height, "plumb_bob", d, k, r, p)
         } else {
-            // the camera driver already applies this distortion correction, so we
-            // set it to zero, as ROS expects the camera info to contain the distortion
-            // information of the image coming from the camera
-            vec![0.0; 5]
+            let k = [1270.0, 0.0, 960.0, 0.0, 1270.0, 540.0, 0.0, 0.0, 1.0];
+            let p = [
+                k[0], k[1], k[2], 0.0, k[3], k[4], k[5], 0.0, k[6], k[7], k[8], 0.0,
+            ];
+            let r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+            (1920, 1080, "plumb_bob", vec![0.0; 5], k, r, p)
         };
 
-        let camera_matrix = dewarp_config["camera_matrix"].as_array();
-        let k: Vec<f64> = match camera_matrix {
-            Some(v) => v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect(),
-            None => return Err(Box::from("Did not find camera_matrix as an array")),
-        };
-        if k.len() != 9 {
-            return Err(Box::from(format!(
-                "Expected exactly 9 elements in distortion_coeff array but found {}",
-                d.len()
-            )));
-        }
-        let p = [
-            k[0], k[1], k[2], 0.0, k[3], k[4], k[5], 0.0, k[6], k[7], k[8], 0.0,
-        ];
-        // TODO: Is there an easier way to do this conversion?
-        let k = [k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7], k[8]];
-
-        let width = dewarp_config["source_image"]["width"]
-            .as_f64()
-            .unwrap_or_else(|| {
-                error!("Could not find camera width in camera info json");
-                1920.0
-            }) as u32;
-        let height = dewarp_config["source_image"]["height"]
-            .as_f64()
-            .unwrap_or_else(|| {
-                error!("Could not find camera height in camera info json");
-                1080.0
-            }) as u32;
-        let r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-
-        CameraInfo {
-            header: std_msgs::Header {
-                stamp,
-                frame_id: args.camera_frame_id.clone(),
-            },
+        Ok(CameraInfoFields {
+            frame_id: args.camera_frame_id.clone(),
             width,
             height,
-            distortion_model: String::from("plumb_bob"),
+            distortion_model: distortion_model.to_string(),
             d,
             k,
             r,
             p,
             binning_x: 1,
             binning_y: 1,
-            roi: RegionOfInterest {
+            roi: RoiFields {
                 x_offset: 0,
                 y_offset: 0,
                 height,
                 width,
                 do_rectify: false,
             },
-        }
-    } else {
-        let k = [1270.0, 0.0, 960.0, 0.0, 1270.0, 540.0, 0.0, 0.0, 1.0];
-        let p = [
-            k[0], k[1], k[2], 0.0, k[3], k[4], k[5], 0.0, k[6], k[7], k[8], 0.0,
-        ];
-        let width = 1920;
-        let height = 1080;
-        CameraInfo {
-            header: std_msgs::Header {
-                stamp,
-                frame_id: args.camera_frame_id.clone(),
-            },
-            width,
-            height,
-            distortion_model: String::from("plumb_bob"),
-            d: vec![0.0; 5],
-            k,
-            r: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-            p,
-            binning_x: 1,
-            binning_y: 1,
-            roi: RegionOfInterest {
-                x_offset: 0,
-                y_offset: 0,
-                height,
-                width,
-                do_rectify: false,
-            },
-        }
-    };
+        })
+    }
 
-    Ok(msg)
+    /// Serialize these fields into a fresh `sensor_msgs/CameraInfo` CDR
+    /// buffer stamped with the current wall-clock time.
+    pub(crate) fn build_msg(&self) -> Result<CameraInfo<Vec<u8>>, Box<dyn Error>> {
+        let stamp = match timestamp() {
+            Ok(t) => t,
+            Err(TimestampError::Overflow) => {
+                warn!("Timestamp overflow: system clock exceeds i32 range (Y2038), saturating");
+                SATURATED_TIME
+            }
+            Err(e) => return Err(e.into()),
+        };
+        Ok(CameraInfo::new(
+            stamp,
+            &self.frame_id,
+            self.height,
+            self.width,
+            &self.distortion_model,
+            &self.d,
+            self.k,
+            self.r,
+            self.p,
+            self.binning_x,
+            self.binning_y,
+            self.roi.into(),
+        )?)
+    }
 }
 
-fn build_tf_msg(args: &Args) -> TransformStamped {
-    let stamp = match timestamp() {
-        Ok(t) => t,
-        Err(TimestampError::Overflow) => {
-            warn!("Timestamp overflow: system clock exceeds i32 range (Y2038), saturating");
-            SATURATED_TIME
-        }
-        Err(e) => {
-            warn!("Failed to get timestamp: {e}");
-            Time { sec: 0, nanosec: 0 }
-        }
-    };
+/// Plain-Rust projection of a `geometry_msgs/TransformStamped` for
+/// `/tf_static`. Same motivation as [`CameraInfoFields`].
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TfStaticFields {
+    pub base_frame_id: String,
+    pub child_frame_id: String,
+    /// Translation vector (x, y, z).
+    pub translation: [f64; 3],
+    /// Rotation quaternion (x, y, z, w).
+    pub rotation: [f64; 4],
+}
 
-    TransformStamped {
-        header: Header {
-            frame_id: args.base_frame_id.clone(),
-            stamp,
-        },
-        child_frame_id: args.camera_frame_id.clone(),
-        transform: Transform {
+impl TfStaticFields {
+    pub(crate) fn from_args(args: &Args) -> Self {
+        TfStaticFields {
+            base_frame_id: args.base_frame_id.clone(),
+            child_frame_id: args.camera_frame_id.clone(),
+            translation: [args.cam_tf_vec[0], args.cam_tf_vec[1], args.cam_tf_vec[2]],
+            rotation: [
+                args.cam_tf_quat[0],
+                args.cam_tf_quat[1],
+                args.cam_tf_quat[2],
+                args.cam_tf_quat[3],
+            ],
+        }
+    }
+
+    pub(crate) fn build_msg(&self) -> Result<TransformStamped<Vec<u8>>, Box<dyn Error>> {
+        let stamp = match timestamp() {
+            Ok(t) => t,
+            Err(TimestampError::Overflow) => {
+                warn!("Timestamp overflow: system clock exceeds i32 range (Y2038), saturating");
+                SATURATED_TIME
+            }
+            Err(e) => {
+                warn!("Failed to get timestamp: {e}");
+                Time { sec: 0, nanosec: 0 }
+            }
+        };
+
+        let transform = Transform {
             translation: Vector3 {
-                x: args.cam_tf_vec[0],
-                y: args.cam_tf_vec[1],
-                z: args.cam_tf_vec[2],
+                x: self.translation[0],
+                y: self.translation[1],
+                z: self.translation[2],
             },
             rotation: Quaternion {
-                x: args.cam_tf_quat[0],
-                y: args.cam_tf_quat[1],
-                z: args.cam_tf_quat[2],
-                w: args.cam_tf_quat[3],
+                x: self.rotation[0],
+                y: self.rotation[1],
+                z: self.rotation[2],
+                w: self.rotation[3],
             },
-        },
+        };
+
+        Ok(TransformStamped::new(
+            stamp,
+            &self.base_frame_id,
+            &self.child_frame_id,
+            transform,
+        )?)
     }
 }
 
@@ -1136,5 +1429,212 @@ impl ClockOffset {
             sec,
             nanosec: real_nsec as u32,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Build an `Args` pre-populated with the clap defaults so tests can
+    /// flip individual fields without rebuilding the whole struct.
+    fn default_args() -> Args {
+        Args::parse_from(["edgefirst-camera"])
+    }
+
+    #[test]
+    fn validate_accepts_live_capture_with_no_record_or_replay() {
+        let args = default_args();
+        validate_record_replay_args(&args).expect("plain live path must validate");
+    }
+
+    #[test]
+    fn validate_record_requires_h264() {
+        let mut args = default_args();
+        args.record = Some(PathBuf::from("/tmp/not-written.h264"));
+        args.h264 = false;
+        let err = validate_record_replay_args(&args).unwrap_err().to_string();
+        assert!(
+            err.contains("--record") && err.contains("--h264"),
+            "expected record-requires-h264 error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_record_with_h264_is_ok() {
+        let mut args = default_args();
+        args.record = Some(PathBuf::from("/tmp/not-written.h264"));
+        args.h264 = true;
+        validate_record_replay_args(&args).unwrap();
+    }
+
+    #[test]
+    fn validate_replay_rejects_jpeg() {
+        let mut args = default_args();
+        args.replay = Some(PathBuf::from("/tmp/not-read.h264"));
+        args.jpeg = true;
+        let err = validate_record_replay_args(&args).unwrap_err().to_string();
+        assert!(
+            err.contains("--replay") && err.contains("--jpeg"),
+            "expected replay-rejects-jpeg error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_replay_rejects_h264_tiles() {
+        let mut args = default_args();
+        args.replay = Some(PathBuf::from("/tmp/not-read.h264"));
+        args.h264_tiles = true;
+        let err = validate_record_replay_args(&args).unwrap_err().to_string();
+        assert!(
+            err.contains("--replay") && err.contains("--h264-tiles"),
+            "expected replay-rejects-tiles error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_replay_with_h264_forward_is_ok() {
+        let mut args = default_args();
+        args.replay = Some(PathBuf::from("/tmp/not-read.h264"));
+        args.h264 = true;
+        validate_record_replay_args(&args).unwrap();
+    }
+
+    #[test]
+    fn camera_info_fields_from_args_with_no_json_path_uses_defaults() {
+        let mut args = default_args();
+        args.cam_info_path = String::new();
+        let f = CameraInfoFields::from_args(&args).unwrap();
+        assert_eq!(f.width, 1920);
+        assert_eq!(f.height, 1080);
+        assert_eq!(f.distortion_model, "plumb_bob");
+        assert_eq!(f.d.len(), 5);
+        assert!(f.d.iter().all(|&v| v == 0.0));
+        // Default k has 1270 on the principal-axis focals and 960/540 on
+        // the principal point for 1920x1080.
+        assert_eq!(f.k[0], 1270.0);
+        assert_eq!(f.k[4], 1270.0);
+        assert_eq!(f.k[2], 960.0);
+        assert_eq!(f.k[5], 540.0);
+        assert_eq!(f.binning_x, 1);
+        assert_eq!(f.binning_y, 1);
+        assert_eq!(f.roi.width, 1920);
+        assert_eq!(f.roi.height, 1080);
+        assert!(!f.roi.do_rectify);
+    }
+
+    #[test]
+    fn camera_info_fields_rejects_bad_camera_matrix_length() {
+        // Write a calibration JSON with camera_matrix of length 8 to hit
+        // the length-validation branch and confirm the error message
+        // points at camera_matrix (Copilot PR #6 feedback).
+        let tmp = std::env::temp_dir();
+        let pid = std::process::id();
+        let path = tmp.join(format!("edgefirst_cam_info_bad_matrix_{pid}.json"));
+        std::fs::write(
+            &path,
+            r#"{
+                "bypass": false,
+                "dewarpConfigArray": [{
+                    "camera_matrix": [1,2,3,4,5,6,7,8],
+                    "source_image": {"width": 1920, "height": 1080}
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let mut args = default_args();
+        args.cam_info_path = path.to_string_lossy().into_owned();
+        let err = CameraInfoFields::from_args(&args).unwrap_err().to_string();
+        assert!(
+            err.contains("camera_matrix"),
+            "error must reference camera_matrix, got: {err}"
+        );
+        assert!(
+            err.contains("8"),
+            "error must include actual length (8), got: {err}"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn camera_info_fields_rejects_malformed_json() {
+        // A non-JSON file at cam_info_path used to panic via
+        // `.expect("file should be proper JSON")`; now it must surface a
+        // structured error that names the offending file.
+        let tmp = std::env::temp_dir();
+        let pid = std::process::id();
+        let path = tmp.join(format!("edgefirst_cam_info_bad_json_{pid}.json"));
+        std::fs::write(&path, b"this is not valid json {").unwrap();
+
+        let mut args = default_args();
+        args.cam_info_path = path.to_string_lossy().into_owned();
+        let err = CameraInfoFields::from_args(&args).unwrap_err().to_string();
+        assert!(
+            err.to_lowercase().contains("parse"),
+            "error must say it failed to parse, got: {err}"
+        );
+        assert!(
+            err.contains(args.cam_info_path.as_str()),
+            "error must include the offending file path, got: {err}"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn camera_info_fields_rejects_missing_dewarp_array() {
+        let tmp = std::env::temp_dir();
+        let pid = std::process::id();
+        let path = tmp.join(format!("edgefirst_cam_info_no_array_{pid}.json"));
+        std::fs::write(&path, r#"{"dewarpConfigArray": "not_an_array"}"#).unwrap();
+
+        let mut args = default_args();
+        args.cam_info_path = path.to_string_lossy().into_owned();
+        let err = CameraInfoFields::from_args(&args).unwrap_err().to_string();
+        assert!(err.to_lowercase().contains("dewarp"));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn tf_static_fields_from_args_mirrors_cli_shape() {
+        let args = default_args();
+        let tf = TfStaticFields::from_args(&args);
+        // The defaults may evolve, but base/child frame IDs must always
+        // come from the CLI strings and the arrays must have the
+        // expected arity.
+        assert_eq!(tf.base_frame_id, args.base_frame_id);
+        assert_eq!(tf.child_frame_id, args.camera_frame_id);
+        assert_eq!(tf.translation.len(), 3);
+        assert_eq!(tf.rotation.len(), 4);
+    }
+
+    #[test]
+    fn tf_static_fields_build_msg_produces_nonempty_cdr() {
+        let args = default_args();
+        let tf = TfStaticFields::from_args(&args);
+        let msg = tf.build_msg().expect("tf CDR build must succeed");
+        assert!(!msg.as_cdr().is_empty());
+    }
+
+    #[test]
+    fn camera_info_fields_build_msg_produces_nonempty_cdr() {
+        let mut args = default_args();
+        args.cam_info_path = String::new();
+        let info = CameraInfoFields::from_args(&args).unwrap();
+        let msg = info.build_msg().expect("info CDR build must succeed");
+        assert!(!msg.as_cdr().is_empty());
+    }
+
+    #[test]
+    fn colorimetry_default_is_all_unknown_empty_strings() {
+        let c = Colorimetry::default();
+        assert!(c.space.is_empty());
+        assert!(c.transfer.is_empty());
+        assert!(c.encoding.is_empty());
+        assert!(c.range.is_empty());
     }
 }

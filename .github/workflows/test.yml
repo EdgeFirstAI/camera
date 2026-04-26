@@ -157,15 +157,13 @@ jobs:
 
       - name: Run unit tests with coverage
         run: |
-          # This is a binary-only crate with no library unit tests
-          # Integration tests require hardware (DMA heap) and run on imx8mp runner
-          # Generate a minimal coverage report for CI purposes
-          echo "Note: No library unit tests in this crate (binary-only)"
-          echo "Coverage is collected from integration tests on hardware runner"
-          
-          # Create empty coverage file so artifact upload doesn't fail
-          # Real coverage comes from hardware tests
-          touch coverage.lcov
+          # The binary crate has #[cfg(test)] unit tests in src/main.rs
+          # and src/sidecar.rs (sidecar serde round-trip, arg validation,
+          # CameraInfoFields/TfStaticFields behavior). These do not touch
+          # videostream APIs so they run fine on the GH-hosted runners
+          # without the libvideostream.so runtime. cargo-llvm-cov drives
+          # the build + test + lcov-export flow in one shot.
+          cargo llvm-cov --bin edgefirst-camera --lcov --output-path coverage.lcov
 
       - name: Build instrumented binary for integration tests (aarch64 only)
         if: matrix.platform.name == 'aarch64'
@@ -251,11 +249,11 @@ jobs:
           # Keep in sync with the videostream crate version in Cargo.toml.
           # The on-target runtime library must expose every symbol the binary
           # calls — e.g. vsl_camera_buffer_bytes_per_line added in 2.4.
-          VIDEOSTREAM_VERSION: 2.4.0
+          VIDEOSTREAM_VERSION: 2.5.1
           # SHA-256 of videostream-${VIDEOSTREAM_VERSION}-linux-aarch64.zip
           # from the GitHub release assets. Pins the runtime library against
           # tampering or silent re-issue. Update alongside VIDEOSTREAM_VERSION.
-          VIDEOSTREAM_SHA256: e7a2787f591cb9ca9bc93eb36402a88ab8bac5ef478248383b9bc8015e665235
+          VIDEOSTREAM_SHA256: a6a0d92d51b3d3d273279000c9eefc5df0e1e2ad965d73205eff035c05b4a981
         run: |
           set -euo pipefail
           ARCHIVE="videostream-${VIDEOSTREAM_VERSION}-linux-aarch64.zip"
@@ -312,6 +310,57 @@ jobs:
               TEST_FAILED=1
             fi
           }
+
+          # Test 3b: Record H.264 to file (10 seconds) — exercises the
+          # record tap in h264_task plus the sidecar writer.
+          echo ""
+          echo "=== Recording H.264 to file (10 seconds) ==="
+          RECORD_FILE="/tmp/edgefirst-record-test.h264"
+          rm -f "$RECORD_FILE" "${RECORD_FILE%.h264}.json"
+          timeout --signal=TERM --kill-after=5 10 \
+            ./instrumented-binaries/edgefirst-camera --h264 --record "$RECORD_FILE" 2>&1 || {
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 124 ]; then
+              echo "✓ Record ran for 10 seconds"
+            else
+              echo "Record test failed with exit code $EXIT_CODE"
+              TEST_FAILED=1
+            fi
+          }
+          if [ -s "$RECORD_FILE" ]; then
+            echo "✓ Recorded .h264 non-empty: $(stat -c %s "$RECORD_FILE") bytes"
+          else
+            echo "✗ Recorded .h264 is missing or empty"
+            TEST_FAILED=1
+          fi
+          if [ -s "${RECORD_FILE%.h264}.json" ]; then
+            echo "✓ Sidecar .json present"
+            python3 -c "import json; json.load(open('${RECORD_FILE%.h264}.json'))" && \
+              echo "✓ Sidecar parses as JSON" || { echo "✗ Sidecar not valid JSON"; TEST_FAILED=1; }
+          else
+            echo "✗ Sidecar .json missing"
+            TEST_FAILED=1
+          fi
+
+          # Test 3c: Replay the recorded file (10 seconds) — exercises
+          # the decoder loop, replay publish path, and sidecar loader.
+          echo ""
+          echo "=== Replaying recorded file (10 seconds) ==="
+          if [ -s "$RECORD_FILE" ] && [ -s "${RECORD_FILE%.h264}.json" ]; then
+            timeout --signal=TERM --kill-after=5 10 \
+              ./instrumented-binaries/edgefirst-camera --replay "$RECORD_FILE" --replay-loop 2>&1 || {
+              EXIT_CODE=$?
+              if [ $EXIT_CODE -eq 124 ]; then
+                echo "✓ Replay ran for 10 seconds"
+              else
+                echo "Replay test failed with exit code $EXIT_CODE"
+                TEST_FAILED=1
+              fi
+            }
+          else
+            echo "Skipping replay: record artifacts missing"
+          fi
+          rm -f "$RECORD_FILE" "${RECORD_FILE%.h264}.json"
 
           # Test 4: Run instrumented integration test binaries
           # These tests exit cleanly and WILL generate profraw coverage files

@@ -357,16 +357,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cdr"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9617422bf43fde9280707a7e90f8f7494389c182f5c70b0f67592d0f06d41dfa"
-dependencies = [
- "byteorder",
- "serde",
-]
-
-[[package]]
 name = "cesu8"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -891,7 +881,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "edgefirst-camera"
-version = "2.6.1"
+version = "2.7.0"
 dependencies = [
  "clap",
  "console-subscriber",
@@ -902,6 +892,7 @@ dependencies = [
  "g2d-sys",
  "kanal",
  "libc",
+ "serde",
  "serde_json",
  "serial_test",
  "tokio",
@@ -919,16 +910,13 @@ dependencies = [
 
 [[package]]
 name = "edgefirst-schemas"
-version = "1.5.2"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a38f2f880e7d354285969632de9096911b3170698369aba165240159d77126d"
+checksum = "8894a1708c980f586053711dc6183e870c4e3a288dcbd2b08af4bdee14031757"
 dependencies = [
  "cbindgen",
- "cdr",
  "errno",
  "libc",
- "serde",
- "serde_derive",
 ]
 
 [[package]]
@@ -4074,9 +4062,9 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "videostream"
-version = "2.4.0"
+version = "2.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18bdae562ac87fdf352413c6b7c706dec40843dc32e8b78e7f5f460222e6ad15"
+checksum = "10801cddb88f9d6dd3a611472a725702987f302078b45a26f90c64ba853bc6be"
 dependencies = [
  "dma-buf 0.5.0",
  "log",
@@ -4086,9 +4074,9 @@ dependencies = [
 
 [[package]]
 name = "videostream-sys"
-version = "2.4.0"
+version = "2.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65c0ca6ec83cde3c5250c1ed999723140a085f247113fd1bd42bee31a334adbf"
+checksum = "26ab48499fddf4374b9fbbf5460cdeeabfd785730b27f3393af9496c9a8f0044"
 dependencies = [
  "bindgen",
  "libloading 0.9.0",
