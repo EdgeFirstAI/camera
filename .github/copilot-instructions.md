@@ -86,14 +86,14 @@ cd src && cargo build  # Where are we now?
 - **Language**: Rust (edition 2021)
 - **Build system**: Cargo with workspace configuration
 - **Key dependencies**:
-  - `zenoh 1.6.2` - Transport and ROS2 bridge compatibility
-  - `tokio 1.48.0` - Async runtime with multi-threaded executor
-  - `videostream 2.1.4` - Camera interface (V4L2 backend with codec API support)
-  - `edgefirst-schemas 1.5.2` - ROS2 message schemas with serde_cdr
+  - `zenoh 1.10.0` - Transport and ROS2 bridge compatibility
+  - `tokio 1.53.1` - Async runtime with multi-threaded executor
+  - `videostream 2.5.3` - Camera interface (V4L2 backend with codec API support)
+  - `edgefirst-schemas 4.0.0` - ROS2 message schemas with zero-copy CDR builders
   - `tracing-tracy` - Performance profiling (Tracy profiler integration)
   - `turbojpeg` - JPEG encoding with SIMD (require-simd feature)
   - `dma-heap/dma-buf` - Zero-copy DMA buffer management
-  - `g2d-sys 1.2.0` - NXP G2D hardware acceleration bindings (crates.io, Apache-2.0)
+  - `g2d-sys 1.3.1` - NXP G2D hardware acceleration bindings (crates.io, Apache-2.0)
   - `kanal` - Fast bounded SPSC/MPMC channels for inter-thread communication
   - `clap` - CLI argument parsing with derive and env features
 - **Target platforms**:

@@ -11,7 +11,7 @@ use clap::Parser;
 use edgefirst_camera::image::{encode_jpeg, Image, ImageManager, Rotation, RGBA};
 use edgefirst_schemas::{
     builtin_interfaces::{self, Time},
-    edgefirst_msgs::{CameraFrame, CameraPlaneView},
+    edgefirst_msgs::{CameraFrame, TensorFields, TensorPlaneView},
     foxglove_msgs::FoxgloveCompressedVideo,
     geometry_msgs::{Quaternion, Transform, TransformStamped, Vector3},
     sensor_msgs::{CameraInfo, CompressedImage, RegionOfInterest},
@@ -387,8 +387,8 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     }
 
     // Colorimetry is resolved once at camera init time and constant for the
-    // session. Populate CameraFrame's four colorimetry fields from it on
-    // every publish without a per-frame FFI call.
+    // session. Populate the embedded Tensor's four colorimetry fields from
+    // it on every publish without a per-frame FFI call.
     let colorimetry = Colorimetry::from_camera(&cam);
 
     let tf_fields = TfStaticFields::from_args(&args);
@@ -480,8 +480,8 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     let mut index = 0;
 
     // The camera fourcc is set at open() time and constant for the
-    // session, so the CameraFrame.format string can be computed once
-    // and reused. Lazily initialized from the first buffer to avoid an
+    // session, so the Tensor.format string can be computed once and
+    // reused. Lazily initialized from the first buffer to avoid an
     // extra `cam.read()` outside the loop. Avoids a per-frame
     // allocation in the hot publish path.
     let mut fourcc_str: Option<String> = None;
@@ -883,12 +883,12 @@ fn build_jpeg_msg(
         .then(|| plot!("jpeg_kb", (jpeg.len() / 1024) as f64));
 
     info_span!("jpeg_publish").in_scope(|| {
-        let msg = CompressedImage::new(
-            clock_offset.to_realtime(ts),
-            &args.camera_frame_id,
-            "jpeg",
-            &jpeg,
-        )?;
+        let msg = CompressedImage::builder()
+            .stamp(clock_offset.to_realtime(ts))
+            .frame_id(args.camera_frame_id.as_str())
+            .format("jpeg")
+            .data(jpeg.as_ref())
+            .build()?;
         let bytes = ZBytes::from(msg.into_cdr());
         let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/CompressedImage");
         Ok((bytes, enc))
@@ -905,7 +905,12 @@ fn build_h264_msg(
     frame_id: &str,
 ) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
     info_span!("h264_publish").in_scope(|| {
-        let msg = FoxgloveCompressedVideo::new(stamp, frame_id, data, "h264")?;
+        let msg = FoxgloveCompressedVideo::builder()
+            .stamp(stamp)
+            .frame_id(frame_id)
+            .data(data)
+            .format("h264")
+            .build()?;
         let bytes = ZBytes::from(msg.into_cdr());
         let enc = Encoding::APPLICATION_CDR.with_schema("foxglove_msgs/msg/CompressedVideo");
         Ok((bytes, enc))
@@ -921,8 +926,12 @@ fn build_tile_video_msg(
 ) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
     info_span!("h264_tile_publish").in_scope(|| {
         let frame_id = format!("{}_{:?}", args.camera_frame_id, tile_pos).to_lowercase();
-        let msg =
-            FoxgloveCompressedVideo::new(clock_offset.to_realtime(ts), &frame_id, data, "h264")?;
+        let msg = FoxgloveCompressedVideo::builder()
+            .stamp(clock_offset.to_realtime(ts))
+            .frame_id(frame_id.as_str())
+            .data(data)
+            .format("h264")
+            .build()?;
         let bytes = ZBytes::from(msg.into_cdr());
         let enc = Encoding::APPLICATION_CDR.with_schema("foxglove_msgs/msg/CompressedVideo");
         Ok((bytes, enc))
@@ -933,7 +942,7 @@ fn build_tile_video_msg(
 /// published [`CameraFrame`]. V4L2 resolves these at `vsl_camera_init_device`
 /// time and they are constant for the session, so we pay the FFI cost once.
 /// Fields are empty strings when the driver returned V4L2 `_DEFAULT` or a
-/// value outside the CameraFrame.msg vocabulary — matching the schema's
+/// value outside the Tensor.msg vocabulary — matching the schema's
 /// `""` = unknown convention.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Colorimetry {
@@ -964,6 +973,28 @@ impl Colorimetry {
     }
 }
 
+/// HAL Modular Tensor ABI codes carried (not interpreted) by schemas 4.0.
+/// `storage_kind = 2` is `EfStorageKind::DmaBuf`; `dtype = 0` is
+/// `EfDtype::U8` (`I8` is 1). See `edgefirst-tensor-abi` — schemas must
+/// not grow a parallel enum.
+const TENSOR_STORAGE_KIND_DMA_BUF: u32 = 2;
+const TENSOR_DTYPE_U8: u32 = 0;
+
+/// Bytes per addressing-grid sample along the width axis.
+///
+/// Tensor `shape` is `[height, width]`, not the byte layout. Packed YUYV
+/// stores two bytes per pixel; NV12 luma is one; RGB variants follow bpp.
+/// Empty strides are only valid for densely packed C-order, so any
+/// format whose last-dim stride is not 1 must be explicit.
+fn pixel_stride_bytes(format: &str) -> i64 {
+    match format {
+        "YUYV" | "UYVY" | "YVYU" | "VYUY" => 2,
+        "RGB3" | "BGR3" => 3,
+        "RGBA" | "RGBX" | "BGRA" | "BGRX" | "ARGB" | "ABGR" => 4,
+        _ => 1,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_camera_frame_msg(
     stamp: builtin_interfaces::Time,
@@ -981,35 +1012,48 @@ pub(crate) fn build_camera_frame_msg(
     // Single-plane, contiguous DMA-BUF. Plane 0 covers the whole buffer;
     // for packed formats (YUYV) that is the entire image, for NV12 the
     // chroma plane lives inside the same fd via its natural offset but
-    // is not described by a second CameraPlane entry until videostream
+    // is not described by a second TensorPlane entry until videostream
     // exposes multi-plane offsets (known limitation, tracked in the
     // 2.7.0 release notes).
-    let plane = CameraPlaneView {
-        fd: plane_fd,
+    let shape = [height as u64, width as u64];
+    let strides = [plane_stride as i64, pixel_stride_bytes(format)];
+    let plane = TensorPlaneView {
+        handle: plane_fd as i64,
         offset: 0,
-        stride: plane_stride,
-        size: plane_len,
-        used: plane_len,
+        stride: plane_stride as u64,
+        size: plane_len as u64,
+        used: plane_len as u64,
+        modifier: 0,
+        handle_bytes: &[],
         data: &[],
     };
-
-    let msg = CameraFrame::new(
-        stamp,
-        frame_id,
-        seq,
+    let tensor = TensorFields {
+        storage_kind: TENSOR_STORAGE_KIND_DMA_BUF,
         pid,
-        width,
-        height,
-        format,
-        &colorimetry.space,
-        &colorimetry.transfer,
-        &colorimetry.encoding,
-        &colorimetry.range,
-        /* fence_fd: */ -1,
-        &[plane],
-    )?;
+        fence_fd: -1,
+        dtype: TENSOR_DTYPE_U8,
+        quant_axis: -2,
+        shape: &shape,
+        strides: &strides,
+        quant_scales: &[],
+        quant_zero_points: &[],
+        format: format.into(),
+        color_space: colorimetry.space.as_str().into(),
+        color_transfer: colorimetry.transfer.as_str().into(),
+        color_encoding: colorimetry.encoding.as_str().into(),
+        color_range: colorimetry.range.as_str().into(),
+        planes: std::slice::from_ref(&plane),
+    };
 
-    let bytes = ZBytes::from(msg.into_cdr());
+    let mut buf = Vec::new();
+    CameraFrame::builder()
+        .stamp(stamp)
+        .frame_id(frame_id)
+        .seq(seq)
+        .tensor(&tensor)
+        .encode_into_vec(&mut buf)?;
+
+    let bytes = ZBytes::from(buf);
     let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/CameraFrame");
     Ok((bytes, enc))
 }
@@ -1119,11 +1163,11 @@ impl CameraInfoFields {
     pub(crate) fn from_args(args: &Args) -> Result<Self, Box<dyn Error>> {
         let (width, height, distortion_model, d, k, r, p) = if !args.cam_info_path.is_empty() {
             let file = File::open(&args.cam_info_path)
-                .map_err(|e| format!("Cannot open file {:?}: {e:?}", &args.cam_info_path))?;
+                .map_err(|e| format!("Cannot open file {:?}: {e:?}", args.cam_info_path))?;
             let json: serde_json::Value = serde_json::from_reader(file).map_err(|e| {
                 format!(
                     "Cannot parse camera info JSON from {:?}: {e}",
-                    &args.cam_info_path
+                    args.cam_info_path
                 )
             })?;
             let bypass = json["bypass"].as_bool().unwrap_or(false);
@@ -1221,20 +1265,20 @@ impl CameraInfoFields {
             }
             Err(e) => return Err(e.into()),
         };
-        Ok(CameraInfo::new(
-            stamp,
-            &self.frame_id,
-            self.height,
-            self.width,
-            &self.distortion_model,
-            &self.d,
-            self.k,
-            self.r,
-            self.p,
-            self.binning_x,
-            self.binning_y,
-            self.roi.into(),
-        )?)
+        Ok(CameraInfo::builder()
+            .stamp(stamp)
+            .frame_id(self.frame_id.as_str())
+            .height(self.height)
+            .width(self.width)
+            .distortion_model(self.distortion_model.as_str())
+            .d(&self.d)
+            .k(self.k)
+            .r(self.r)
+            .p(self.p)
+            .binning_x(self.binning_x)
+            .binning_y(self.binning_y)
+            .roi(self.roi.into())
+            .build()?)
     }
 }
 
@@ -1292,12 +1336,12 @@ impl TfStaticFields {
             },
         };
 
-        Ok(TransformStamped::new(
-            stamp,
-            &self.base_frame_id,
-            &self.child_frame_id,
-            transform,
-        )?)
+        Ok(TransformStamped::builder()
+            .stamp(stamp)
+            .frame_id(self.base_frame_id.as_str())
+            .child_frame_id(self.child_frame_id.as_str())
+            .transform(transform)
+            .build()?)
     }
 }
 
@@ -1636,5 +1680,55 @@ mod tests {
         assert!(c.transfer.is_empty());
         assert!(c.encoding.is_empty());
         assert!(c.range.is_empty());
+    }
+
+    #[test]
+    fn camera_frame_embeds_tensor_with_dma_plane() {
+        let colorimetry = Colorimetry {
+            space: "bt709".into(),
+            transfer: "bt709".into(),
+            encoding: "bt601".into(),
+            range: "limited".into(),
+        };
+        let (payload, _enc) = build_camera_frame_msg(
+            Time { sec: 1, nanosec: 2 },
+            "camera",
+            42,
+            1000,
+            1920,
+            1080,
+            "YUYV",
+            7,
+            3840,
+            1920 * 1080 * 2,
+            &colorimetry,
+        )
+        .expect("CameraFrame CDR build must succeed");
+
+        let raw = payload.to_bytes();
+        let cf = CameraFrame::<&[u8]>::from_cdr(raw.as_ref()).unwrap();
+        assert_eq!(cf.seq(), 42);
+        assert_eq!(cf.frame_id(), "camera");
+        assert_eq!(cf.stamp(), Time { sec: 1, nanosec: 2 });
+
+        let t = cf.tensor();
+        assert_eq!(t.storage_kind(), TENSOR_STORAGE_KIND_DMA_BUF);
+        // Literal HAL ABI value: EfDtype::U8 = 0 (I8 = 1). Do not
+        // assert against TENSOR_DTYPE_U8 or a mistyped constant would
+        // hide the same class of error this test exists to catch.
+        assert_eq!(t.dtype(), 0);
+        assert_eq!(t.pid(), 1000);
+        assert_eq!(t.fence_fd(), -1);
+        assert_eq!(t.format(), "YUYV");
+        assert_eq!(t.color_space(), "bt709");
+        assert_eq!(t.color_encoding(), "bt601");
+        assert_eq!(t.shape().collect::<Vec<_>>(), vec![1080, 1920]);
+        assert_eq!(t.strides().collect::<Vec<_>>(), vec![3840, 2]);
+        assert_eq!(t.num_planes(), 1);
+        let plane = t.plane_at(0).unwrap();
+        assert_eq!(plane.handle, 7);
+        assert_eq!(plane.stride, 3840);
+        assert_eq!(plane.size, 1920 * 1080 * 2);
+        assert!(plane.data.is_empty());
     }
 }
