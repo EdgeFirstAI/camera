@@ -16,9 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Type::new()` constructors were removed in 4.0.
 - Updated remaining Cargo dependencies to current crates.io releases,
   including `zenoh` 1.6.2 → 1.10.0, `videostream` 2.5.1 → 2.5.3,
-  `g2d-sys` 1.2.0 → 1.3.1, `tokio` 1.48.0 → 1.53.1, and Tracy
-  (`tracing-tracy` 0.11 → 0.12, `tracy-client` 0.18 → 0.19).
-  Package version is 2.8.0.
+  `g2d-sys` 1.2.0 → 1.3.1, and `tokio` 1.48.0 → 1.53.1.
 
 ## [2.7.0] - 2026-04-23
 
