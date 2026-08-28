@@ -50,7 +50,7 @@ graph TB
     end
     
     subgraph "Zenoh Topics"
-        DMATop["rt/camera/dma<br/>edgefirst_msgs/DmaBuffer"]
+        DMATop["camera/frame<br/>edgefirst_msgs/CameraFrame"]
         InfoTop["rt/camera/info<br/>sensor_msgs/CameraInfo"]
         JPEGTop["rt/camera/jpeg<br/>sensor_msgs/CompressedImage"]
         H264Top["rt/camera/h264<br/>foxglove_msgs/CompressedVideo"]
@@ -98,7 +98,7 @@ graph TB
 **Responsibilities:**
 
 - Camera frame capture (V4L2 blocking read)
-- DMA buffer publishing (Zenoh async)
+- CameraFrame publishing (Zenoh async)
 - CameraInfo publishing (Zenoh async)
 - Frame distribution to encoder threads
 - FPS monitoring and warnings
@@ -112,7 +112,7 @@ The main thread executes within a Tokio async runtime (`#[tokio::main]`) and per
 3. **Thread Spawning:** Start dedicated encoder threads (JPEG, H264, TensorFlow)
 4. **Main Capture Loop:**
    - **BLOCKING:** Read frame from camera using V4L2 API
-   - **ASYNC:** Publish DMA buffer metadata to Zenoh
+   - **ASYNC:** Publish CameraFrame (embedded Tensor + dma-buf plane) to Zenoh
    - **ASYNC:** Publish camera calibration info to Zenoh
    - **NON-BLOCKING:** Send frames to encoder threads via channels
         jpeg_tx.try_send(Image::from_camera(&camera_buffer));
@@ -346,34 +346,28 @@ graph TD
 
 All messages are serialized using **ROS2 CDR (Common Data Representation)** for compatibility with ROS2 ecosystems.
 
-### DMA Buffer Message
+### Camera Frame Message
 
 ```rust
-// edgefirst_msgs/DmaBuffer
-pub struct DmaBuf {
-    pub header: Header,           // ROS2 standard header (timestamp, frame_id)
-    pub fd: u32,                  // DMA file descriptor
-    pub offset: u64,              // Offset into DMA buffer
-    pub stride: u32,              // Row stride (bytes per line)
-    pub width: u32,               // Image width
-    pub height: u32,              // Image height
-    pub size: u64,                // Total buffer size
-    pub format: String,           // Pixel format ("YUYV", "NV12", etc.)
-    pub src_pid: u32,             // Source process ID (for SCM_RIGHTS)
-}
+// edgefirst_msgs/CameraFrame  (schemas 4.0: Header + seq + embedded Tensor)
+let cf = CameraFrame::from_cdr(&payload)?;
+let t = cf.tensor();
+// t.shape() == [height, width]; t.format() == "YUYV" / "NV12" / ...
+// t.pid() + plane.handle: dma-buf fd in the producer process
+// t.color_space / color_transfer / color_encoding / color_range
 ```
 
 **Consumer Workflow:**
 
-Downstream vision models consume DMA buffers by:
+Downstream vision models consume camera frames by:
 
-1. Extracting file descriptor from Zenoh message metadata
-2. Memory-mapping the DMA buffer using `mmap()` with `MAP_SHARED`
-3. Creating image view with dimensions, stride, and format from message
-4. Processing image data (inference, display, recording)
-5. Unmapping buffer and closing file descriptor
+1. Decoding `edgefirst_msgs/CameraFrame` and reading the embedded `Tensor`
+2. Waiting on `tensor.fence_fd` when it is >= 0 (`pidfd_getfd` + `poll`)
+3. Mapping each `TensorPlane` with `handle >= 0` via `pidfd_getfd` / `mmap`
+4. Processing `[0, used)` of each plane (inference, display, recording)
+5. Unmapping buffers and closing imported file descriptors
 
-This zero-copy approach allows multiple consumers to access the same physical memory without data duplication. File descriptor passing uses Zenoh's metadata capabilities.
+This zero-copy approach allows multiple consumers to access the same physical memory without data duplication. File descriptor passing uses the producer `pid` plus per-plane handles.
 
 ### Camera Info Message
 
@@ -630,7 +624,7 @@ Key semantics:
 
 - **Multi-fd planes are not supported.** Recorded files carry a
   single H.264 stream; on replay, the decoded Frame is published with
-  a single `CameraPlane` entry covering the whole dma-buf, matching
+  a single `TensorPlane` entry covering the whole dma-buf, matching
   the live path's behavior. Non-contiguous MPLANE fourccs cannot be
   fully expressed until `videostream` exposes per-plane fds.
 - **No seek.** Replay is forward-only.

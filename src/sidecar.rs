@@ -236,7 +236,7 @@ mod tests {
     fn colorimetry_serializes_with_schema_field_names() {
         let bytes = serde_json::to_vec(&sample_sidecar()).unwrap();
         let s = std::str::from_utf8(&bytes).unwrap();
-        // Field names on the wire must match CameraFrame.msg vocabulary.
+        // Field names on the wire must match Tensor.msg colorimetry vocabulary.
         assert!(s.contains("\"color_space\""));
         assert!(s.contains("\"color_transfer\""));
         assert!(s.contains("\"color_encoding\""));

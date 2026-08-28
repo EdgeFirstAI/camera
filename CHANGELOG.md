@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Bumped `edgefirst-schemas` from 3.1.0 to 4.0.0. `CameraFrame` is now
+  `Header` + `seq` + an embedded `Tensor` (byte-identical to
+  `TensorStamped`); width, height, format, colorimetry, pid, and fence
+  live on the tensor. Planes are `TensorPlane` (`handle: i64` instead of
+  `fd: i32`). All buffer-backed messages use `Type::builder()` —
+  `Type::new()` constructors were removed in 4.0.
+- Updated remaining Cargo dependencies to current crates.io releases,
+  including `zenoh` 1.6.2 → 1.10.0, `videostream` 2.5.1 → 2.5.3,
+  `g2d-sys` 1.2.0 → 1.3.1, and `tokio` 1.48.0 → 1.53.1.
+
 ## [2.7.0] - 2026-04-23
 
 Full cutover to the `edgefirst_msgs/CameraFrame` schema from the legacy

@@ -169,7 +169,7 @@ edgefirst-camera \
 **Zero-Copy DMA for Vision Models:**
 
 ```bash
-# Publishes raw DMA buffers on rt/camera/dma
+# Publishes CameraFrame (embedded Tensor + dma-buf planes) on camera/frame
 # Consume these in your vision model for lowest latency
 edgefirst-camera --camera /dev/video0
 ```
@@ -179,7 +179,7 @@ edgefirst-camera --camera /dev/video0
 ```bash
 edgefirst-camera \
   --camera /dev/video1 \
-  --dma-topic rt/front_camera/dma \
+  --frame-topic camera/front/frame \
   --jpeg-topic rt/front_camera/jpeg \
   --h264-topic rt/front_camera/h264 \
   --mirror both \
@@ -196,7 +196,7 @@ The camera node publishes standard ROS2 message types using CDR serialization, e
 
 | Topic (default) | Message Type | Description |
 |----------------|--------------|-------------|
-| `rt/camera/dma` | `edgefirst_msgs/DmaBuffer` | Zero-copy DMA buffer metadata |
+| `camera/frame` | `edgefirst_msgs/CameraFrame` | Zero-copy frame: Header + seq + embedded Tensor (dma-buf planes) |
 | `rt/camera/info` | `sensor_msgs/CameraInfo` | Camera calibration and metadata |
 | `rt/camera/jpeg` | `sensor_msgs/CompressedImage` | JPEG-compressed frames |
 | `rt/camera/h264` | `foxglove_msgs/CompressedVideo` | H.264 video stream |
@@ -226,19 +226,18 @@ rqt_image_view  # View JPEG stream
 For latency-critical vision pipelines, the camera node provides direct DMA buffer access:
 
 ```rust
-// Vision model consuming DMA buffers (pseudo-code)
-subscriber.on_message(|msg: DmaBuf| {
-    // msg.fd: DMA file descriptor
-    // msg.width, msg.height, msg.format: Buffer metadata
-    // msg.offset, msg.stride: Memory layout
+// Vision model consuming CameraFrame tensors (pseudo-code)
+subscriber.on_message(|payload| {
+    let cf = CameraFrame::from_cdr(payload)?;
+    let t = cf.tensor();
+    let plane = t.plane_at(0)?;
+    // t.pid() + plane.handle: dma-buf fd in the producer
+    // t.shape(): [height, width]; t.format(): "YUYV" / "NV12" / ...
+    // plane.offset / stride / size / used: memory layout
 
-    // Map DMA buffer (zero-copy, no memory allocation)
-    let frame = map_dma_buffer(msg.fd, msg.offset, msg.size)?;
-
-    // Run inference directly on DMA buffer
+    let local_fd = pidfd_getfd(t.pid(), plane.handle as RawFd)?;
+    let frame = map_dma_buffer(local_fd, plane.offset, plane.size)?;
     model.infer(frame)?;
-
-    // No buffer copy, no deserialization overhead
 });
 ```
 
@@ -420,7 +419,7 @@ edgefirst-camera --replay capture.h264 --replay-loop
 edgefirst-camera --replay capture.h264 --replay-fps 15
 ```
 
-Replay publishes on the same topics and schemas as live capture — subscribers see identical on-wire data. `/camera/info`, `/tf_static`, and the `CameraFrame` colorimetry fields come from the sidecar, not from CLI flags (any `--cam-info-path`, `--cam-tf-*`, or `--base-frame-id` flags supplied at replay time are ignored with a warning).
+Replay publishes on the same topics and schemas as live capture — subscribers see identical on-wire data. `/camera/info`, `/tf_static`, and the CameraFrame tensor colorimetry fields come from the sidecar, not from CLI flags (any `--cam-info-path`, `--cam-tf-*`, or `--base-frame-id` flags supplied at replay time are ignored with a warning).
 
 The `rt/camera/h264` topic forwards the recorded Annex-B bytes **verbatim** — no re-encode. `camera/frame` is built from the decoded NV12 frame.
 
