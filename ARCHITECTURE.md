@@ -51,10 +51,10 @@ graph TB
     
     subgraph "Zenoh Topics"
         DMATop["camera/frame<br/>edgefirst_msgs/CameraFrame"]
-        InfoTop["rt/camera/info<br/>sensor_msgs/CameraInfo"]
-        JPEGTop["rt/camera/jpeg<br/>sensor_msgs/CompressedImage"]
-        H264Top["rt/camera/h264<br/>foxglove_msgs/CompressedVideo"]
-        TileTop["rt/camera/h264/tl,tr,bl,br<br/>foxglove_msgs/CompressedVideo"]
+        InfoTop["camera/info<br/>sensor_msgs/CameraInfo"]
+        JPEGTop["camera/jpeg<br/>sensor_msgs/CompressedImage"]
+        H264Top["camera/h264<br/>foxglove_msgs/CompressedVideo"]
+        TileTop["camera/h264/tl,tr,bl,br<br/>foxglove_msgs/CompressedVideo"]
     end
     
     Distribute -->|"kanal channel<br/>(size 1)"| JPEGThread
@@ -75,7 +75,7 @@ graph TB
     
     subgraph "Background Task (Tokio)"
         TFPub["TF Static Publisher<br/>1 Hz loop"]
-        TFTop["rt/tf_static<br/>geometry_msgs/TransformStamped"]
+        TFTop["tf_static<br/>geometry_msgs/TransformStamped"]
         TFPub --> TFTop
     end
 ```
@@ -256,7 +256,7 @@ The TF static publisher runs as a detached Tokio task spawned from the main asyn
 ```
 [Sleep] 1 second
    ↓
-[Publish] TransformStamped to rt/tf_static
+[Publish] TransformStamped to tf_static
    ↓
 [Repeat]
 ```
@@ -576,7 +576,7 @@ CameraBuffer → [G2D convert → H.264 encode]
   BufWriter<File>           build_h264_msg()
    (.h264 on disk)                │
                                   ▼
-                         Publisher.put (rt/camera/h264)
+                         Publisher.put (camera/h264)
 ```
 
 The sidecar is written once at `stream()` entry, before the first
@@ -598,7 +598,7 @@ reads the `.h264` file in 256 KiB chunks and emits decoded `Frame`s
        │
    ┌───┴──────────────┬────────────────────┬─────────────────┐
    ▼                  ▼                    ▼                 ▼
-camera/frame     rt/camera/h264     rt/camera/info      rt/tf_static
+camera/frame     camera/h264     camera/info      tf_static
 (CameraFrame)    (Annex-B bytes     (from sidecar,      (from sidecar,
                   forwarded          built at start,     built at start,
                   verbatim)          published/frame)    1 Hz background)
@@ -606,7 +606,7 @@ camera/frame     rt/camera/h264     rt/camera/info      rt/tf_static
 
 Key semantics:
 
-- **`rt/camera/h264` is byte-for-byte identical** to the recording —
+- **`camera/h264` is byte-for-byte identical** to the recording —
   the replay loop collects every byte the decoder consumes for each
   frame and forwards those bytes verbatim. No re-encode.
 - **`CameraFrame.seq` continues incrementing across loop boundaries**.

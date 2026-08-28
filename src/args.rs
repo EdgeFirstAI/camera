@@ -86,7 +86,7 @@ pub struct Args {
     pub frame_topic: String,
 
     /// Zenoh topic for camera calibration info (sensor_msgs/CameraInfo)
-    #[arg(long, default_value = "rt/camera/info")]
+    #[arg(long, default_value = "camera/info")]
     pub info_topic: String,
 
     /// Enable JPEG streaming output
@@ -94,7 +94,7 @@ pub struct Args {
     pub jpeg: bool,
 
     /// Zenoh topic for JPEG compressed images (sensor_msgs/CompressedImage)
-    #[arg(long, default_value = "rt/camera/jpeg")]
+    #[arg(long, default_value = "camera/jpeg")]
     pub jpeg_topic: String,
 
     /// Enable H.264 video streaming output
@@ -102,7 +102,7 @@ pub struct Args {
     pub h264: bool,
 
     /// Zenoh topic for H.264 video stream (foxglove_msgs/CompressedVideo)
-    #[arg(long, default_value = "rt/camera/h264")]
+    #[arg(long, default_value = "camera/h264")]
     pub h264_topic: String,
 
     /// H.264 encoding bitrate preset
@@ -117,7 +117,7 @@ pub struct Args {
     /// bottom-right
     #[arg(
         long,
-        default_value = "rt/camera/h264/tl rt/camera/h264/tr rt/camera/h264/bl rt/camera/h264/br",
+        default_value = "camera/h264/tl camera/h264/tr camera/h264/bl camera/h264/br",
         value_delimiter = ' ',
         num_args = 4
     )]
@@ -231,9 +231,33 @@ pub struct Args {
     no_multicast_scouting: bool,
 }
 
+/// System hostname used as the Zenoh session namespace.
+///
+/// Empty or `/`-containing hostnames would create unintended sub-keys, so we
+/// fall back to `"localhost"` and warn. Two devices both falling back would
+/// silently share a namespace; that is a deployment defect.
+fn zenoh_namespace() -> String {
+    let raw = gethostname::gethostname().to_string_lossy().into_owned();
+    if raw.is_empty() || raw.contains('/') {
+        tracing::warn!(
+            hostname = %raw,
+            "system hostname is empty or contains '/' — falling back to \"localhost\""
+        );
+        "localhost".into()
+    } else {
+        raw
+    }
+}
+
 impl From<Args> for Config {
     fn from(args: Args) -> Self {
         let mut config = Config::default();
+
+        // Session namespace = hostname: application keys are bare
+        // (`camera/frame`) and the wire form is `{hostname}/camera/frame`.
+        config
+            .insert_json5("namespace", &json!(zenoh_namespace()).to_string())
+            .unwrap();
 
         config
             .insert_json5("mode", &json!(args.mode).to_string())
@@ -264,5 +288,41 @@ impl From<Args> for Config {
             .unwrap();
 
         config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn zenoh_config_sets_namespace() {
+        let args = Args::parse_from(["edgefirst-camera"]);
+        let cfg = Config::from(args);
+        let ns: String = serde_json::from_str(&cfg.to_string())
+            .ok()
+            .and_then(|v: serde_json::Value| {
+                v.pointer("/namespace")
+                    .and_then(|n| n.as_str().map(String::from))
+            })
+            .expect("namespace should be set in config");
+        assert!(!ns.is_empty(), "namespace should be non-empty");
+        assert!(!ns.contains('/'), "namespace must not contain '/'");
+    }
+
+    #[test]
+    fn default_topics_have_no_rt_prefix() {
+        let args = Args::parse_from(["edgefirst-camera"]);
+        assert_eq!(args.frame_topic, "camera/frame");
+        assert_eq!(args.info_topic, "camera/info");
+        assert_eq!(args.jpeg_topic, "camera/jpeg");
+        assert_eq!(args.h264_topic, "camera/h264");
+        for topic in &args.h264_tiles_topics {
+            assert!(
+                !topic.starts_with("rt/"),
+                "tile topic {topic} still has rt/"
+            );
+        }
     }
 }

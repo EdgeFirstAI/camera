@@ -584,7 +584,7 @@ async fn tf_static(
     msg: ZBytes,
     enc: Encoding,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let topic = "rt/tf_static".to_string();
+    let topic = "tf_static".to_string();
     let mut interval = tokio::time::interval(Duration::from_secs(1));
 
     loop {
