@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Document that `MIRROR=both` (vflip+hflip) is required by default for the
+  upside-down Maivin/Raivin sensor mount.
 - Set the Zenoh session namespace to the system hostname and drop the `rt/`
   prefix from default key expressions. Wire keys are `{hostname}/camera/…`
   and `{hostname}/tf_static` (EDGEAI-1396).

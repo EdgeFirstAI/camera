@@ -40,8 +40,9 @@ STREAM_SIZE="1920 1080"
 # Mirror Setting
 # ---------------------------------------------------------------------------
 # Flip the camera image to correct for physical camera orientation.
+# Maivin and Raivin mount the sensor upside down, so both axes (vflip+hflip,
+# a 180-degree rotation) must be enabled by default.
 # Accepted values: none, horizontal, vertical, both
-# "both" is equivalent to a 180-degree rotation.
 MIRROR="both"
 
 # ---------------------------------------------------------------------------
@@ -63,7 +64,8 @@ H264_BITRATE="auto"
 # When the camera captures at 4K, the hardware encoder is limited to 1080p.
 # Enabling tiles splits each 4K frame into 4 non-overlapping 1080p quadrants
 # and encodes each independently. The four tile streams are published on
-# separate Zenoh topics (camera/h264/tl, /tr, /bl, /br).
+# separate Zenoh topics (camera/h264/tl, camera/h264/tr, camera/h264/bl,
+# camera/h264/br).
 # Only useful when CAMERA_SIZE is 3840x2160 or larger.
 H264_TILES="false"
 

@@ -180,8 +180,8 @@ edgefirst-camera --camera /dev/video0
 edgefirst-camera \
   --camera /dev/video1 \
   --frame-topic camera/front/frame \
-  --jpeg-topic front_camera/jpeg \
-  --h264-topic front_camera/h264 \
+  --jpeg-topic camera/front/jpeg \
+  --h264-topic camera/front/h264 \
   --mirror both \
   --stream-size 640 480
 ```
