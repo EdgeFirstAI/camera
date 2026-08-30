@@ -180,8 +180,8 @@ edgefirst-camera --camera /dev/video0
 edgefirst-camera \
   --camera /dev/video1 \
   --frame-topic camera/front/frame \
-  --jpeg-topic rt/front_camera/jpeg \
-  --h264-topic rt/front_camera/h264 \
+  --jpeg-topic camera/front/jpeg \
+  --h264-topic camera/front/h264 \
   --mirror both \
   --stream-size 640 480
 ```
@@ -197,14 +197,14 @@ The camera node publishes standard ROS2 message types using CDR serialization, e
 | Topic (default) | Message Type | Description |
 |----------------|--------------|-------------|
 | `camera/frame` | `edgefirst_msgs/CameraFrame` | Zero-copy frame: Header + seq + embedded Tensor (dma-buf planes) |
-| `rt/camera/info` | `sensor_msgs/CameraInfo` | Camera calibration and metadata |
-| `rt/camera/jpeg` | `sensor_msgs/CompressedImage` | JPEG-compressed frames |
-| `rt/camera/h264` | `foxglove_msgs/CompressedVideo` | H.264 video stream |
-| `rt/camera/h264/tl` | `foxglove_msgs/CompressedVideo` | 4K tile: top-left (1080p) |
-| `rt/camera/h264/tr` | `foxglove_msgs/CompressedVideo` | 4K tile: top-right (1080p) |
-| `rt/camera/h264/bl` | `foxglove_msgs/CompressedVideo` | 4K tile: bottom-left (1080p) |
-| `rt/camera/h264/br` | `foxglove_msgs/CompressedVideo` | 4K tile: bottom-right (1080p) |
-| `rt/tf_static` | `geometry_msgs/TransformStamped` | Camera frame transform |
+| `camera/info` | `sensor_msgs/CameraInfo` | Camera calibration and metadata |
+| `camera/jpeg` | `sensor_msgs/CompressedImage` | JPEG-compressed frames |
+| `camera/h264` | `foxglove_msgs/CompressedVideo` | H.264 video stream |
+| `camera/h264/tl` | `foxglove_msgs/CompressedVideo` | 4K tile: top-left (1080p) |
+| `camera/h264/tr` | `foxglove_msgs/CompressedVideo` | 4K tile: top-right (1080p) |
+| `camera/h264/bl` | `foxglove_msgs/CompressedVideo` | 4K tile: bottom-left (1080p) |
+| `camera/h264/br` | `foxglove_msgs/CompressedVideo` | 4K tile: bottom-right (1080p) |
+| `tf_static` | `geometry_msgs/TransformStamped` | Camera frame transform |
 
 **ROS2 Bridge Integration:**
 
@@ -217,7 +217,7 @@ zenoh-bridge-dds
 
 # View with ROS2 tools
 ros2 topic list
-ros2 topic echo /rt/camera/info
+ros2 topic echo /camera/info
 rqt_image_view  # View JPEG stream
 ```
 
@@ -271,10 +271,10 @@ For cameras with resolutions exceeding 1080p, the camera node automatically spli
 ```mermaid
 graph TB
     subgraph "4K Camera (3840×2160)"
-        TL["Top-Left<br/>1920×1080<br/>rt/camera/h264/tl"]
-        TR["Top-Right<br/>1920×1080<br/>rt/camera/h264/tr"]
-        BL["Bottom-Left<br/>1920×1080<br/>rt/camera/h264/bl"]
-        BR["Bottom-Right<br/>1920×1080<br/>rt/camera/h264/br"]
+        TL["Top-Left<br/>1920×1080<br/>camera/h264/tl"]
+        TR["Top-Right<br/>1920×1080<br/>camera/h264/tr"]
+        BL["Bottom-Left<br/>1920×1080<br/>camera/h264/bl"]
+        BR["Bottom-Right<br/>1920×1080<br/>camera/h264/br"]
     end
     
     Camera["4K Camera"] --> TL
@@ -320,10 +320,10 @@ edgefirst-camera --help
 
 **Topic Configuration:**
 
-- `--frame-topic <TOPIC>` - CameraFrame topic (default: `camera/frame`, no `rt/` prefix per schemas 3.1 convention)
-- `--info-topic <TOPIC>` - CameraInfo topic (default: `rt/camera/info`)
-- `--jpeg-topic <TOPIC>` - JPEG topic (default: `rt/camera/jpeg`)
-- `--h264-topic <TOPIC>` - H264 topic (default: `rt/camera/h264`)
+- `--frame-topic <TOPIC>` - CameraFrame topic (default: `camera/frame`)
+- `--info-topic <TOPIC>` - CameraInfo topic (default: `camera/info`)
+- `--jpeg-topic <TOPIC>` - JPEG topic (default: `camera/jpeg`)
+- `--h264-topic <TOPIC>` - H264 topic (default: `camera/h264`)
 
 **Performance Tuning:**
 
@@ -421,7 +421,7 @@ edgefirst-camera --replay capture.h264 --replay-fps 15
 
 Replay publishes on the same topics and schemas as live capture — subscribers see identical on-wire data. `/camera/info`, `/tf_static`, and the CameraFrame tensor colorimetry fields come from the sidecar, not from CLI flags (any `--cam-info-path`, `--cam-tf-*`, or `--base-frame-id` flags supplied at replay time are ignored with a warning).
 
-The `rt/camera/h264` topic forwards the recorded Annex-B bytes **verbatim** — no re-encode. `camera/frame` is built from the decoded NV12 frame.
+The `camera/h264` topic forwards the recorded Annex-B bytes **verbatim** — no re-encode. `camera/frame` is built from the decoded NV12 frame.
 
 **Not supported with `--replay`:** `--jpeg`, `--h264-tiles` (recorded files carry only the main H.264 stream). Use the live path if you need JPEG or tile output.
 
@@ -579,7 +579,7 @@ edgefirst-camera --camera-size 3840 2160 --h264-tiles
 zenoh-bridge-dds &
 
 # Check Zenoh can see publishers
-zenoh-cli query "/rt/**"
+zenoh-cli query "**"
 
 # Verify ROS2 topics
 ros2 topic list | grep camera

@@ -92,7 +92,7 @@ pub(crate) async fn run_replay(session: Session, args: Args) -> Result<(), Box<d
     let info_enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/CameraInfo");
 
     // Replay always forwards the recorded Annex-B verbatim on
-    // rt/camera/h264 — the file *is* H.264 by definition, so there is
+    // camera/h264 — the file *is* H.264 by definition, so there is
     // nothing to gate against. This matches the README's documented UX
     // (`--replay capture.h264` without `--h264` forwards H.264) and
     // avoids the trap of a replay run that publishes CameraFrame but
@@ -137,7 +137,7 @@ pub(crate) async fn run_replay(session: Session, args: Args) -> Result<(), Box<d
         }
 
         // Accumulate bytes fed into the decoder this frame. Forwarded
-        // verbatim to rt/camera/h264 so consumers get the same
+        // verbatim to camera/h264 so consumers get the same
         // Annex-B that was originally published on record.
         last_data.clear();
 
@@ -474,7 +474,7 @@ async fn publish_replayed_frame(
         .await
         .map_err(zerr)?;
 
-    // rt/camera/info — same content every frame, same cadence as the live path.
+    // camera/info — same content every frame, same cadence as the live path.
     publ_info
         .put(info_bytes.clone())
         .encoding(info_enc.clone())
@@ -482,7 +482,7 @@ async fn publish_replayed_frame(
         .await
         .map_err(zerr)?;
 
-    // rt/camera/h264 — forward the Annex-B bytes verbatim. We have them
+    // camera/h264 — forward the Annex-B bytes verbatim. We have them
     // in h264_bytes because the replay loop collected every byte the
     // decoder consumed for this frame.
     if !h264_bytes.is_empty() {
@@ -555,7 +555,7 @@ async fn tf_static_loop(
     msg: ZBytes,
     enc: Encoding,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let topic = "rt/tf_static".to_string();
+    let topic = "tf_static".to_string();
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     loop {
         interval.tick().await;
