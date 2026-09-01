@@ -9,10 +9,11 @@ that require attribution:
 
   * clap 4.6.6 (Apache-2.0 OR MIT)
   * console-subscriber 0.5.0 (MIT)
-  * dma-buf 0.4.0 (Custom License - see repository)
-  * dma-heap 0.4.1 (Custom License - see repository)
+  * dma-buf 0.4.0 (MIT)
+  * dma-heap 0.4.1 (MIT)
   * edgefirst-schemas 4.0.0 (Apache-2.0)
   * g2d-sys 1.3.1 (Apache-2.0)
+  * gethostname 1.1.0 (Apache-2.0)
   * kanal 0.1.0-pre8 (MIT)
   * libc 0.2.189 (Apache-2.0 OR MIT)
   * serde 1.0.229 (Apache-2.0 OR MIT)

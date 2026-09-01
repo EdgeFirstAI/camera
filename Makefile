@@ -12,10 +12,10 @@
 # ===========================================================================
 
 PROJECT_TYPE := rust
-SRC_DIRS := src g2d-sys/src tests benches
-TEST_CMD := cargo test --workspace
+SRC_DIRS := src tests benches
+TEST_CMD := cargo test --lib --bins
 VERSION_FILE := Cargo.toml
-VERSION_FILES := Cargo.toml g2d-sys/Cargo.toml CHANGELOG.md
+VERSION_FILES := Cargo.toml CHANGELOG.md
 
 # ===========================================================================
 # STANDARD TARGETS
@@ -26,7 +26,7 @@ help:
 	@echo "Available targets:"
 	@echo "  make format         - Format Rust code with cargo fmt"
 	@echo "  make lint           - Run cargo clippy"
-	@echo "  make test           - Run test suite"
+	@echo "  make test           - Run lib/bin unit tests (not G2D image tests)"
 	@echo "  make sbom           - Generate SBOM and check license policy"
 	@echo "  make verify-version - Verify version consistency across files"
 	@echo "  make pre-release    - Run all pre-release checks"
@@ -54,7 +54,7 @@ lint:
 # Run tests
 .PHONY: test
 test:
-	@echo "Running tests..."
+	@echo "Running lib/bin unit tests..."
 	@$(TEST_CMD)
 	@echo "✓ Tests complete"
 
