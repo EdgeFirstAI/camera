@@ -32,8 +32,9 @@ layout. Consumers must subscribe to `{hostname}/camera/…` and
   2.6.0). crates.io `g2d-sys` 1.3.1 remains the dependency.
 - `make test` runs lib and binary unit tests only. G2D image tests in
   `tests/test_image.rs` remain on-target (they need CMA/G2D).
-- NOTICE lists `gethostname` 1.1.0; license policy maps transitive
-  `dma-buf` 0.5.0 to MIT (same as 0.4.0).
+- NOTICE lists `gethostname` 1.1.0 and records `dma-buf`/`dma-heap` as
+  MIT (matching license-policy overrides, including transitive
+  `dma-buf` 0.5.0).
 
 ### Removed
 - Default key expressions no longer use the `rt/` prefix. Subscribe to
