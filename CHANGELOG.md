@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-09-01
+
+Hostname-namespaced Zenoh keys and the `edgefirst-schemas` 4.0 `CameraFrame`
+layout. Consumers must subscribe to `{hostname}/camera/…` and
+`{hostname}/tf_static`, and parse `CameraFrame` as Header + seq + Tensor.
+
 ### Changed
 - Document that `MIRROR=both` (vflip+hflip) is required by default for the
   upside-down Maivin/Raivin sensor mount.
@@ -22,6 +28,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated remaining Cargo dependencies to current crates.io releases,
   including `zenoh` 1.6.2 → 1.10.0, `videostream` 2.5.1 → 2.5.3,
   `g2d-sys` 1.2.0 → 1.3.1, and `tokio` 1.48.0 → 1.53.1.
+- SBOM and Makefile no longer scan a local `g2d-sys/` tree (removed in
+  2.6.0). crates.io `g2d-sys` 1.3.1 remains the dependency.
+- `make test` runs lib and binary unit tests only. G2D image tests in
+  `tests/test_image.rs` remain on-target (they need CMA/G2D).
+- NOTICE lists `gethostname` 1.1.0; license policy maps transitive
+  `dma-buf` 0.5.0 to MIT (same as 0.4.0).
+
+### Removed
+- Default key expressions no longer use the `rt/` prefix. Subscribe to
+  `{hostname}/camera/…` and `{hostname}/tf_static` instead of
+  `rt/camera/…` and `rt/tf_static`.
+- `Type::new()` constructors for buffer-backed schema messages (removed
+  in `edgefirst-schemas` 4.0; use `Type::builder()`). Plane file
+  descriptors are `TensorPlane.handle: i64` instead of `fd: i32`.
 
 ## [2.7.0] - 2026-04-23
 
@@ -300,7 +320,10 @@ ingest camera data from this release forward.
 - Environment variable control for H264 streaming
 - Flexible runtime configuration
 
-[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.6.0...HEAD
+[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.8.0...HEAD
+[2.8.0]: https://github.com/EdgeFirstAI/camera/compare/v2.7.0...v2.8.0
+[2.7.0]: https://github.com/EdgeFirstAI/camera/compare/v2.6.1...v2.7.0
+[2.6.1]: https://github.com/EdgeFirstAI/camera/compare/v2.6.0...v2.6.1
 [2.6.0]: https://github.com/EdgeFirstAI/camera/compare/v2.5.1...v2.6.0
 [2.5.1]: https://github.com/EdgeFirstAI/camera/compare/v2.5.0...v2.5.1
 [2.5.0]: https://github.com/EdgeFirstAI/camera/compare/v2.4.0...v2.5.0

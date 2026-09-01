@@ -12,10 +12,10 @@
 # ===========================================================================
 
 PROJECT_TYPE := rust
-SRC_DIRS := src g2d-sys/src tests benches
-TEST_CMD := cargo test --workspace
+SRC_DIRS := src tests benches
+TEST_CMD := cargo test --lib --bins
 VERSION_FILE := Cargo.toml
-VERSION_FILES := Cargo.toml g2d-sys/Cargo.toml CHANGELOG.md
+VERSION_FILES := Cargo.toml CHANGELOG.md
 
 # ===========================================================================
 # STANDARD TARGETS
