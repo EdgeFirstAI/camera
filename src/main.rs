@@ -402,7 +402,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     let colorimetry = Colorimetry::from_camera(&cam);
 
     let tf_fields = TfStaticFields::from_args(&args);
-    let info_fields = CameraInfoFields::from_args(&args)?;
+    let info_fields = CameraInfoFields::from_args(&args);
 
     // When --record is set, open the H.264 output file and the
     // matching sidecar before any frames flow. Order matters:
@@ -1307,6 +1307,18 @@ const SATURATED_TIME: builtin_interfaces::Time = builtin_interfaces::Time {
     nanosec: 999_999_999,
 };
 
+/// Geometry fields shared by the calibration loader and the built-in
+/// fallback: `(width, height, distortion_model, d, k, r, p)`.
+type Calibration = (
+    u32,
+    u32,
+    &'static str,
+    Vec<f64>,
+    [f64; 9],
+    [f64; 9],
+    [f64; 12],
+);
+
 /// Plain-Rust projection of a `sensor_msgs/CameraInfo` payload, decoupled
 /// from the CDR-backed wire type. Lets live capture and record/replay
 /// share the same shape: the live path builds it from `Args` at startup,
@@ -1349,84 +1361,42 @@ impl From<RoiFields> for RegionOfInterest {
 }
 
 impl CameraInfoFields {
-    /// Compute the fields that would populate a live `/camera/info` message
-    /// from `Args`. Reads the optional calibration JSON at
-    /// `args.cam_info_path`; falls back to reasonable defaults when not
-    /// provided.
-    pub(crate) fn from_args(args: &Args) -> Result<Self, Box<dyn Error>> {
-        let (width, height, distortion_model, d, k, r, p) = if !args.cam_info_path.is_empty() {
-            let file = File::open(&args.cam_info_path)
-                .map_err(|e| format!("Cannot open file {:?}: {e:?}", args.cam_info_path))?;
-            let json: serde_json::Value = serde_json::from_reader(file).map_err(|e| {
-                format!(
-                    "Cannot parse camera info JSON from {:?}: {e}",
-                    args.cam_info_path
-                )
-            })?;
-            let bypass = json["bypass"].as_bool().unwrap_or(false);
-            let dewarp_configs = &json["dewarpConfigArray"];
-            if !dewarp_configs.is_array() {
-                return Err(Box::from("Did not find dewarpConfigArray as an array"));
-            }
-            let dewarp_config = &dewarp_configs[0];
-            let d: Vec<f64> = if bypass {
-                let distortion_coeff = dewarp_config["distortion_coeff"].as_array();
-                match distortion_coeff {
-                    Some(v) => v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect(),
-                    None => {
-                        return Err(Box::from("Did not find distortion_coeff as an array"));
-                    }
-                }
-            } else {
-                // the camera driver already applies this distortion correction, so we
-                // set it to zero, as ROS expects the camera info to contain the distortion
-                // information of the image coming from the camera
-                vec![0.0; 5]
-            };
-
-            let camera_matrix = dewarp_config["camera_matrix"].as_array();
-            let kv: Vec<f64> = match camera_matrix {
-                Some(v) => v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect(),
-                None => return Err(Box::from("Did not find camera_matrix as an array")),
-            };
-            if kv.len() != 9 {
-                return Err(Box::from(format!(
-                    "Expected exactly 9 elements in camera_matrix array but found {}",
-                    kv.len()
-                )));
-            }
-            let p = [
-                kv[0], kv[1], kv[2], 0.0, kv[3], kv[4], kv[5], 0.0, kv[6], kv[7], kv[8], 0.0,
-            ];
-            let k = [
-                kv[0], kv[1], kv[2], kv[3], kv[4], kv[5], kv[6], kv[7], kv[8],
-            ];
-
-            let width = dewarp_config["source_image"]["width"]
-                .as_f64()
-                .unwrap_or_else(|| {
-                    error!("Could not find camera width in camera info json");
-                    1920.0
-                }) as u32;
-            let height = dewarp_config["source_image"]["height"]
-                .as_f64()
-                .unwrap_or_else(|| {
-                    error!("Could not find camera height in camera info json");
-                    1080.0
-                }) as u32;
-            let r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-
-            (width, height, "plumb_bob", d, k, r, p)
+    /// Compute the fields that would populate a live `/camera/info`
+    /// message from `Args`.
+    ///
+    /// Reads the calibration JSON at `args.cam_info_path` when one is
+    /// configured. A calibration that cannot be loaded -- absent,
+    /// unreadable, malformed, or structurally wrong -- is reported and
+    /// then treated exactly like no calibration at all: the node keeps
+    /// running on `default_calibration` and `camera/info` keeps
+    /// publishing. Calibration is only needed to describe the geometry on
+    /// that one topic, so losing it must not take the capture pipeline
+    /// down with it, and a subscriber that requires `camera/info` to
+    /// exist (edgefirst-fusion) must not be starved because one file went
+    /// missing under a service that was otherwise healthy.
+    pub(crate) fn from_args(args: &Args) -> Self {
+        let loaded = if args.cam_info_path.is_empty() {
+            None
         } else {
-            let k = [1270.0, 0.0, 960.0, 0.0, 1270.0, 540.0, 0.0, 0.0, 1.0];
-            let p = [
-                k[0], k[1], k[2], 0.0, k[3], k[4], k[5], 0.0, k[6], k[7], k[8], 0.0,
-            ];
-            let r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-            (1920, 1080, "plumb_bob", vec![0.0; 5], k, r, p)
+            match Self::load_calibration(&args.cam_info_path) {
+                Ok(fields) => Some(fields),
+                Err(e) => {
+                    warn!(
+                        path = %args.cam_info_path,
+                        error = %e,
+                        "cannot load camera calibration; falling back to built-in defaults -- \
+                         camera/info geometry is APPROXIMATE and not valid for projection or \
+                         sensor fusion"
+                    );
+                    None
+                }
+            }
         };
 
-        Ok(CameraInfoFields {
+        let (width, height, distortion_model, d, k, r, p) =
+            loaded.unwrap_or_else(Self::default_calibration);
+
+        CameraInfoFields {
             frame_id: args.camera_frame_id.clone(),
             width,
             height,
@@ -1444,7 +1414,92 @@ impl CameraInfoFields {
                 width,
                 do_rectify: false,
             },
-        })
+        }
+    }
+
+    /// The built-in fallback geometry, used when no calibration is
+    /// configured and when a configured one cannot be loaded. Nominal for
+    /// a 1080p sensor; it describes no particular lens.
+    fn default_calibration() -> Calibration {
+        let k = [1270.0, 0.0, 960.0, 0.0, 1270.0, 540.0, 0.0, 0.0, 1.0];
+        let p = [
+            k[0], k[1], k[2], 0.0, k[3], k[4], k[5], 0.0, k[6], k[7], k[8], 0.0,
+        ];
+        let r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        (1920, 1080, "plumb_bob", vec![0.0; 5], k, r, p)
+    }
+
+    /// Parse an isp-imx dewarp configuration into `CameraInfo` geometry.
+    fn load_calibration(path: &str) -> Result<Calibration, Box<dyn Error>> {
+        let file = File::open(path).map_err(|e| format!("Cannot open file {:?}: {e:?}", path))?;
+        let json: serde_json::Value = serde_json::from_reader(file)
+            .map_err(|e| format!("Cannot parse camera info JSON from {:?}: {e}", path))?;
+        let bypass = json["bypass"].as_bool().unwrap_or(false);
+        let dewarp_configs = &json["dewarpConfigArray"];
+        if !dewarp_configs.is_array() {
+            return Err(Box::from("Did not find dewarpConfigArray as an array"));
+        }
+        let dewarp_config = &dewarp_configs[0];
+        let d: Vec<f64> = if bypass {
+            let distortion_coeff = dewarp_config["distortion_coeff"].as_array();
+            match distortion_coeff {
+                Some(v) => Self::parse_f64_array(v, "distortion_coeff")?,
+                None => {
+                    return Err(Box::from("Did not find distortion_coeff as an array"));
+                }
+            }
+        } else {
+            // the camera driver already applies this distortion correction, so we
+            // set it to zero, as ROS expects the camera info to contain the distortion
+            // information of the image coming from the camera
+            vec![0.0; 5]
+        };
+
+        let camera_matrix = dewarp_config["camera_matrix"].as_array();
+        let kv: Vec<f64> = match camera_matrix {
+            Some(v) => Self::parse_f64_array(v, "camera_matrix")?,
+            None => return Err(Box::from("Did not find camera_matrix as an array")),
+        };
+        if kv.len() != 9 {
+            return Err(Box::from(format!(
+                "Expected exactly 9 elements in camera_matrix array but found {}",
+                kv.len()
+            )));
+        }
+        let p = [
+            kv[0], kv[1], kv[2], 0.0, kv[3], kv[4], kv[5], 0.0, kv[6], kv[7], kv[8], 0.0,
+        ];
+        let k = [
+            kv[0], kv[1], kv[2], kv[3], kv[4], kv[5], kv[6], kv[7], kv[8],
+        ];
+
+        let width = dewarp_config["source_image"]["width"]
+            .as_f64()
+            .ok_or("Did not find camera width in camera info json")? as u32;
+        let height = dewarp_config["source_image"]["height"]
+            .as_f64()
+            .ok_or("Did not find camera height in camera info json")? as u32;
+        let r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+        Ok((width, height, "plumb_bob", d, k, r, p))
+    }
+
+    /// Parse a JSON array into `f64`s, failing on the first non-numeric
+    /// element rather than silently coercing it to `0.0` -- a
+    /// structurally invalid calibration must not look successfully
+    /// loaded.
+    fn parse_f64_array(
+        values: &[serde_json::Value],
+        field: &str,
+    ) -> Result<Vec<f64>, Box<dyn Error>> {
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                v.as_f64()
+                    .ok_or_else(|| Box::<dyn Error>::from(format!("{field}[{i}] is not a number")))
+            })
+            .collect()
     }
 
     /// Serialize these fields into a fresh `sensor_msgs/CameraInfo` CDR
@@ -1846,7 +1901,7 @@ mod tests {
     fn camera_info_fields_from_args_with_no_json_path_uses_defaults() {
         let mut args = default_args();
         args.cam_info_path = String::new();
-        let f = CameraInfoFields::from_args(&args).unwrap();
+        let f = CameraInfoFields::from_args(&args);
         assert_eq!(f.width, 1920);
         assert_eq!(f.height, 1080);
         assert_eq!(f.distortion_model, "plumb_bob");
@@ -1865,11 +1920,41 @@ mod tests {
         assert!(!f.roi.do_rectify);
     }
 
+    /// A calibration that could not be loaded must leave the node running
+    /// on the same built-in defaults it uses when no path is configured
+    /// at all -- `camera/info` keeps publishing, with approximate
+    /// geometry, rather than the process dying over one unreadable file.
+    fn assert_built_in_defaults(f: &CameraInfoFields) {
+        assert_eq!(f.width, 1920);
+        assert_eq!(f.height, 1080);
+        assert_eq!(f.distortion_model, "plumb_bob");
+        assert_eq!(f.d.len(), 5);
+        assert!(f.d.iter().all(|&v| v == 0.0));
+        assert_eq!(f.k[0], 1270.0);
+        assert_eq!(f.k[4], 1270.0);
+        assert_eq!(f.k[2], 960.0);
+        assert_eq!(f.k[5], 540.0);
+    }
+
     #[test]
-    fn camera_info_fields_rejects_bad_camera_matrix_length() {
-        // Write a calibration JSON with camera_matrix of length 8 to hit
-        // the length-validation branch and confirm the error message
-        // points at camera_matrix (Copilot PR #6 feedback).
+    fn camera_info_fields_degrades_when_file_missing() {
+        // EDGEAI-1441: a CAM_INFO_PATH left pointing at a path that no
+        // longer exists (e.g. a stale /etc/default/camera carried across
+        // an image upgrade) used to abort the whole camera node.
+        let tmp = std::env::temp_dir();
+        let pid = std::process::id();
+        let path = tmp.join(format!("edgefirst_cam_info_absent_{pid}.json"));
+        std::fs::remove_file(&path).ok();
+
+        let mut args = default_args();
+        args.cam_info_path = path.to_string_lossy().into_owned();
+        let f = CameraInfoFields::from_args(&args);
+        assert_built_in_defaults(&f);
+    }
+
+    #[test]
+    fn camera_info_fields_degrades_on_bad_camera_matrix_length() {
+        // camera_matrix of length 8 hits the length-validation branch.
         let tmp = std::env::temp_dir();
         let pid = std::process::id();
         let path = tmp.join(format!("edgefirst_cam_info_bad_matrix_{pid}.json"));
@@ -1887,24 +1972,14 @@ mod tests {
 
         let mut args = default_args();
         args.cam_info_path = path.to_string_lossy().into_owned();
-        let err = CameraInfoFields::from_args(&args).unwrap_err().to_string();
-        assert!(
-            err.contains("camera_matrix"),
-            "error must reference camera_matrix, got: {err}"
-        );
-        assert!(
-            err.contains("8"),
-            "error must include actual length (8), got: {err}"
-        );
+        let f = CameraInfoFields::from_args(&args);
+        assert_built_in_defaults(&f);
 
         std::fs::remove_file(&path).ok();
     }
 
     #[test]
-    fn camera_info_fields_rejects_malformed_json() {
-        // A non-JSON file at cam_info_path used to panic via
-        // `.expect("file should be proper JSON")`; now it must surface a
-        // structured error that names the offending file.
+    fn camera_info_fields_degrades_on_malformed_json() {
         let tmp = std::env::temp_dir();
         let pid = std::process::id();
         let path = tmp.join(format!("edgefirst_cam_info_bad_json_{pid}.json"));
@@ -1912,21 +1987,14 @@ mod tests {
 
         let mut args = default_args();
         args.cam_info_path = path.to_string_lossy().into_owned();
-        let err = CameraInfoFields::from_args(&args).unwrap_err().to_string();
-        assert!(
-            err.to_lowercase().contains("parse"),
-            "error must say it failed to parse, got: {err}"
-        );
-        assert!(
-            err.contains(args.cam_info_path.as_str()),
-            "error must include the offending file path, got: {err}"
-        );
+        let f = CameraInfoFields::from_args(&args);
+        assert_built_in_defaults(&f);
 
         std::fs::remove_file(&path).ok();
     }
 
     #[test]
-    fn camera_info_fields_rejects_missing_dewarp_array() {
+    fn camera_info_fields_degrades_on_missing_dewarp_array() {
         let tmp = std::env::temp_dir();
         let pid = std::process::id();
         let path = tmp.join(format!("edgefirst_cam_info_no_array_{pid}.json"));
@@ -1934,8 +2002,92 @@ mod tests {
 
         let mut args = default_args();
         args.cam_info_path = path.to_string_lossy().into_owned();
-        let err = CameraInfoFields::from_args(&args).unwrap_err().to_string();
-        assert!(err.to_lowercase().contains("dewarp"));
+        let f = CameraInfoFields::from_args(&args);
+        assert_built_in_defaults(&f);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn camera_info_fields_degrades_on_non_numeric_camera_matrix_element() {
+        // A `camera_matrix` with the right length but a non-numeric
+        // element used to be silently coerced to 0.0, producing a bogus
+        // intrinsics matrix that looked "successfully loaded" and never
+        // triggered the fallback warning.
+        let tmp = std::env::temp_dir();
+        let pid = std::process::id();
+        let path = tmp.join(format!("edgefirst_cam_info_nan_matrix_{pid}.json"));
+        std::fs::write(
+            &path,
+            r#"{
+                "bypass": false,
+                "dewarpConfigArray": [{
+                    "camera_matrix": [1,2,3,4,"bad",6,7,8,9],
+                    "source_image": {"width": 1920, "height": 1080}
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let mut args = default_args();
+        args.cam_info_path = path.to_string_lossy().into_owned();
+        let f = CameraInfoFields::from_args(&args);
+        assert_built_in_defaults(&f);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn camera_info_fields_degrades_on_non_numeric_distortion_coeff_element() {
+        let tmp = std::env::temp_dir();
+        let pid = std::process::id();
+        let path = tmp.join(format!("edgefirst_cam_info_nan_distortion_{pid}.json"));
+        std::fs::write(
+            &path,
+            r#"{
+                "bypass": true,
+                "dewarpConfigArray": [{
+                    "distortion_coeff": [1,2,3,4,null],
+                    "camera_matrix": [1,2,3,4,5,6,7,8,9],
+                    "source_image": {"width": 1920, "height": 1080}
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let mut args = default_args();
+        args.cam_info_path = path.to_string_lossy().into_owned();
+        let f = CameraInfoFields::from_args(&args);
+        assert_built_in_defaults(&f);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn camera_info_fields_degrades_on_missing_source_image_dimensions() {
+        // A missing width/height used to be logged as an `error!` and
+        // silently substituted (1920x1080) while still returning `Ok`,
+        // so `from_args` never emitted the fallback warning even though
+        // the calibration was structurally incomplete.
+        let tmp = std::env::temp_dir();
+        let pid = std::process::id();
+        let path = tmp.join(format!("edgefirst_cam_info_no_dims_{pid}.json"));
+        std::fs::write(
+            &path,
+            r#"{
+                "bypass": false,
+                "dewarpConfigArray": [{
+                    "camera_matrix": [1,2,3,4,5,6,7,8,9],
+                    "source_image": {}
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let mut args = default_args();
+        args.cam_info_path = path.to_string_lossy().into_owned();
+        let f = CameraInfoFields::from_args(&args);
+        assert_built_in_defaults(&f);
 
         std::fs::remove_file(&path).ok();
     }
@@ -1965,7 +2117,7 @@ mod tests {
     fn camera_info_fields_build_msg_produces_nonempty_cdr() {
         let mut args = default_args();
         args.cam_info_path = String::new();
-        let info = CameraInfoFields::from_args(&args).unwrap();
+        let info = CameraInfoFields::from_args(&args);
         let msg = info.build_msg().expect("info CDR build must succeed");
         assert!(!msg.as_cdr().is_empty());
     }

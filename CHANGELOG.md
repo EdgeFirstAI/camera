@@ -17,6 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `H264_TILES_FPS=0` no longer divides by zero and takes the tile
   encoder threads down silently. Zero now means no limit, and is
   documented as such (EDGEAI-1403).
+- Topic and frame-ID options are now settable from the environment.
+  `--frame-topic`, `--info-topic`, `--jpeg-topic`, `--h264-topic`,
+  `--h264-tiles-topics`, `--base-frame-id` and `--camera-frame-id` had a
+  command-line flag but no `env` binding, so `FRAME_TOPIC` and friends
+  were silently ignored -- including from `/etc/default/camera`, which
+  systemd applies as an `EnvironmentFile`. All seven are now documented
+  in `camera.default` (EDGEAI-1438).
+- A calibration file that cannot be loaded no longer aborts the node.
+  `CAM_INFO_PATH` pointing at a missing, unreadable, malformed, or
+  structurally invalid JSON is now reported with a warning and the node
+  continues on the same built-in defaults it uses when no calibration is
+  configured, so `camera/info` keeps publishing. Calibration only
+  describes the geometry on that one topic; losing it should not take the
+  capture pipeline down, nor starve a subscriber that requires
+  `camera/info` to exist (EDGEAI-1441).
 
 ### Added
 - Dropped-frame counters. Frames discarded because an encoder channel was

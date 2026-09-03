@@ -82,11 +82,11 @@ pub struct Args {
     /// Zenoh topic for multi-plane camera frame (edgefirst_msgs/CameraFrame).
     /// Supersedes `--dma-topic` from 2.6.x. The new topic drops the `rt/`
     /// prefix per the schemas 3.1 convention for newly introduced topics.
-    #[arg(long, default_value = "camera/frame")]
+    #[arg(long, env = "FRAME_TOPIC", default_value = "camera/frame")]
     pub frame_topic: String,
 
     /// Zenoh topic for camera calibration info (sensor_msgs/CameraInfo)
-    #[arg(long, default_value = "camera/info")]
+    #[arg(long, env = "INFO_TOPIC", default_value = "camera/info")]
     pub info_topic: String,
 
     /// Enable JPEG streaming output
@@ -94,7 +94,7 @@ pub struct Args {
     pub jpeg: bool,
 
     /// Zenoh topic for JPEG compressed images (sensor_msgs/CompressedImage)
-    #[arg(long, default_value = "camera/jpeg")]
+    #[arg(long, env = "JPEG_TOPIC", default_value = "camera/jpeg")]
     pub jpeg_topic: String,
 
     /// Enable H.264 video streaming output
@@ -102,7 +102,7 @@ pub struct Args {
     pub h264: bool,
 
     /// Zenoh topic for H.264 video stream (foxglove_msgs/CompressedVideo)
-    #[arg(long, default_value = "camera/h264")]
+    #[arg(long, env = "H264_TOPIC", default_value = "camera/h264")]
     pub h264_topic: String,
 
     /// H.264 encoding bitrate preset
@@ -117,6 +117,7 @@ pub struct Args {
     /// bottom-right
     #[arg(
         long,
+        env = "H264_TILES_TOPICS",
         default_value = "camera/h264/tl camera/h264/tr camera/h264/bl camera/h264/br",
         value_delimiter = ' ',
         num_args = 4
@@ -199,11 +200,11 @@ pub struct Args {
     pub cam_tf_quat: Vec<f64>,
 
     /// TF frame ID for robot base
-    #[arg(long, default_value = "base_link")]
+    #[arg(long, env = "BASE_FRAME_ID", default_value = "base_link")]
     pub base_frame_id: String,
 
     /// TF frame ID for camera optical frame
-    #[arg(long, default_value = "camera_optical")]
+    #[arg(long, env = "CAMERA_FRAME_ID", default_value = "camera_optical")]
     pub camera_frame_id: String,
 
     /// Enable Tokio async runtime console for debugging
@@ -294,7 +295,7 @@ impl From<Args> for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     #[test]
     fn zenoh_config_sets_namespace() {
@@ -309,6 +310,37 @@ mod tests {
             .expect("namespace should be set in config");
         assert!(!ns.is_empty(), "namespace should be non-empty");
         assert!(!ns.contains('/'), "namespace must not contain '/'");
+    }
+
+    /// Every configurable option must be reachable from
+    /// `/etc/default/camera`, which systemd applies as an
+    /// `EnvironmentFile`. An option with a CLI flag but no `env` binding
+    /// is silently unconfigurable there -- it does not error, it just
+    /// ignores the setting (EDGEAI-1438).
+    #[test]
+    fn topic_and_frame_args_are_env_bound() {
+        let cmd = Args::command();
+        for (id, env) in [
+            ("frame_topic", "FRAME_TOPIC"),
+            ("info_topic", "INFO_TOPIC"),
+            ("jpeg_topic", "JPEG_TOPIC"),
+            ("h264_topic", "H264_TOPIC"),
+            ("h264_tiles_topics", "H264_TILES_TOPICS"),
+            ("base_frame_id", "BASE_FRAME_ID"),
+            ("camera_frame_id", "CAMERA_FRAME_ID"),
+        ] {
+            let arg = cmd
+                .get_arguments()
+                .find(|a| a.get_id() == id)
+                .unwrap_or_else(|| panic!("no such argument: {id}"));
+            let bound = arg.get_env().map(|e| e.to_string_lossy().into_owned());
+            assert_eq!(
+                bound.as_deref(),
+                Some(env),
+                "--{} must be settable via {env}",
+                id.replace('_', "-")
+            );
+        }
     }
 
     #[test]
