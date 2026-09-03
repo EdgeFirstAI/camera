@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use serde_json::json;
 use std::path::PathBuf;
 use zenoh::config::{Config, WhatAmI};
@@ -97,8 +97,37 @@ pub struct Args {
     #[arg(long, env = "JPEG_TOPIC", default_value = "camera/jpeg")]
     pub jpeg_topic: String,
 
+    /// JPEG encoding quality (1-100)
+    ///
+    /// Was hardcoded at 100. 85 is visually equivalent for slightly less
+    /// work, but quality is a weak lever on cost: measured at 1080p30 on
+    /// a Verdin iMX8MP, enabling JPEG takes this process from 27% to 104%
+    /// CPU and 100 -> 85 recovers only ~3 of those 77 points. The cost is
+    /// the per-frame conversion and DCT, not the entropy coding.
+    #[arg(
+        long,
+        env = "JPEG_QUALITY",
+        default_value_t = 85,
+        value_parser = clap::value_parser!(u8).range(1..=100)
+    )]
+    pub jpeg_quality: u8,
+
     /// Enable H.264 video streaming output
-    #[arg(long, env = "H264")]
+    ///
+    /// On by default. H.264 is the stream every Maivin consumer expects,
+    /// and defaulting it off meant a bare `edgefirst-camera` published no
+    /// video at all -- invisible to the service, which sets H264 in
+    /// /etc/default/camera, but a repeated surprise when running the
+    /// binary by hand. Takes an optional value (`--h264 false`) so it can
+    /// still be turned off from the command line or the environment.
+    #[arg(
+        long,
+        env = "H264",
+        default_value_t = true,
+        action = ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
     pub h264: bool,
 
     /// Zenoh topic for H.264 video stream (foxglove_msgs/CompressedVideo)
@@ -296,6 +325,39 @@ impl From<Args> for Config {
 mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn h264_is_enabled_by_default() {
+        // EDGEAI-1230: running the binary with no options published no
+        // camera/h264 stream, because the flag defaulted to off. The
+        // service never saw it -- /etc/default/camera sets H264=true --
+        // so it only ever bit manual runs.
+        assert!(Args::parse_from(["edgefirst-camera"]).h264);
+    }
+
+    #[test]
+    fn h264_can_still_be_turned_off() {
+        let args = Args::try_parse_from(["edgefirst-camera", "--h264", "false"])
+            .expect("--h264 must accept an explicit value so it can be disabled");
+        assert!(!args.h264);
+    }
+
+    #[test]
+    fn jpeg_quality_defaults_below_lossless() {
+        // EDGEAI-1230: JPEG encoding was a hardcoded quality-100 CPU
+        // encode with no knob, which is the bulk of its cost.
+        assert_eq!(Args::parse_from(["edgefirst-camera"]).jpeg_quality, 85);
+    }
+
+    #[test]
+    fn jpeg_quality_rejects_values_outside_the_jpeg_range() {
+        for bad in ["0", "101"] {
+            assert!(
+                Args::try_parse_from(["edgefirst-camera", "--jpeg-quality", bad]).is_err(),
+                "quality {bad} must be rejected"
+            );
+        }
+    }
 
     #[test]
     fn zenoh_config_sets_namespace() {

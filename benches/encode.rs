@@ -10,7 +10,9 @@ use edgefirst_camera::{
 fn benchmark_jpeg(img: &Image) {
     let dma = img.dmabuf();
     let mem = dma.memory_map().unwrap();
-    let _ = mem.read(encode_jpeg, Some(img)).unwrap();
+    let _ = mem
+        .read(|pix, img| encode_jpeg(pix, img, 85), Some(img))
+        .unwrap();
 }
 
 pub fn benchmark_encode(c: &mut Criterion) {

@@ -168,7 +168,7 @@ fn test_capture() -> Result<(), Box<dyn Error>> {
     let now = Instant::now();
     let dma = dst.dmabuf();
     let mem = dma.memory_map()?;
-    let jpeg = mem.read(encode_jpeg, Some(&dst))?;
+    let jpeg = mem.read(|pix, img| encode_jpeg(pix, img, 85), Some(&dst))?;
     let elapsed = now.elapsed();
 
     std::fs::write("camera.jpeg", &jpeg)?;

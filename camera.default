@@ -49,7 +49,8 @@ MIRROR="both"
 # H.264 Streaming
 # ---------------------------------------------------------------------------
 # Enable H.264 video output on the Zenoh topic camera/h264.
-# The stream uses hardware encoding when available.
+# The stream uses hardware encoding when available. This is also the
+# built-in default, so a manually launched camera publishes video too.
 H264="true"
 
 # H.264 encoding bitrate preset. Higher bitrates improve quality but
@@ -80,6 +81,18 @@ H264_TILES_FPS="15"
 # Enable JPEG snapshot output on the Zenoh topic camera/jpeg.
 # Useful for low-bandwidth preview or single-frame consumers.
 JPEG="false"
+
+# JPEG encoding quality, 1-100. 85 is visually equivalent to 100 for
+# slightly less work.
+#
+# Note that quality is a weak lever on cost. Measured at 1080p30 on a
+# Verdin iMX8MP, enabling JPEG takes the camera process from 27% to 104%
+# CPU, and dropping quality from 100 to 85 recovers only about 3 of those
+# 77 points -- the cost is dominated by the per-frame conversion and DCT,
+# not the entropy coding. If JPEG streaming is too expensive, reduce
+# STREAM_SIZE or turn JPEG off; there is no hardware JPEG encoder on this
+# platform to fall back on.
+JPEG_QUALITY="85"
 
 # ---------------------------------------------------------------------------
 # Recording and Replay

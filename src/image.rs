@@ -623,12 +623,16 @@ impl Drop for MappedImage {
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut img = Image::new(640, 480, RGBA)?;
 /// let mut mapped = img.mmap();
-/// let jpeg = encode_jpeg(mapped.as_slice(), Some(&img))?;
+/// let jpeg = encode_jpeg(mapped.as_slice(), Some(&img), 85)?;
 /// println!("Compressed to {} bytes", jpeg.len());
 /// # Ok(())
 /// # }
 /// ```
-pub fn encode_jpeg(pix: &[u8], img: Option<&Image>) -> Result<OwnedBuf, Box<dyn Error>> {
+pub fn encode_jpeg(
+    pix: &[u8],
+    img: Option<&Image>,
+    quality: u8,
+) -> Result<OwnedBuf, Box<dyn Error>> {
     let img2 = match img {
         Some(img) => turbojpeg::Image {
             width: img.width() as usize,
@@ -645,7 +649,7 @@ pub fn encode_jpeg(pix: &[u8], img: Option<&Image>) -> Result<OwnedBuf, Box<dyn 
         }
     };
 
-    let res = turbojpeg::compress(img2, 100, turbojpeg::Subsamp::Sub2x2);
+    let res = turbojpeg::compress(img2, i32::from(quality), turbojpeg::Subsamp::Sub2x2);
     match res {
         Ok(buf) => Ok(buf),
         Err(e) => Err(Box::new(e)),
