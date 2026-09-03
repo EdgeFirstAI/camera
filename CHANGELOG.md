@@ -29,7 +29,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   measured 6.9% loss down to 5.1% with JPEG encoding running
   (EDGEAI-1403).
 
-### Changed
 - H.264 output is now on by default. It was off unless `--h264` or
   `H264=true` was given, so a bare `edgefirst-camera` published no video
   at all. The service never saw this -- `/etc/default/camera` sets

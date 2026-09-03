@@ -108,12 +108,17 @@ fn query_fd(fd: libc::c_int) -> Option<u32> {
         return None;
     }
 
-    // timeperframe is seconds per frame, so the rate is its reciprocal.
-    let tpf = &parm.capture.timeperframe;
-    if tpf.numerator == 0 {
+    parse_timeperframe(&parm.capture.timeperframe)
+}
+
+/// `timeperframe` is seconds per frame, so the rate is its reciprocal.
+/// Both halves of the fraction must be non-zero for the driver response
+/// to describe a usable interval and frame rate.
+fn parse_timeperframe(timeperframe: &V4l2Fract) -> Option<u32> {
+    if timeperframe.numerator == 0 || timeperframe.denominator == 0 {
         return None;
     }
-    Some((f64::from(tpf.denominator) / f64::from(tpf.numerator)).round() as u32)
+    Some((f64::from(timeperframe.denominator) / f64::from(timeperframe.numerator)).round() as u32)
 }
 
 /// Turn what the driver reported into the rate to use, falling back when
@@ -154,5 +159,49 @@ mod tests {
     fn resolve_falls_back_when_the_driver_says_nothing_useful() {
         assert_eq!(resolve(None), DEFAULT_CAPTURE_FPS);
         assert_eq!(resolve(Some(0)), DEFAULT_CAPTURE_FPS);
+    }
+
+    #[test]
+    fn timeperframe_is_converted_to_rounded_frames_per_second() {
+        assert_eq!(
+            parse_timeperframe(&V4l2Fract {
+                numerator: 1001,
+                denominator: 60_000,
+            }),
+            Some(60)
+        );
+    }
+
+    #[test]
+    fn timeperframe_rejects_zero_numerator_or_denominator() {
+        assert_eq!(
+            parse_timeperframe(&V4l2Fract {
+                numerator: 0,
+                denominator: 60,
+            }),
+            None
+        );
+        assert_eq!(
+            parse_timeperframe(&V4l2Fract {
+                numerator: 1,
+                denominator: 0,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn query_rejects_a_path_with_an_embedded_nul() {
+        assert_eq!(query("/dev/video\0invalid"), None);
+    }
+
+    #[test]
+    fn query_returns_none_when_the_device_cannot_be_opened() {
+        assert_eq!(query("/path/that/does/not/exist"), None);
+    }
+
+    #[test]
+    fn query_returns_none_when_the_device_rejects_the_ioctl() {
+        assert_eq!(query("/dev/null"), None);
     }
 }
