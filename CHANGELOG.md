@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Topic and frame-ID options are now settable from the environment.
+  `--frame-topic`, `--info-topic`, `--jpeg-topic`, `--h264-topic`,
+  `--h264-tiles-topics`, `--base-frame-id` and `--camera-frame-id` had a
+  command-line flag but no `env` binding, so `FRAME_TOPIC` and friends
+  were silently ignored -- including from `/etc/default/camera`, which
+  systemd applies as an `EnvironmentFile`. All seven are now documented
+  in `camera.default` (EDGEAI-1438).
 - A calibration file that cannot be loaded no longer aborts the node.
   `CAM_INFO_PATH` pointing at a missing, unreadable, malformed, or
   structurally invalid JSON is now reported with a warning and the node
