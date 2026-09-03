@@ -71,6 +71,7 @@ H264_TILES="false"
 
 # FPS limit applied to tile streams. A lower value than the camera FPS
 # reduces compression artifacts and total bandwidth when tiling is active.
+# 0 means no limit: every captured frame is offered to each tile encoder.
 H264_TILES_FPS="15"
 
 # ---------------------------------------------------------------------------
@@ -79,6 +80,36 @@ H264_TILES_FPS="15"
 # Enable JPEG snapshot output on the Zenoh topic camera/jpeg.
 # Useful for low-bandwidth preview or single-frame consumers.
 JPEG="false"
+
+# ---------------------------------------------------------------------------
+# Recording and Replay
+# ---------------------------------------------------------------------------
+# Record the live H.264 stream to a file, as raw Annex-B. Requires H264,
+# and cannot be combined with REPLAY. A matching <path>.json sidecar is
+# written alongside at startup carrying colorimetry, camera/info and
+# tf_static -- the producer state that is not recoverable from the
+# bitstream.
+#
+# WARNING: this writes continuously for as long as the service runs, with
+# no size cap and no rotation. Left set in this file it will fill the
+# filesystem. Set it for a capture session and clear it afterwards; it is
+# not intended as a persistent setting.
+RECORD=""
+
+# Replay a previously recorded .h264 file instead of opening the camera.
+# Requires the matching <path>.json sidecar. Cannot be combined with
+# RECORD, JPEG, or H264_TILES -- a recording carries only the main H.264
+# stream.
+REPLAY=""
+
+# Loop the replay back to the start on EOF instead of exiting. The frame
+# sequence counter keeps incrementing across the loop boundary so
+# consumers see one continuous stream, as they would from a live camera.
+REPLAY_LOOP="false"
+
+# Override the replay frame rate. Empty uses the rate recorded in the
+# sidecar.
+REPLAY_FPS=""
 
 # ---------------------------------------------------------------------------
 # Camera Calibration

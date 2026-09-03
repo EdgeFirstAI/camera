@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- A failed camera read no longer kills the process on the first failure.
+  `vsl_camera_get_data` reports a timeout by returning NULL, leaving
+  `videostream` to surface whatever `errno` happened to hold, so the
+  error cannot be trusted to distinguish a transient gap from a dead
+  camera. The capture loop now spends a budget of 5 consecutive failures
+  before giving up, logging each retry (EDGEAI-1403).
+- `H264_TILES_FPS=0` no longer divides by zero and takes the tile
+  encoder threads down silently. Zero now means no limit, and is
+  documented as such (EDGEAI-1403).
 - Topic and frame-ID options are now settable from the environment.
   `--frame-topic`, `--info-topic`, `--jpeg-topic`, `--h264-topic`,
   `--h264-tiles-topics`, `--base-frame-id` and `--camera-frame-id` had a
@@ -23,6 +32,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   describes the geometry on that one topic; losing it should not take the
   capture pipeline down, nor starve a subscriber that requires
   `camera/info` to exist (EDGEAI-1441).
+
+### Added
+- Dropped-frame counters. Frames discarded because an encoder channel was
+  full were previously invisible -- the discard arm was empty -- so an
+  operator could not tell a captured frame from a discarded one, or know
+  a recording had holes. Drops are now counted per sink and summarised in
+  one rate-limited log line every 10s (EDGEAI-1403).
+- `camera.default` documents `RECORD`, `REPLAY`, `REPLAY_LOOP` and
+  `REPLAY_FPS`, which were settable from the environment but undocumented.
+  `RECORD` writes continuously with no size cap or rotation, so leaving it
+  set will fill the filesystem; that is now stated (EDGEAI-1403).
 
 ## [2.8.0] - 2026-09-01
 
