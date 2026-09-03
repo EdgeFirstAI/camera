@@ -139,8 +139,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut args = Args::parse();
 
-    // Validate record/replay arg combinations before touching anything.
+    // Validate arg combinations before touching anything.
     validate_record_replay_args(&args)?;
+    validate_stream_size(&args)?;
 
     args.tracy.then(tracy_client::Client::start);
 
@@ -265,6 +266,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         stream_task.await?;
     }
 
+    Ok(())
+}
+
+/// Reject a stream resolution larger than the capture resolution.
+///
+/// The ISP scales down, never up, so this combination cannot produce a
+/// valid stream -- it silently yielded one the WebUI would not display
+/// (EDGEAI-1230).
+fn validate_stream_size(args: &Args) -> Result<(), Box<dyn Error>> {
+    let (sw, sh) = (args.stream_size[0], args.stream_size[1]);
+    let (cw, ch) = (args.camera_size[0], args.camera_size[1]);
+    if sw > cw || sh > ch {
+        return Err(Box::from(format!(
+            "STREAM_SIZE {sw}x{sh} is larger than CAMERA_SIZE {cw}x{ch}; the ISP scales down \
+             but never up, so no stream can be produced. Lower STREAM_SIZE, or raise \
+             CAMERA_SIZE to a resolution the sensor mode supports."
+        )));
+    }
     Ok(())
 }
 
@@ -728,10 +747,71 @@ impl ReadRetry {
 ///
 /// `0` means no limit: the operator can set `H264_TILES_FPS=0` and it used
 /// to divide by zero and take the tile threads down silently.
+///
+/// Computed in nanoseconds rather than milliseconds because the
+/// millisecond form truncates: 1000/15 is 66ms, losing 0.67ms on every
+/// frame.
 pub(crate) fn tile_frame_interval(fps: u32) -> Duration {
     match fps {
         0 => Duration::ZERO,
-        fps => Duration::from_millis(1000 / u64::from(fps)),
+        fps => Duration::from_nanos(1_000_000_000 / u64::from(fps)),
+    }
+}
+
+/// Decides which captured frames a tile encoder should encode in order to
+/// hit a requested frame rate.
+///
+/// The naive version -- "encode if it has been at least `interval` since
+/// the last one I encoded" -- loses frames systematically, because it
+/// restarts the clock from the instant a frame was *accepted* rather than
+/// from where that frame's deadline actually fell. Any jitter pushes the
+/// next deadline later, and the error accumulates: a 30fps source asked
+/// for 15 measured 11.5, and asked for 10 measured 8.5, because the
+/// deadline kept landing just after a frame arrived and skipping to the
+/// one after (EDGEAI-1230).
+///
+/// Advancing the deadline by exactly one interval instead keeps it phase
+/// locked to where it started, so a frame that arrives a hair early is
+/// picked up by the following deadline rather than pushing every
+/// subsequent one back.
+pub(crate) struct TilePacer {
+    interval: Duration,
+    next: Option<Instant>,
+}
+
+impl TilePacer {
+    pub(crate) fn new(fps: u32) -> Self {
+        Self {
+            interval: tile_frame_interval(fps),
+            next: None,
+        }
+    }
+
+    /// Whether the frame presented at `now` should be encoded.
+    pub(crate) fn accept(&mut self, now: Instant) -> bool {
+        if self.interval.is_zero() {
+            return true;
+        }
+        match self.next {
+            None => {
+                self.next = Some(now + self.interval);
+                true
+            }
+            Some(next) if now >= next => {
+                // Advance from the deadline, not from `now` -- that is
+                // what keeps the phase locked.
+                let advanced = next + self.interval;
+                // Unless the encoder stalled past even that, in which case
+                // resync rather than emitting the backlog as a burst.
+                self.next = Some(if now >= advanced {
+                    now + self.interval
+                } else {
+                    advanced
+                });
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -995,9 +1075,7 @@ async fn h264_single_tile_task(
     };
 
     let mut last_source_size = (initial_width, initial_height);
-    let tile_fps_limit = args.h264_tiles_fps;
-    let frame_interval = tile_frame_interval(tile_fps_limit);
-    let mut last_encode_time = Instant::now();
+    let mut pacer = TilePacer::new(args.h264_tiles_fps);
 
     loop {
         let (source_img, ts) = match rx.recv() {
@@ -1010,11 +1088,9 @@ async fn h264_single_tile_task(
 
         let span = info_span!("h264_tile", tile = ?tile_pos);
         async {
-            let now = Instant::now();
-            if now.duration_since(last_encode_time) < frame_interval {
+            if !pacer.accept(Instant::now()) {
                 return;
             }
-            last_encode_time = now;
             let current_source_size = (source_img.width(), source_img.height());
             if current_source_size != last_source_size {
                 let (new_crop_x, new_crop_y, new_crop_width, new_crop_height) =
@@ -1067,7 +1143,10 @@ fn build_jpeg_msg(
 
     let jpeg = info_span!("jpeg_encode").in_scope(|| {
         let dma = img.dmabuf();
-        let buf = dma.memory_map()?.read(encode_jpeg, Some(img))?;
+        let quality = args.jpeg_quality;
+        let buf = dma
+            .memory_map()?
+            .read(|pix, img| encode_jpeg(pix, img, quality), Some(img))?;
         Ok::<_, Box<dyn Error>>(buf)
     })?;
 
@@ -1686,6 +1765,37 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_stream_size_larger_than_camera_size() {
+        // EDGEAI-1230: STREAM_SIZE larger than CAMERA_SIZE silently
+        // produced a stream the WebUI would not display. The ISP does not
+        // upscale, so this combination has no valid meaning.
+        let mut args = default_args();
+        args.camera_size = vec![1920, 1080];
+        args.stream_size = vec![3840, 2160];
+        let err = validate_stream_size(&args).unwrap_err().to_string();
+        assert!(
+            err.contains("STREAM_SIZE") && err.contains("CAMERA_SIZE"),
+            "error must name both settings, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_stream_size_within_camera_size() {
+        let mut args = default_args();
+        args.camera_size = vec![3840, 2160];
+        args.stream_size = vec![1920, 1080];
+        validate_stream_size(&args).unwrap();
+    }
+
+    #[test]
+    fn validate_accepts_stream_size_equal_to_camera_size() {
+        let mut args = default_args();
+        args.camera_size = vec![1920, 1080];
+        args.stream_size = vec![1920, 1080];
+        validate_stream_size(&args).unwrap();
+    }
+
+    #[test]
     fn validate_record_requires_h264() {
         let mut args = default_args();
         args.record = Some(PathBuf::from("/tmp/not-written.h264"));
@@ -1830,6 +1940,52 @@ mod tests {
         assert!(!retry.should_retry());
     }
 
+    /// Simulates a source running at exactly `source_fps` and reports how
+    /// many frames a pacer configured for `target_fps` accepts over
+    /// `seconds`.
+    fn paced_frame_count(source_fps: u32, target_fps: u32, seconds: u32) -> u32 {
+        let mut pacer = TilePacer::new(target_fps);
+        let t0 = Instant::now();
+        let step = Duration::from_nanos(1_000_000_000 / u64::from(source_fps));
+        let frames = source_fps * seconds;
+        (0..frames).filter(|k| pacer.accept(t0 + step * *k)).count() as u32
+    }
+
+    #[test]
+    fn tile_pacer_hits_15fps_from_a_30fps_source() {
+        // EDGEAI-1230 acceptance: 15 configured yields 15 +/- 0.2
+        // measured. Over 10s that is 150 +/- 2 frames; the old
+        // reset-to-accepted-instant logic delivered ~115.
+        let n = paced_frame_count(30, 15, 10);
+        assert!((148..=152).contains(&n), "expected ~150 frames, got {n}");
+    }
+
+    #[test]
+    fn tile_pacer_hits_10fps_from_a_30fps_source() {
+        // The old logic delivered ~85 here.
+        let n = paced_frame_count(30, 10, 10);
+        assert!((98..=102).contains(&n), "expected ~100 frames, got {n}");
+    }
+
+    #[test]
+    fn tile_pacer_accepts_everything_when_unlimited() {
+        assert_eq!(paced_frame_count(30, 0, 2), 60);
+    }
+
+    #[test]
+    fn tile_pacer_does_not_burst_after_a_stall() {
+        // If the encoder stalls for a second, the pacer must not then
+        // accept a backlog of frames to "catch up".
+        let mut pacer = TilePacer::new(15);
+        let t0 = Instant::now();
+        assert!(pacer.accept(t0));
+        assert!(pacer.accept(t0 + Duration::from_secs(1)));
+        assert!(
+            !pacer.accept(t0 + Duration::from_secs(1) + Duration::from_millis(1)),
+            "a frame 1ms after the post-stall frame must not be accepted"
+        );
+    }
+
     #[test]
     fn tile_frame_interval_treats_zero_as_no_limit() {
         // H264_TILES_FPS=0 is operator-settable and used to divide by
@@ -1839,8 +1995,9 @@ mod tests {
 
     #[test]
     fn tile_frame_interval_spaces_frames_for_a_positive_limit() {
-        assert_eq!(tile_frame_interval(15), Duration::from_millis(66));
         assert_eq!(tile_frame_interval(10), Duration::from_millis(100));
+        // 1000/15 in integer milliseconds is 66, losing 0.67ms per frame.
+        assert_eq!(tile_frame_interval(15), Duration::from_nanos(66_666_666));
     }
 
     #[test]

@@ -7,7 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- H.264 output is now on by default. It was off unless `--h264` or
+  `H264=true` was given, so a bare `edgefirst-camera` published no video
+  at all. The service never saw this -- `/etc/default/camera` sets
+  `H264=true` -- but it caught out every manual run. `--h264 false` and
+  `H264=false` still turn it off (EDGEAI-1230).
+- JPEG encodes at quality 85 by default instead of a hardcoded 100, and
+  the quality is configurable via `--jpeg-quality` / `JPEG_QUALITY`
+  (1-100). Measured at 1080p30 on a Verdin iMX8MP, this recovers about 3
+  percentage points of CPU; enabling JPEG at all costs about 77, so
+  quality is a weak lever and the setting is documented as such
+  (EDGEAI-1230).
+
 ### Fixed
+- Tile frame pacing is now phase locked to the requested rate. It
+  restarted its interval from the instant a frame was *accepted*, so
+  jitter pushed each deadline later and the error accumulated: a 30fps
+  source asked for 15 measured 11.5, and asked for 10 measured 8.5. The
+  deadline now advances by exactly one interval, and the interval is
+  computed in nanoseconds rather than truncated milliseconds
+  (EDGEAI-1230).
+- `STREAM_SIZE` larger than `CAMERA_SIZE` is rejected at startup with an
+  error naming both settings. The ISP scales down but never up, so the
+  combination produced a stream the WebUI would not display, with no
+  diagnostic (EDGEAI-1230).
 - A failed camera read no longer kills the process on the first failure.
   `vsl_camera_get_data` reports a timeout by returning NULL, leaving
   `videostream` to surface whatever `errno` happened to hold, so the
