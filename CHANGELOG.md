@@ -7,18 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- The H.264 encoder is now told the frame rate the camera is actually
-  configured for, read from the driver with `VIDIOC_G_PARM`, instead of a
-  hardcoded 30. On a 1080p60 sensor the encoder was being told half the
-  real rate, and that -- not queue depth -- was what made the capture
-  path drop frames: measured 26 of 3600 frames lost over 60s before, and
-  0 of 3601 after, on an otherwise idle device (EDGEAI-1403).
-- The low-frame-rate warning compares against the configured rate rather
-  than a fixed 30, so it can actually fire. At 1080p60 it previously
-  could not warn until capture had collapsed below 27fps -- more than a
-  55% drop went unreported (EDGEAI-1403).
-- Recording metadata records the real capture rate rather than 30.
+## [2.9.0] - 2026-09-03
+
+Capture-rate honesty for the H.264 encoder, H.264 on by default, configurable
+JPEG quality, and capture-loop resilience. Wire format is unchanged from 2.8.0.
+
+### Added
+- Dropped-frame counters. Frames discarded because an encoder channel was
+  full were previously invisible -- the discard arm was empty -- so an
+  operator could not tell a captured frame from a discarded one, or know
+  a recording had holes. Drops are now counted per sink and summarised in
+  one rate-limited log line every 10s (EDGEAI-1403).
+- `camera.default` documents `RECORD`, `REPLAY`, `REPLAY_LOOP` and
+  `REPLAY_FPS`, which were settable from the environment but undocumented.
+  `RECORD` writes continuously with no size cap or rotation, so leaving it
+  set will fill the filesystem; that is now stated (EDGEAI-1403).
 
 ### Changed
 - The H.264 frame queue holds three frames instead of one. This is not
@@ -28,7 +31,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   latency for frames that would otherwise be discarded outright:
   measured 6.9% loss down to 5.1% with JPEG encoding running
   (EDGEAI-1403).
-
 - H.264 output is now on by default. It was off unless `--h264` or
   `H264=true` was given, so a bare `edgefirst-camera` published no video
   at all. The service never saw this -- `/etc/default/camera` sets
@@ -42,6 +44,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (EDGEAI-1230).
 
 ### Fixed
+- The H.264 encoder is now told the frame rate the camera is actually
+  configured for, read from the driver with `VIDIOC_G_PARM`, instead of a
+  hardcoded 30. On a 1080p60 sensor the encoder was being told half the
+  real rate, and that -- not queue depth -- was what made the capture
+  path drop frames: measured 26 of 3600 frames lost over 60s before, and
+  0 of 3601 after, on an otherwise idle device (EDGEAI-1403).
+- The low-frame-rate warning compares against the configured rate rather
+  than a fixed 30, so it can actually fire. At 1080p60 it previously
+  could not warn until capture had collapsed below 27fps -- more than a
+  55% drop went unreported (EDGEAI-1403).
+- Recording metadata records the real capture rate rather than 30.
 - Tile frame pacing is now phase locked to the requested rate. It
   restarted its interval from the instant a frame was *accepted*, so
   jitter pushed each deadline later and the error accumulated: a 30fps
@@ -77,17 +90,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   describes the geometry on that one topic; losing it should not take the
   capture pipeline down, nor starve a subscriber that requires
   `camera/info` to exist (EDGEAI-1441).
-
-### Added
-- Dropped-frame counters. Frames discarded because an encoder channel was
-  full were previously invisible -- the discard arm was empty -- so an
-  operator could not tell a captured frame from a discarded one, or know
-  a recording had holes. Drops are now counted per sink and summarised in
-  one rate-limited log line every 10s (EDGEAI-1403).
-- `camera.default` documents `RECORD`, `REPLAY`, `REPLAY_LOOP` and
-  `REPLAY_FPS`, which were settable from the environment but undocumented.
-  `RECORD` writes continuously with no size cap or rotation, so leaving it
-  set will fill the filesystem; that is now stated (EDGEAI-1403).
 
 ## [2.8.0] - 2026-09-01
 
@@ -403,7 +405,8 @@ ingest camera data from this release forward.
 - Environment variable control for H264 streaming
 - Flexible runtime configuration
 
-[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.8.0...HEAD
+[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.9.0...HEAD
+[2.9.0]: https://github.com/EdgeFirstAI/camera/compare/v2.8.0...v2.9.0
 [2.8.0]: https://github.com/EdgeFirstAI/camera/compare/v2.7.0...v2.8.0
 [2.7.0]: https://github.com/EdgeFirstAI/camera/compare/v2.6.1...v2.7.0
 [2.6.1]: https://github.com/EdgeFirstAI/camera/compare/v2.6.0...v2.6.1
