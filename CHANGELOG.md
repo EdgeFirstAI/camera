@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- A calibration file that cannot be loaded no longer aborts the node.
+  `CAM_INFO_PATH` pointing at a missing, unreadable, malformed, or
+  structurally invalid JSON is now reported with a warning and the node
+  continues on the same built-in defaults it uses when no calibration is
+  configured, so `camera/info` keeps publishing. Calibration only
+  describes the geometry on that one topic; losing it should not take the
+  capture pipeline down, nor starve a subscriber that requires
+  `camera/info` to exist (EDGEAI-1441).
+
 ## [2.8.0] - 2026-09-01
 
 Hostname-namespaced Zenoh keys and the `edgefirst-schemas` 4.0 `CameraFrame`
