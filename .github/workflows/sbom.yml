@@ -44,8 +44,8 @@ jobs:
 
       - name: Install cargo tools
         run: |
-          cargo install cargo-cyclonedx --version 0.5.7
-          cargo install cargo-license --version 0.7.0
+          cargo install cargo-cyclonedx --version 0.5.7 --locked
+          cargo install cargo-license --version 0.7.0 --locked
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0

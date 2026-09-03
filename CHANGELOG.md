@@ -42,6 +42,9 @@ JPEG quality, and capture-loop resilience. Wire format is unchanged from 2.8.0.
   percentage points of CPU; enabling JPEG at all costs about 77, so
   quality is a weak lever and the setting is documented as such
   (EDGEAI-1230).
+- SBOM CI installs its pinned Cargo tools with their published lockfiles,
+  preventing newly released transitive dependencies from breaking release
+  artifact generation.
 
 ### Fixed
 - The H.264 encoder is now told the frame rate the camera is actually
