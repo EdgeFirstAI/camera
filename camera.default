@@ -84,8 +84,14 @@ JPEG="false"
 # Camera Calibration
 # ---------------------------------------------------------------------------
 # Path to a camera calibration JSON file (isp-imx format). When provided,
-# the node publishes sensor_msgs/CameraInfo on camera/info. Leave empty
-# if no calibration file is available.
+# the node publishes sensor_msgs/CameraInfo on camera/info using that
+# file's geometry. Leave empty if no calibration file is available.
+#
+# camera/info is published either way. If this path is set but cannot be
+# loaded, the node logs a warning and falls back to built-in defaults
+# rather than failing to start -- those defaults are nominal for a 1080p
+# sensor and describe no particular lens, so they are not valid for
+# projection or sensor fusion. Check the log if calibration matters.
 CAM_INFO_PATH=""
 
 # ---------------------------------------------------------------------------
