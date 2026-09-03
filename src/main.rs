@@ -19,6 +19,7 @@ use edgefirst_schemas::{
 use kanal::{Receiver, Sender};
 use sidecar::Sidecar;
 use std::{
+    collections::BTreeMap,
     env,
     error::Error,
     fs::File,
@@ -53,6 +54,15 @@ static GLOBAL: tracy_client::ProfiledAllocator<std::alloc::System> =
     tracy_client::ProfiledAllocator::new(std::alloc::System, 100);
 
 const TARGET_FPS: i32 = 30;
+
+/// How many consecutive failed `cam.read()` calls to tolerate before
+/// giving up on the camera. Each failed read costs the driver's own frame
+/// timeout, so this is a duration budget as much as a count.
+const MAX_CONSECUTIVE_READ_FAILURES: u32 = 5;
+
+/// How often to summarise dropped frames. One line per window, not per
+/// drop: under sustained load every frame can be a drop.
+const DROP_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug)]
 enum TilePosition {
@@ -478,6 +488,8 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     let mut prev = Instant::now();
     let mut history = vec![0.0; 60];
     let mut index = 0;
+    let mut read_retry = ReadRetry::new(MAX_CONSECUTIVE_READ_FAILURES);
+    let mut drops = DropStats::new(DROP_REPORT_INTERVAL, Instant::now());
 
     // The camera fourcc is set at open() time and constant for the
     // session, so the Tensor.format string can be computed once and
@@ -488,7 +500,10 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
 
     while !SHUTDOWN.load(Ordering::SeqCst) {
         let camera_buffer = match info_span!("camera_read").in_scope(|| cam.read()) {
-            Ok(buf) => buf,
+            Ok(buf) => {
+                read_retry.on_success();
+                buf
+            }
             Err(videostream::Error::Io(e)) if e.kind() == std::io::ErrorKind::Interrupted => {
                 // System call was interrupted by signal - check if shutdown requested
                 if SHUTDOWN.load(Ordering::SeqCst) {
@@ -497,7 +512,30 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                 }
                 continue;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                // One failed read is not evidence the camera is gone, and
+                // the error cannot be trusted to say which it is: the
+                // underlying vsl_camera_get_data reports a timeout by
+                // returning NULL, leaving videostream to surface whatever
+                // errno happened to hold. Spend a retry budget instead of
+                // treating the first failure as fatal -- a transient gap
+                // used to kill the process, and the unit then sat out its
+                // restart delay, turning one hiccup into a multi-second
+                // hole in the operator's recording (EDGEAI-1403).
+                if !read_retry.should_retry() {
+                    error!(
+                        failures = read_retry.consecutive(),
+                        "camera read failed {MAX_CONSECUTIVE_READ_FAILURES} times in a row: {e}"
+                    );
+                    return Err(e.into());
+                }
+                warn!(
+                    attempt = read_retry.consecutive(),
+                    max = MAX_CONSECUTIVE_READ_FAILURES,
+                    "camera read failed, retrying: {e}"
+                );
+                continue;
+            }
         };
 
         let fps = update_fps(&mut prev, &mut history, &mut index);
@@ -541,21 +579,31 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         if args.h264 {
             let ts = camera_buffer.timestamp()?;
             let src_img = Image::from_camera(&camera_buffer)?;
-            try_send(&h264_tx, src_img, ts, "H264");
+            try_send(&h264_tx, src_img, ts, "h264", &mut drops);
         }
 
         if args.jpeg {
             let ts = camera_buffer.timestamp()?;
             let src_img = Image::from_camera(&camera_buffer)?;
-            try_send(&jpeg_tx, src_img, ts, "JPEG");
+            try_send(&jpeg_tx, src_img, ts, "jpeg", &mut drops);
         }
 
         if args.h264_tiles {
             let ts = camera_buffer.timestamp()?;
             for (i, tx) in h264_tiles_txs.iter().enumerate() {
                 let src_img = Image::from_camera(&camera_buffer)?;
-                try_send(tx, src_img, ts, &format!("H264_TILE_{}", i));
+                try_send(
+                    tx,
+                    src_img,
+                    ts,
+                    TILE_SINKS.get(i).copied().unwrap_or("h264/tile"),
+                    &mut drops,
+                );
             }
+        }
+
+        if let Some(report) = drops.take_report(Instant::now()) {
+            warn!("{report}");
         }
 
         let (_frame_task, info_task) = tokio::join!(frame_task, info_task);
@@ -568,14 +616,158 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     Ok(())
 }
 
-fn try_send(tx: &Sender<(Image, Timestamp)>, img: Image, ts: Timestamp, _name: &str) {
-    match tx.try_send((img, ts)) {
-        Ok(_) => {}
-        Err(_) => {
-            // Channel issue - likely full due to slow encoding, which is
-            // expected with 4 tile threads Silently drop frames
-            // when channels are full to avoid log spam
+/// Names of the sinks `try_send` can drop a frame on. Static so the hot
+/// path does not allocate a label per frame per tile.
+const TILE_SINKS: [&str; 4] = ["h264/tl", "h264/tr", "h264/bl", "h264/br"];
+
+/// Counters for frames discarded because a downstream encoder channel was
+/// full.
+///
+/// Drops are expected under load -- four tile encoders cannot always keep
+/// up with capture, and dropping is the correct response. The problem this
+/// solves is that they were invisible: the discard arm was empty, so an
+/// operator had no way to tell a captured frame from a discarded one, or
+/// to know a recording had holes in it. Reporting is rate-limited to one
+/// line per interval rather than per drop, which is why the empty arm
+/// existed in the first place.
+pub(crate) struct DropStats {
+    dropped: BTreeMap<&'static str, u64>,
+    sent: u64,
+    interval: Duration,
+    last_report: Instant,
+}
+
+impl DropStats {
+    pub(crate) fn new(interval: Duration, now: Instant) -> Self {
+        Self {
+            dropped: BTreeMap::new(),
+            sent: 0,
+            interval,
+            last_report: now,
         }
+    }
+
+    pub(crate) fn record_sent(&mut self) {
+        self.sent = self.sent.saturating_add(1);
+    }
+
+    pub(crate) fn record_drop(&mut self, sink: &'static str) {
+        *self.dropped.entry(sink).or_insert(0) += 1;
+    }
+
+    /// A one-line summary of the window just ended, or `None` while the
+    /// reporting interval has not elapsed. Taking a report resets the
+    /// window.
+    pub(crate) fn take_report(&mut self, now: Instant) -> Option<String> {
+        if now.duration_since(self.last_report) < self.interval {
+            return None;
+        }
+        self.last_report = now;
+        if self.dropped.is_empty() {
+            self.sent = 0;
+            return None;
+        }
+
+        let total: u64 = self.dropped.values().sum();
+        let per_sink = self
+            .dropped
+            .iter()
+            .map(|(sink, n)| format!("{sink}={n}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let report = format!(
+            "dropped {total} of {} frames (encoder channels full): {per_sink}",
+            total + self.sent
+        );
+
+        self.dropped.clear();
+        self.sent = 0;
+        Some(report)
+    }
+}
+
+/// Retry budget for `cam.read()`.
+///
+/// A single failed read is not evidence the camera is gone. The ISP can
+/// stall for a frame or two across a mode change or a transient bus
+/// hiccup, and `vsl_camera_get_data` reports that by returning NULL --
+/// after which `videostream` surfaces whatever `errno` happened to hold,
+/// so the error kind cannot be trusted to classify it (EDGEAI-1403). Count
+/// consecutive failures instead and only give up once the camera has
+/// stopped producing frames for a sustained stretch.
+pub(crate) struct ReadRetry {
+    consecutive: u32,
+    max: u32,
+}
+
+impl ReadRetry {
+    pub(crate) fn new(max: u32) -> Self {
+        Self {
+            consecutive: 0,
+            max,
+        }
+    }
+
+    pub(crate) fn on_success(&mut self) {
+        self.consecutive = 0;
+    }
+
+    /// Records a failed read. Returns `true` while the budget allows
+    /// another attempt, `false` once it is exhausted.
+    pub(crate) fn should_retry(&mut self) -> bool {
+        self.consecutive = self.consecutive.saturating_add(1);
+        self.consecutive <= self.max
+    }
+
+    pub(crate) fn consecutive(&self) -> u32 {
+        self.consecutive
+    }
+}
+
+/// Minimum spacing between encoded tile frames for a requested FPS limit.
+///
+/// `0` means no limit: the operator can set `H264_TILES_FPS=0` and it used
+/// to divide by zero and take the tile threads down silently.
+pub(crate) fn tile_frame_interval(fps: u32) -> Duration {
+    match fps {
+        0 => Duration::ZERO,
+        fps => Duration::from_millis(1000 / u64::from(fps)),
+    }
+}
+
+fn try_send(
+    tx: &Sender<(Image, Timestamp)>,
+    img: Image,
+    ts: Timestamp,
+    sink: &'static str,
+    stats: &mut DropStats,
+) {
+    record_send_outcome(tx.try_send((img, ts)), sink, stats);
+}
+
+/// Record whether a `try_send` actually delivered the frame.
+///
+/// kanal reports a **full** channel as `Ok(false)`, not as an error --
+/// `Err` means the channel is closed. So `Ok(_) => delivered` silently
+/// counts every dropped frame as a sent one, which is what the original
+/// empty-discard-arm code did and what made the first version of these
+/// counters read zero under load: four tile encoders publishing at 3.7Hz
+/// against a 53Hz source could not fill a bounded(3) channel according to
+/// the counters, which was obviously false.
+fn record_send_outcome(
+    outcome: Result<bool, kanal::SendError>,
+    sink: &'static str,
+    stats: &mut DropStats,
+) {
+    match outcome {
+        Ok(true) => stats.record_sent(),
+        // Full: encoding is slower than capture, expected under load.
+        // Dropping is the right response; counting it is what lets an
+        // operator see that it happened.
+        Ok(false) => stats.record_drop(sink),
+        // Closed: the encoder thread is gone. Still a frame that did not
+        // reach anyone, so it counts the same way.
+        Err(_) => stats.record_drop(sink),
     }
 }
 
@@ -804,7 +996,7 @@ async fn h264_single_tile_task(
 
     let mut last_source_size = (initial_width, initial_height);
     let tile_fps_limit = args.h264_tiles_fps;
-    let frame_interval = Duration::from_millis(1000 / tile_fps_limit as u64);
+    let frame_interval = tile_frame_interval(tile_fps_limit);
     let mut last_encode_time = Instant::now();
 
     loop {
@@ -1543,6 +1735,112 @@ mod tests {
         args.replay = Some(PathBuf::from("/tmp/not-read.h264"));
         args.h264 = true;
         validate_record_replay_args(&args).unwrap();
+    }
+
+    #[test]
+    fn kanal_reports_a_full_channel_as_ok_false() {
+        // Pins the dependency contract this counting depends on. kanal's
+        // try_send returns Result<bool, SendError>: Err means the channel
+        // is closed, and a *full* channel is Ok(false). Matching on Ok(_)
+        // therefore counts every dropped frame as a delivered one.
+        let (tx, _rx) = kanal::bounded::<u8>(1);
+        assert_eq!(tx.try_send(1), Ok(true));
+        assert_eq!(tx.try_send(2), Ok(false), "a full channel is Ok(false)");
+    }
+
+    #[test]
+    fn a_full_channel_is_counted_as_a_drop_not_a_send() {
+        let t0 = Instant::now();
+        let mut stats = DropStats::new(Duration::from_secs(10), t0);
+        record_send_outcome(Ok(true), "h264", &mut stats);
+        record_send_outcome(Ok(false), "h264", &mut stats);
+        record_send_outcome(Err(kanal::SendError::ReceiveClosed), "h264", &mut stats);
+
+        let report = stats
+            .take_report(t0 + Duration::from_secs(11))
+            .expect("two of the three sends did not deliver");
+        assert!(report.contains("h264=2"), "got: {report}");
+        assert!(report.contains("of 3 frames"), "got: {report}");
+    }
+
+    #[test]
+    fn drop_stats_counts_per_sink_and_reports_after_the_interval() {
+        let t0 = Instant::now();
+        let mut stats = DropStats::new(Duration::from_secs(10), t0);
+
+        stats.record_sent();
+        stats.record_drop("h264/tl");
+        stats.record_drop("h264/tl");
+        stats.record_drop("jpeg");
+
+        assert!(
+            stats.take_report(t0 + Duration::from_secs(1)).is_none(),
+            "must stay quiet inside the reporting interval"
+        );
+
+        let report = stats
+            .take_report(t0 + Duration::from_secs(11))
+            .expect("a report is due once the interval has elapsed");
+        assert!(report.contains("h264/tl=2"), "got: {report}");
+        assert!(report.contains("jpeg=1"), "got: {report}");
+    }
+
+    #[test]
+    fn drop_stats_reports_nothing_when_no_frames_were_dropped() {
+        let t0 = Instant::now();
+        let mut stats = DropStats::new(Duration::from_secs(10), t0);
+        stats.record_sent();
+        assert!(stats.take_report(t0 + Duration::from_secs(11)).is_none());
+    }
+
+    #[test]
+    fn drop_stats_resets_the_window_after_reporting() {
+        let t0 = Instant::now();
+        let mut stats = DropStats::new(Duration::from_secs(10), t0);
+        stats.record_drop("jpeg");
+        stats.take_report(t0 + Duration::from_secs(11)).unwrap();
+
+        stats.record_drop("jpeg");
+        let second = stats
+            .take_report(t0 + Duration::from_secs(22))
+            .expect("second window should report on its own");
+        assert!(
+            second.contains("jpeg=1"),
+            "counts must not carry over between windows, got: {second}"
+        );
+    }
+
+    #[test]
+    fn read_retry_spends_its_budget_then_gives_up() {
+        let mut retry = ReadRetry::new(3);
+        assert!(retry.should_retry(), "1st failure is retryable");
+        assert!(retry.should_retry(), "2nd failure is retryable");
+        assert!(retry.should_retry(), "3rd failure is retryable");
+        assert!(!retry.should_retry(), "budget of 3 is spent");
+    }
+
+    #[test]
+    fn read_retry_resets_on_a_successful_read() {
+        let mut retry = ReadRetry::new(2);
+        assert!(retry.should_retry());
+        retry.on_success();
+        assert_eq!(retry.consecutive(), 0);
+        assert!(retry.should_retry(), "budget is restored after a good read");
+        assert!(retry.should_retry());
+        assert!(!retry.should_retry());
+    }
+
+    #[test]
+    fn tile_frame_interval_treats_zero_as_no_limit() {
+        // H264_TILES_FPS=0 is operator-settable and used to divide by
+        // zero, killing the tile threads silently.
+        assert_eq!(tile_frame_interval(0), Duration::ZERO);
+    }
+
+    #[test]
+    fn tile_frame_interval_spaces_frames_for_a_positive_limit() {
+        assert_eq!(tile_frame_interval(15), Duration::from_millis(66));
+        assert_eq!(tile_frame_interval(10), Duration::from_millis(100));
     }
 
     #[test]
