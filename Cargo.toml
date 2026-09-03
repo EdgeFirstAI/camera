@@ -3,7 +3,7 @@ name = "edgefirst-camera"
 description = "EdgeFirst Camera Publisher"
 repository = "https://github.com/EdgeFirstAI/camera"
 license = "Apache-2.0"
-version = "2.8.0"
+version = "2.9.0"
 edition = "2021"
 
 [profile.release]

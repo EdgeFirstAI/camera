@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-09-03
+
+Capture-rate honesty for the H.264 encoder, H.264 on by default, configurable
+JPEG quality, and capture-loop resilience. Wire format is unchanged from 2.8.0.
+
+### Added
+- Dropped-frame counters. Frames discarded because an encoder channel was
+  full were previously invisible -- the discard arm was empty -- so an
+  operator could not tell a captured frame from a discarded one, or know
+  a recording had holes. Drops are now counted per sink and summarised in
+  one rate-limited log line every 10s (EDGEAI-1403).
+- `camera.default` documents `RECORD`, `REPLAY`, `REPLAY_LOOP` and
+  `REPLAY_FPS`, which were settable from the environment but undocumented.
+  `RECORD` writes continuously with no size cap or rotation, so leaving it
+  set will fill the filesystem; that is now stated (EDGEAI-1403).
+
+### Changed
+- The H.264 frame queue holds three frames instead of one. This is not
+  what fixed the dropped frames above, and it changes nothing while the
+  encoder keeps up -- the queue stays empty and latency is unchanged. It
+  only matters under saturation, where it trades up to two frames of
+  latency for frames that would otherwise be discarded outright:
+  measured 6.9% loss down to 5.1% with JPEG encoding running
+  (EDGEAI-1403).
+- H.264 output is now on by default. It was off unless `--h264` or
+  `H264=true` was given, so a bare `edgefirst-camera` published no video
+  at all. The service never saw this -- `/etc/default/camera` sets
+  `H264=true` -- but it caught out every manual run. `--h264 false` and
+  `H264=false` still turn it off (EDGEAI-1230).
+- JPEG encodes at quality 85 by default instead of a hardcoded 100, and
+  the quality is configurable via `--jpeg-quality` / `JPEG_QUALITY`
+  (1-100). Measured at 1080p30 on a Verdin iMX8MP, this recovers about 3
+  percentage points of CPU; enabling JPEG at all costs about 77, so
+  quality is a weak lever and the setting is documented as such
+  (EDGEAI-1230).
+- SBOM CI installs its pinned Cargo tools with their published lockfiles,
+  preventing newly released transitive dependencies from breaking release
+  artifact generation.
+
 ### Fixed
 - The H.264 encoder is now told the frame rate the camera is actually
   configured for, read from the driver with `VIDIOC_G_PARM`, instead of a
@@ -19,29 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   could not warn until capture had collapsed below 27fps -- more than a
   55% drop went unreported (EDGEAI-1403).
 - Recording metadata records the real capture rate rather than 30.
-
-### Changed
-- The H.264 frame queue holds three frames instead of one. This is not
-  what fixed the dropped frames above, and it changes nothing while the
-  encoder keeps up -- the queue stays empty and latency is unchanged. It
-  only matters under saturation, where it trades up to two frames of
-  latency for frames that would otherwise be discarded outright:
-  measured 6.9% loss down to 5.1% with JPEG encoding running
-  (EDGEAI-1403).
-
-- H.264 output is now on by default. It was off unless `--h264` or
-  `H264=true` was given, so a bare `edgefirst-camera` published no video
-  at all. The service never saw this -- `/etc/default/camera` sets
-  `H264=true` -- but it caught out every manual run. `--h264 false` and
-  `H264=false` still turn it off (EDGEAI-1230).
-- JPEG encodes at quality 85 by default instead of a hardcoded 100, and
-  the quality is configurable via `--jpeg-quality` / `JPEG_QUALITY`
-  (1-100). Measured at 1080p30 on a Verdin iMX8MP, this recovers about 3
-  percentage points of CPU; enabling JPEG at all costs about 77, so
-  quality is a weak lever and the setting is documented as such
-  (EDGEAI-1230).
-
-### Fixed
 - Tile frame pacing is now phase locked to the requested rate. It
   restarted its interval from the instant a frame was *accepted*, so
   jitter pushed each deadline later and the error accumulated: a 30fps
@@ -77,17 +93,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   describes the geometry on that one topic; losing it should not take the
   capture pipeline down, nor starve a subscriber that requires
   `camera/info` to exist (EDGEAI-1441).
-
-### Added
-- Dropped-frame counters. Frames discarded because an encoder channel was
-  full were previously invisible -- the discard arm was empty -- so an
-  operator could not tell a captured frame from a discarded one, or know
-  a recording had holes. Drops are now counted per sink and summarised in
-  one rate-limited log line every 10s (EDGEAI-1403).
-- `camera.default` documents `RECORD`, `REPLAY`, `REPLAY_LOOP` and
-  `REPLAY_FPS`, which were settable from the environment but undocumented.
-  `RECORD` writes continuously with no size cap or rotation, so leaving it
-  set will fill the filesystem; that is now stated (EDGEAI-1403).
 
 ## [2.8.0] - 2026-09-01
 
@@ -403,7 +408,8 @@ ingest camera data from this release forward.
 - Environment variable control for H264 streaming
 - Flexible runtime configuration
 
-[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.8.0...HEAD
+[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.9.0...HEAD
+[2.9.0]: https://github.com/EdgeFirstAI/camera/compare/v2.8.0...v2.9.0
 [2.8.0]: https://github.com/EdgeFirstAI/camera/compare/v2.7.0...v2.8.0
 [2.7.0]: https://github.com/EdgeFirstAI/camera/compare/v2.6.1...v2.7.0
 [2.6.1]: https://github.com/EdgeFirstAI/camera/compare/v2.6.0...v2.6.1
