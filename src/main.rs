@@ -713,10 +713,11 @@ impl ReadRetry {
     }
 
     /// Records a failed read. Returns `true` while the budget allows
-    /// another attempt, `false` once it is exhausted.
+    /// another attempt, `false` once it is exhausted -- i.e. once `max`
+    /// consecutive failures have been recorded.
     pub(crate) fn should_retry(&mut self) -> bool {
         self.consecutive = self.consecutive.saturating_add(1);
-        self.consecutive <= self.max
+        self.consecutive < self.max
     }
 
     pub(crate) fn consecutive(&self) -> u32 {
@@ -1815,8 +1816,7 @@ mod tests {
         let mut retry = ReadRetry::new(3);
         assert!(retry.should_retry(), "1st failure is retryable");
         assert!(retry.should_retry(), "2nd failure is retryable");
-        assert!(retry.should_retry(), "3rd failure is retryable");
-        assert!(!retry.should_retry(), "budget of 3 is spent");
+        assert!(!retry.should_retry(), "3rd failure exhausts a budget of 3");
     }
 
     #[test]
@@ -1826,8 +1826,7 @@ mod tests {
         retry.on_success();
         assert_eq!(retry.consecutive(), 0);
         assert!(retry.should_retry(), "budget is restored after a good read");
-        assert!(retry.should_retry());
-        assert!(!retry.should_retry());
+        assert!(!retry.should_retry(), "2nd failure exhausts a budget of 2");
     }
 
     #[test]
