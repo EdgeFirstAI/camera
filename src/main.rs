@@ -1250,7 +1250,7 @@ impl CameraInfoFields {
         let d: Vec<f64> = if bypass {
             let distortion_coeff = dewarp_config["distortion_coeff"].as_array();
             match distortion_coeff {
-                Some(v) => v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect(),
+                Some(v) => Self::parse_f64_array(v, "distortion_coeff")?,
                 None => {
                     return Err(Box::from("Did not find distortion_coeff as an array"));
                 }
@@ -1264,7 +1264,7 @@ impl CameraInfoFields {
 
         let camera_matrix = dewarp_config["camera_matrix"].as_array();
         let kv: Vec<f64> = match camera_matrix {
-            Some(v) => v.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect(),
+            Some(v) => Self::parse_f64_array(v, "camera_matrix")?,
             None => return Err(Box::from("Did not find camera_matrix as an array")),
         };
         if kv.len() != 9 {
@@ -1282,19 +1282,31 @@ impl CameraInfoFields {
 
         let width = dewarp_config["source_image"]["width"]
             .as_f64()
-            .unwrap_or_else(|| {
-                error!("Could not find camera width in camera info json");
-                1920.0
-            }) as u32;
+            .ok_or("Did not find camera width in camera info json")? as u32;
         let height = dewarp_config["source_image"]["height"]
             .as_f64()
-            .unwrap_or_else(|| {
-                error!("Could not find camera height in camera info json");
-                1080.0
-            }) as u32;
+            .ok_or("Did not find camera height in camera info json")? as u32;
         let r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
         Ok((width, height, "plumb_bob", d, k, r, p))
+    }
+
+    /// Parse a JSON array into `f64`s, failing on the first non-numeric
+    /// element rather than silently coercing it to `0.0` -- a
+    /// structurally invalid calibration must not look successfully
+    /// loaded.
+    fn parse_f64_array(
+        values: &[serde_json::Value],
+        field: &str,
+    ) -> Result<Vec<f64>, Box<dyn Error>> {
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                v.as_f64()
+                    .ok_or_else(|| Box::<dyn Error>::from(format!("{field}[{i}] is not a number")))
+            })
+            .collect()
     }
 
     /// Serialize these fields into a fresh `sensor_msgs/CameraInfo` CDR
@@ -1690,6 +1702,90 @@ mod tests {
         let pid = std::process::id();
         let path = tmp.join(format!("edgefirst_cam_info_no_array_{pid}.json"));
         std::fs::write(&path, r#"{"dewarpConfigArray": "not_an_array"}"#).unwrap();
+
+        let mut args = default_args();
+        args.cam_info_path = path.to_string_lossy().into_owned();
+        let f = CameraInfoFields::from_args(&args);
+        assert_built_in_defaults(&f);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn camera_info_fields_degrades_on_non_numeric_camera_matrix_element() {
+        // A `camera_matrix` with the right length but a non-numeric
+        // element used to be silently coerced to 0.0, producing a bogus
+        // intrinsics matrix that looked "successfully loaded" and never
+        // triggered the fallback warning.
+        let tmp = std::env::temp_dir();
+        let pid = std::process::id();
+        let path = tmp.join(format!("edgefirst_cam_info_nan_matrix_{pid}.json"));
+        std::fs::write(
+            &path,
+            r#"{
+                "bypass": false,
+                "dewarpConfigArray": [{
+                    "camera_matrix": [1,2,3,4,"bad",6,7,8,9],
+                    "source_image": {"width": 1920, "height": 1080}
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let mut args = default_args();
+        args.cam_info_path = path.to_string_lossy().into_owned();
+        let f = CameraInfoFields::from_args(&args);
+        assert_built_in_defaults(&f);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn camera_info_fields_degrades_on_non_numeric_distortion_coeff_element() {
+        let tmp = std::env::temp_dir();
+        let pid = std::process::id();
+        let path = tmp.join(format!("edgefirst_cam_info_nan_distortion_{pid}.json"));
+        std::fs::write(
+            &path,
+            r#"{
+                "bypass": true,
+                "dewarpConfigArray": [{
+                    "distortion_coeff": [1,2,3,4,null],
+                    "camera_matrix": [1,2,3,4,5,6,7,8,9],
+                    "source_image": {"width": 1920, "height": 1080}
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let mut args = default_args();
+        args.cam_info_path = path.to_string_lossy().into_owned();
+        let f = CameraInfoFields::from_args(&args);
+        assert_built_in_defaults(&f);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn camera_info_fields_degrades_on_missing_source_image_dimensions() {
+        // A missing width/height used to be logged as an `error!` and
+        // silently substituted (1920x1080) while still returning `Ok`,
+        // so `from_args` never emitted the fallback warning even though
+        // the calibration was structurally incomplete.
+        let tmp = std::env::temp_dir();
+        let pid = std::process::id();
+        let path = tmp.join(format!("edgefirst_cam_info_no_dims_{pid}.json"));
+        std::fs::write(
+            &path,
+            r#"{
+                "bypass": false,
+                "dewarpConfigArray": [{
+                    "camera_matrix": [1,2,3,4,5,6,7,8,9],
+                    "source_image": {}
+                }]
+            }"#,
+        )
+        .unwrap();
 
         let mut args = default_args();
         args.cam_info_path = path.to_string_lossy().into_owned();
