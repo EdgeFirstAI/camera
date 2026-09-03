@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The H.264 encoder is now told the frame rate the camera is actually
+  configured for, read from the driver with `VIDIOC_G_PARM`, instead of a
+  hardcoded 30. On a 1080p60 sensor the encoder was being told half the
+  real rate, and that -- not queue depth -- was what made the capture
+  path drop frames: measured 26 of 3600 frames lost over 60s before, and
+  0 of 3601 after, on an otherwise idle device (EDGEAI-1403).
+- The low-frame-rate warning compares against the configured rate rather
+  than a fixed 30, so it can actually fire. At 1080p60 it previously
+  could not warn until capture had collapsed below 27fps -- more than a
+  55% drop went unreported (EDGEAI-1403).
+- Recording metadata records the real capture rate rather than 30.
+
 ### Changed
+- The H.264 frame queue holds three frames instead of one. This is not
+  what fixed the dropped frames above, and it changes nothing while the
+  encoder keeps up -- the queue stays empty and latency is unchanged. It
+  only matters under saturation, where it trades up to two frames of
+  latency for frames that would otherwise be discarded outright:
+  measured 6.9% loss down to 5.1% with JPEG encoding running
+  (EDGEAI-1403).
+
 - H.264 output is now on by default. It was off unless `--h264` or
   `H264=true` was given, so a bare `edgefirst-camera` published no video
   at all. The service never saw this -- `/etc/default/camera` sets

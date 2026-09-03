@@ -11,7 +11,7 @@ use videostream::{
     frame::Frame,
 };
 
-use crate::{args::H264Bitrate, TARGET_FPS};
+use crate::args::H264Bitrate;
 
 /// Manager for hardware H.264 video encoding operations.
 ///
@@ -77,6 +77,7 @@ impl VideoManager {
         width: i32,
         height: i32,
         bitrate: H264Bitrate,
+        fps: i32,
     ) -> Result<VideoManager, Box<dyn Error>> {
         let profile = match bitrate {
             H264Bitrate::Auto => VSLEncoderProfileEnum::Auto,
@@ -85,9 +86,9 @@ impl VideoManager {
             H264Bitrate::Mbps50 => VSLEncoderProfileEnum::Kbps50000,
             H264Bitrate::Mbps100 => VSLEncoderProfileEnum::Kbps100000,
         };
-        let encoder = Encoder::create(profile as u32, u32::from(video_fmt), TARGET_FPS)?;
+        let encoder = Encoder::create(profile as u32, u32::from(video_fmt), fps)?;
         let crop = VSLRect::new(0, 0, width, height);
-        let output_frame = encoder.new_output_frame(width, height, 30i64, 0, 0)?;
+        let output_frame = encoder.new_output_frame(width, height, i64::from(fps), 0, 0)?;
         Ok(Self {
             encoder,
             crop,
@@ -144,6 +145,7 @@ impl VideoManager {
         crop_rect: (i32, i32, i32, i32), // (x, y, width, height)
         bitrate: H264Bitrate,
         target_fps: Option<i32>,
+        capture_fps: i32,
     ) -> Result<VideoManager, Box<dyn Error>> {
         let profile = match bitrate {
             H264Bitrate::Auto => VSLEncoderProfileEnum::Auto,
@@ -153,7 +155,7 @@ impl VideoManager {
             H264Bitrate::Mbps100 => VSLEncoderProfileEnum::Kbps100000,
         };
 
-        let fps = target_fps.unwrap_or(TARGET_FPS);
+        let fps = target_fps.unwrap_or(capture_fps);
         let encoder = Encoder::create(profile as u32, u32::from(video_fmt), fps)?;
 
         let (crop_x, crop_y, crop_width, crop_height) = crop_rect;
