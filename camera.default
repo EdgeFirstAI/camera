@@ -102,6 +102,36 @@ CAM_TF_VEC="0 0 0"
 # The default represents a typical forward-facing camera rotation.
 CAM_TF_QUAT="-1 1 -1 1"
 
+# TF frame IDs for the two ends of the transform above. The camera frame
+# ID is also stamped into the header of every published frame.
+BASE_FRAME_ID="base_link"
+CAMERA_FRAME_ID="camera_optical"
+
+# ---------------------------------------------------------------------------
+# Zenoh Topics
+# ---------------------------------------------------------------------------
+# Key expressions the node publishes on. All keys are relative to the
+# session namespace, which is the system hostname, so the wire form of
+# camera/frame is {hostname}/camera/frame. Change these only when
+# integrating with a consumer that expects different names.
+
+# Multi-plane camera frame (edgefirst_msgs/CameraFrame).
+FRAME_TOPIC="camera/frame"
+
+# Camera calibration (sensor_msgs/CameraInfo). See CAM_INFO_PATH above.
+INFO_TOPIC="camera/info"
+
+# JPEG compressed images (sensor_msgs/CompressedImage). Requires JPEG.
+JPEG_TOPIC="camera/jpeg"
+
+# H.264 video stream (foxglove_msgs/CompressedVideo). Requires H264.
+H264_TOPIC="camera/h264"
+
+# The four 4K tile streams, in order: top-left, top-right, bottom-left,
+# bottom-right. Space separated, exactly four entries. Requires
+# H264_TILES.
+H264_TILES_TOPICS="camera/h264/tl camera/h264/tr camera/h264/bl camera/h264/br"
+
 # ---------------------------------------------------------------------------
 # Zenoh Networking
 # ---------------------------------------------------------------------------
