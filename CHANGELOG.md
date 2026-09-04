@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.1] - 2026-09-04
+
+Fixes a startup failure when the shipped `camera.default` is loaded via
+systemd `EnvironmentFile`. Wire format is unchanged from 2.9.0.
+
+### Fixed
+- Empty environment variables (`RECORD=""`, `REPLAY=""`, `REPLAY_FPS=""` in
+  `camera.default`) no longer abort argument parsing at startup. systemd
+  exports `KEY=` as an empty string, not as unset; clap treated that as a
+  value-taking flag with no value. Set-but-empty vars are now cleared before
+  `Args::parse()`, consistent with how `CAM_INFO_PATH`, `CONNECT`, and
+  `LISTEN` already behave (#17).
+
 ## [2.9.0] - 2026-09-03
 
 Capture-rate honesty for the H.264 encoder, H.264 on by default, configurable
@@ -408,7 +421,8 @@ ingest camera data from this release forward.
 - Environment variable control for H264 streaming
 - Flexible runtime configuration
 
-[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.9.0...HEAD
+[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.9.1...HEAD
+[2.9.1]: https://github.com/EdgeFirstAI/camera/compare/v2.9.0...v2.9.1
 [2.9.0]: https://github.com/EdgeFirstAI/camera/compare/v2.8.0...v2.9.0
 [2.8.0]: https://github.com/EdgeFirstAI/camera/compare/v2.7.0...v2.8.0
 [2.7.0]: https://github.com/EdgeFirstAI/camera/compare/v2.6.1...v2.7.0
