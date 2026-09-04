@@ -137,6 +137,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         SHUTDOWN.store(true, Ordering::SeqCst);
     });
 
+    // systemd's EnvironmentFile exports `KEY=` as an empty string rather
+    // than leaving it unset, so an option documented in camera.default as
+    // RECORD="" reaches clap as a value-less flag and aborts the process
+    // before anything runs. Drop those first so they read as absent.
+    args::clear_blank_env(&args::BLANK_AS_UNSET_ENV);
+
     let mut args = Args::parse();
 
     // Validate arg combinations before touching anything.

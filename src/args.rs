@@ -261,6 +261,29 @@ pub struct Args {
     no_multicast_scouting: bool,
 }
 
+/// Environment variables bound to options that take a value but have no
+/// default -- the ones clap will reject if they are set to an empty
+/// string.
+///
+/// systemd's `EnvironmentFile` exports `KEY=` as an empty string rather
+/// than leaving the variable unset, so documenting an option in
+/// `camera.default` as `RECORD=""` makes clap see "the flag was given,
+/// its value is missing" and abort before anything runs. Every
+/// string-valued option here already treats `""` as "not set"
+/// (`CAM_INFO_PATH`, `CONNECT`, `LISTEN`), so these behave the same way.
+pub(crate) const BLANK_AS_UNSET_ENV: [&str; 5] =
+    ["RECORD", "REPLAY", "REPLAY_FPS", "CONNECT", "LISTEN"];
+
+/// Remove any of `vars` that are set to an empty string, so clap sees
+/// them as absent rather than as a value-less flag. Call before parsing.
+pub(crate) fn clear_blank_env(vars: &[&str]) {
+    for var in vars {
+        if std::env::var_os(var).is_some_and(|value| value.is_empty()) {
+            std::env::remove_var(var);
+        }
+    }
+}
+
 /// System hostname used as the Zenoh session namespace.
 ///
 /// Empty or `/`-containing hostnames would create unintended sub-keys, so we
@@ -325,6 +348,52 @@ impl From<Args> for Config {
 mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn blank_env_vars_are_cleared_so_clap_sees_them_as_absent() {
+        // Uniquely named so this cannot race the other tests in this
+        // binary, which share one process environment.
+        const BLANK: &str = "EDGEFIRST_TEST_BLANK_VALUE";
+        const SET: &str = "EDGEFIRST_TEST_REAL_VALUE";
+        std::env::set_var(BLANK, "");
+        std::env::set_var(SET, "/tmp/capture.h264");
+
+        clear_blank_env(&[BLANK, SET]);
+
+        assert!(
+            std::env::var_os(BLANK).is_none(),
+            "an empty variable must be removed entirely"
+        );
+        assert_eq!(
+            std::env::var(SET).unwrap(),
+            "/tmp/capture.h264",
+            "a variable with a real value must survive untouched"
+        );
+        std::env::remove_var(SET);
+    }
+
+    #[test]
+    fn every_env_option_without_a_default_is_listed_as_blank_as_unset() {
+        // Any option that takes a value, is bound to an env var and has
+        // no default will abort the process if that variable is exported
+        // empty. Adding one without listing it here reintroduces the
+        // regression that broke camera.service on every fresh unit, so
+        // the list has to stay complete.
+        let cmd = Args::command();
+        let unlisted: Vec<String> = cmd
+            .get_arguments()
+            .filter(|a| a.get_env().is_some())
+            .filter(|a| a.get_num_args().map(|n| n.takes_values()).unwrap_or(false))
+            .filter(|a| a.get_default_values().is_empty())
+            .map(|a| a.get_env().unwrap().to_string_lossy().into_owned())
+            .filter(|env| !BLANK_AS_UNSET_ENV.contains(&env.as_str()))
+            .collect();
+        assert!(
+            unlisted.is_empty(),
+            "these env-bound options take a value, have no default, and are \
+             not in BLANK_AS_UNSET_ENV: {unlisted:?}"
+        );
+    }
 
     #[test]
     fn h264_is_enabled_by_default() {
