@@ -23,7 +23,7 @@ use std::{
     env,
     error::Error,
     fs::File,
-    process,
+    io, process,
     sync::atomic::{AtomicBool, Ordering},
     thread::{self},
     time::{Duration, Instant},
@@ -37,6 +37,7 @@ use videostream::{
     camera::{create_camera, CameraBuffer, CameraReader, Mirror},
     colorimetry::{ColorEncoding, ColorRange, ColorSpace, ColorTransfer},
     fourcc::FourCC,
+    Error as VsError,
 };
 use zenoh::{
     bytes::{Encoding, ZBytes},
@@ -63,6 +64,47 @@ const MAX_CONSECUTIVE_READ_FAILURES: u32 = 5;
 /// How often to summarise dropped frames. One line per window, not per
 /// drop: under sustained load every frame can be a drop.
 const DROP_REPORT_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How long to keep retrying the camera open while the vvcam driver reports
+/// EAGAIN, meaning isp_media_server has not started serving the device yet.
+///
+/// Deliberately small. camera.service bounds its own restart loop with
+/// StartLimitIntervalSec=60 / StartLimitBurst=5 so that a camera which cannot
+/// start lands in "failed", where it is visible, rather than hammering the ISP
+/// (EDGEAI-1403). Every second spent retrying in-process is a second that
+/// window cannot account for, and a long enough budget would stop five starts
+/// from ever fitting inside it -- silently restoring the unbounded restart
+/// loop that limiter exists to prevent.
+const ISP_READY_BUDGET: Duration = Duration::from_secs(15);
+
+/// How long to wait between camera open attempts.
+///
+/// Only the first attempt pays the driver's own 5s subscribe timeout
+/// (VIV_EVENT_SUBSCRIBE_TIMEOUT_MS); vvcam then latches `no_subscriber` and
+/// rejects instantly until the daemon subscribes, so this delay -- not the
+/// driver -- sets the retry cadence.
+const ISP_READY_DELAY: Duration = Duration::from_secs(2);
+
+/// How many camera open attempts to make before giving up on the ISP.
+///
+/// A count as well as a budget because videostream 2.5.3's
+/// `CameraReader::init` leaks the device handle when `vsl_camera_init_device`
+/// fails: it returns the errno without calling `vsl_camera_close_device`,
+/// unlike `Camera::formats()`, which does close on its error paths. EAGAIN
+/// reaches us through exactly that call, so every rejected attempt leaves an
+/// fd open until the process exits. Those fds are reclaimed on exit, but an
+/// attempt that fails after REQBUFS leaves vvcam's pipeline_status at
+/// PIPELINE_REQBUFED, and the next VIDIOC_S_FMT is then answered with EBUSY --
+/// not retryable, and a worse error than the one that started the loop.
+/// Capping the attempts bounds that exposure; the real fix belongs in
+/// videostream.
+const ISP_READY_ATTEMPT_LIMIT: u32 = 6;
+
+// These three are one setting, not three. A budget shorter than two delays
+// collapses the loop to a single attempt and the retry buys nothing, so tuning
+// one without the other is a compile error rather than a silent regression.
+const _: () = assert!(ISP_READY_BUDGET.as_secs() >= ISP_READY_DELAY.as_secs() * 2);
+const _: () = assert!(ISP_READY_ATTEMPT_LIMIT >= 2);
 
 #[derive(Clone, Copy, Debug)]
 enum TilePosition {
@@ -212,13 +254,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         MirrorSetting::Both => Mirror::Both,
     };
 
-    let cam = create_camera()
-        .with_device(&args.camera)
-        .with_resolution(args.camera_size[0] as i32, args.camera_size[1] as i32)
-        .with_format(FourCC(*b"YUYV"))
-        .with_mirror(mirror)
-        .open()?;
-    cam.start()?;
+    let cam = open_camera(&args, mirror).await?;
     if cam.width() as u32 != args.camera_size[0] || cam.height() as u32 != args.camera_size[1] {
         warn!(
             "User requested {}x{} resolution but camera set {}x{} resolution",
@@ -273,6 +309,101 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+/// Open and start the camera, retrying while the ISP reports EAGAIN.
+///
+/// Au-Zone's vvcam fork reports "isp_media_server has not subscribed to this
+/// device's events yet" as EAGAIN rather than failing silently (isp-vvcam
+/// commit 22f7775, `viv_v4l2_post_event`). That race is real and not covered
+/// by camera.service's ExecStartPre chain: maivin-camera-wait-ready only
+/// proves VIDIOC_QUERYCAP answers and that the ISP logged no sensor-open
+/// failure, and it deliberately never attaches as a client, so the first real
+/// VIDIOC_S_FMT -- ours -- can still land before the daemon is serving.
+///
+/// Stock NXP vvcam never returns EAGAIN from this path, so on the standard
+/// BSP `is_isp_not_ready` is never true, the loop runs exactly once, and
+/// startup behaves as it did before. This is a Maivin-only improvement by
+/// construction rather than by configuration.
+///
+/// EAGAIN does not distinguish "still starting" from "pipeline failed to come
+/// up". Retrying rides out the first without spending systemd's restart
+/// budget; the second needs the ISP restarted, which only a service restart
+/// does (via maivin-camera-select-mode). So retry briefly, then fail and let
+/// systemd perform the heavier recovery.
+async fn open_camera(args: &Args, mirror: Mirror) -> Result<CameraReader, Box<dyn Error>> {
+    let deadline = Instant::now() + ISP_READY_BUDGET;
+    let mut attempt = 0u32;
+
+    loop {
+        attempt += 1;
+        let opened = create_camera()
+            .with_device(&args.camera)
+            .with_resolution(args.camera_size[0] as i32, args.camera_size[1] as i32)
+            .with_format(FourCC(*b"YUYV"))
+            .with_mirror(mirror)
+            .open()
+            .and_then(|cam| cam.start().map(|()| cam));
+
+        match opened {
+            Ok(cam) => {
+                if attempt > 1 {
+                    info!("Camera opened after {attempt} attempts");
+                }
+                return Ok(cam);
+            }
+            Err(err) if is_isp_not_ready(&err) && isp_retry_permitted(attempt, deadline) => {
+                // A stop arriving mid-retry must not wait the budget out:
+                // systemd would sit through it before escalating to SIGKILL,
+                // and there is nothing to shut down cleanly yet.
+                if SHUTDOWN.load(Ordering::SeqCst) {
+                    return Err(Box::from(
+                        "Shutdown requested while waiting for the ISP to become ready",
+                    ));
+                }
+                warn!(
+                    "ISP not ready to serve {} (attempt {attempt}/{ISP_READY_ATTEMPT_LIMIT}): {err}",
+                    args.camera
+                );
+                tokio::time::sleep(ISP_READY_DELAY).await;
+            }
+            Err(err) if is_isp_not_ready(&err) => {
+                // Distinguish "gave up waiting" from a hard open failure. The
+                // ISP is wedged rather than slow, and the recovery for that is
+                // a service restart, not a longer wait here.
+                return Err(Box::from(format!(
+                    "ISP still not ready to serve {} after {attempt} attempts: {err}. The ISP \
+                     pipeline is likely wedged rather than slow; restarting camera.service \
+                     restarts imx8-isp.service via maivin-camera-select-mode.",
+                    args.camera
+                )));
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+}
+
+/// Whether another camera open attempt is allowed: the attempt count and the
+/// wall-clock budget must both still permit one.
+///
+/// The count is not redundant with the deadline. vvcam latches `no_subscriber`
+/// after its first wait and rejects instantly thereafter, so how many attempts
+/// fit inside the budget is set by driver state rather than by anything this
+/// process controls -- and each rejected attempt leaks a device handle (see
+/// `ISP_READY_ATTEMPT_LIMIT`). The cap turns that exposure into a fixed number.
+fn isp_retry_permitted(attempt: u32, deadline: Instant) -> bool {
+    attempt < ISP_READY_ATTEMPT_LIMIT && Instant::now() < deadline
+}
+
+/// EAGAIN from the vvcam driver: the ISP is not serving requests yet.
+///
+/// Deliberately narrow. EBUSY (leaked vvcam state) and EINVAL (the
+/// isp_media_server double-client segfault documented in
+/// maivin-camera-select-mode) also show up at startup, but neither clears on
+/// its own -- both need the ISP restarted -- so retrying them here would only
+/// delay the service restart that actually recovers them.
+fn is_isp_not_ready(err: &VsError) -> bool {
+    matches!(err, VsError::Io(e) if e.kind() == io::ErrorKind::WouldBlock)
 }
 
 /// Reject a stream resolution larger than the capture resolution.
@@ -2366,5 +2497,65 @@ mod tests {
         assert_eq!(plane.stride, 3840);
         assert_eq!(plane.size, 1920 * 1080 * 2);
         assert!(plane.data.is_empty());
+    }
+
+    /// vvcam reports "isp_media_server has not subscribed yet" as EAGAIN, and
+    /// videostream surfaces it as `Error::Io(io::Error::last_os_error())`.
+    /// Assert against the raw errno rather than `ErrorKind::WouldBlock` so a
+    /// change in that mapping is caught here rather than on target, where the
+    /// only symptom is a retry that silently never fires.
+    #[test]
+    fn test_is_isp_not_ready_matches_eagain() {
+        let eagain = VsError::Io(io::Error::from_raw_os_error(libc::EAGAIN));
+        assert!(is_isp_not_ready(&eagain));
+    }
+
+    /// The errors that need an ISP restart, not a retry: EBUSY is leaked vvcam
+    /// state and EINVAL is the isp_media_server double-client segfault. Both
+    /// must fall through to the service restart that actually recovers them.
+    #[test]
+    fn test_is_isp_not_ready_rejects_unretryable_errno() {
+        for errno in [libc::EBUSY, libc::EINVAL, libc::ENODEV, libc::ENOENT] {
+            let err = VsError::Io(io::Error::from_raw_os_error(errno));
+            assert!(
+                !is_isp_not_ready(&err),
+                "errno {errno} must not be treated as a not-ready ISP"
+            );
+        }
+    }
+
+    /// A non-I/O failure (a missing libvideostream, say) is not an ISP
+    /// readiness problem and must not be retried.
+    #[test]
+    fn test_is_isp_not_ready_rejects_non_io_error() {
+        assert!(!is_isp_not_ready(&VsError::NullPointer));
+    }
+
+    /// The attempt cap has to bind on its own. vvcam rejects instantly once it
+    /// has latched `no_subscriber`, so with a budget still far in the future
+    /// the count is the only thing bounding how many device handles the retry
+    /// loop leaks.
+    #[test]
+    fn test_isp_retry_permitted_stops_at_attempt_limit() {
+        let far_future = Instant::now() + Duration::from_secs(3600);
+        assert!(isp_retry_permitted(ISP_READY_ATTEMPT_LIMIT - 1, far_future));
+        assert!(!isp_retry_permitted(ISP_READY_ATTEMPT_LIMIT, far_future));
+        assert!(!isp_retry_permitted(
+            ISP_READY_ATTEMPT_LIMIT + 1,
+            far_future
+        ));
+    }
+
+    /// The budget has to bind on its own too: an attempt that blocks in the
+    /// driver can burn the whole window well before the count runs out.
+    #[test]
+    fn test_isp_retry_permitted_stops_at_deadline() {
+        // Taken as the deadline and never advanced: every later Instant::now()
+        // is >= this, and the comparison is strict, so the budget is spent
+        // whatever the clock's granularity. Subtracting from Instant::now()
+        // would panic instead on a host less than a second into its uptime,
+        // since Instant is CLOCK_MONOTONIC.
+        let spent = Instant::now();
+        assert!(!isp_retry_permitted(1, spent));
     }
 }
