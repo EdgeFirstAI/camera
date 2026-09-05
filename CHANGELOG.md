@@ -34,8 +34,10 @@ is unchanged from 2.9.1, and behaviour on the stock NXP BSP is unchanged.
   both need the ISP restarted -- so retrying them would only delay the service
   restart that actually recovers them.
 - A shutdown signal arriving mid-retry aborts the wait instead of running out
-  the budget, so `systemctl stop` during a slow start no longer blocks for up
-  to 15s with nothing yet to shut down.
+  the budget, so `systemctl stop` during a slow start no longer blocks with
+  nothing yet to shut down. It also exits successfully rather than as an
+  error: an intentional stop must not leave the unit in `failed`, which is
+  the signal reserved for a camera that genuinely cannot start.
 
 ## [2.9.1] - 2026-09-04
 
