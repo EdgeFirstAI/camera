@@ -569,7 +569,17 @@ async fn tf_static_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::{find_start_code, next_nal_unit_len, starts_with_start_code};
+    use super::{
+        find_start_code, fourcc_u32_to_string, next_nal_unit_len, starts_with_start_code, zerr,
+        Carry, READ_CHUNK,
+    };
+    use std::io::Cursor;
+
+    /// Recognisable, non-repeating-per-byte payload so a test can assert on
+    /// the exact tail after a compaction rather than just its length.
+    fn pattern(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
 
     #[test]
     fn returns_none_for_short_input() {
@@ -660,5 +670,140 @@ mod tests {
         assert_eq!(next_nal_unit_len(&buf), None);
         // ...but find_start_code still locates the next SC for resync.
         assert_eq!(find_start_code(&buf), Some(2));
+    }
+
+    #[test]
+    fn carry_starts_empty() {
+        let carry = Carry::new();
+        assert!(carry.pending().is_empty());
+    }
+
+    #[test]
+    fn carry_fill_from_reads_until_eof() {
+        let data = pattern(64);
+        let mut reader = Cursor::new(data.clone());
+        let mut carry = Carry::new();
+
+        assert!(carry.fill_from(&mut reader).expect("read should succeed"));
+        assert_eq!(carry.pending(), &data[..]);
+
+        // Cursor is drained, so the next read returns 0 bytes -- the signal
+        // run_replay uses to stop or loop the file.
+        assert!(!carry.fill_from(&mut reader).expect("read should succeed"));
+    }
+
+    /// `fill_from` reads into the tail of the buffer. If it ever clobbered
+    /// instead of appending, replay would silently drop everything not yet
+    /// consumed -- mid-NAL, so the decoder would see a corrupt stream rather
+    /// than a clean truncation.
+    #[test]
+    fn carry_fill_from_appends_to_unconsumed_bytes() {
+        let mut carry = Carry::new();
+
+        let first = pattern(32);
+        assert!(carry
+            .fill_from(&mut Cursor::new(first.clone()))
+            .expect("read should succeed"));
+
+        let second: Vec<u8> = pattern(48).into_iter().rev().collect();
+        assert!(carry
+            .fill_from(&mut Cursor::new(second.clone()))
+            .expect("read should succeed"));
+
+        let mut expected = first;
+        expected.extend_from_slice(&second);
+        assert_eq!(carry.pending(), &expected[..]);
+    }
+
+    #[test]
+    fn carry_consume_advances_without_compacting_below_the_threshold() {
+        let data = pattern(1024);
+        let mut carry = Carry::new();
+        carry
+            .fill_from(&mut Cursor::new(data.clone()))
+            .expect("read should succeed");
+
+        carry.consume(10);
+
+        assert_eq!(carry.pending(), &data[10..]);
+    }
+
+    /// The compaction is the part worth testing: `consume` drains the head
+    /// and resets the offset once the waste exceeds one read chunk. The bytes
+    /// still pending have to be identical across that move -- getting the
+    /// drain bound wrong shifts the stream by a few bytes, which the decoder
+    /// sees as corruption rather than as an error.
+    #[test]
+    fn carry_consume_compacts_without_disturbing_pending_bytes() {
+        let data = pattern(READ_CHUNK + 100);
+        let mut reader = Cursor::new(data.clone());
+        let mut carry = Carry::new();
+
+        // One chunk per call, so two calls to take all of it.
+        assert!(carry.fill_from(&mut reader).expect("read should succeed"));
+        assert!(carry.fill_from(&mut reader).expect("read should succeed"));
+        assert_eq!(carry.pending().len(), data.len());
+
+        // One byte past the threshold, so the compaction branch is taken.
+        let consumed = READ_CHUNK + 1;
+        carry.consume(consumed);
+
+        assert_eq!(
+            carry.pending(),
+            &data[consumed..],
+            "compaction must preserve the pending bytes exactly"
+        );
+    }
+
+    #[test]
+    fn carry_consume_everything_leaves_nothing_pending() {
+        let data = pattern(256);
+        let mut carry = Carry::new();
+        carry
+            .fill_from(&mut Cursor::new(data.clone()))
+            .expect("read should succeed");
+
+        carry.consume(data.len());
+
+        assert!(carry.pending().is_empty());
+    }
+
+    /// `clear` has to reset the read offset as well as the buffer. Clearing
+    /// only the buffer would leave the offset past its end, and `pending`
+    /// slices from that offset -- an out-of-range panic on the next frame.
+    #[test]
+    fn carry_clear_resets_the_read_offset_too() {
+        let mut carry = Carry::new();
+        carry
+            .fill_from(&mut Cursor::new(pattern(512)))
+            .expect("read should succeed");
+        carry.consume(200);
+
+        carry.clear();
+
+        assert!(carry.pending().is_empty());
+
+        // Reusable afterwards: this is the replay-loop restart path.
+        let data = pattern(16);
+        carry
+            .fill_from(&mut Cursor::new(data.clone()))
+            .expect("read should succeed");
+        assert_eq!(carry.pending(), &data[..]);
+    }
+
+    /// FourCCs are stored little-endian, so the bytes read back in order.
+    #[test]
+    fn fourcc_u32_renders_bytes_in_little_endian_order() {
+        let yuyv = u32::from_le_bytes(*b"YUYV");
+        assert_eq!(fourcc_u32_to_string(yuyv), "YUYV");
+
+        let nv12 = u32::from_le_bytes(*b"NV12");
+        assert_eq!(fourcc_u32_to_string(nv12), "NV12");
+    }
+
+    #[test]
+    fn zerr_preserves_the_original_message() {
+        let err = zerr("connect failed");
+        assert_eq!(err.to_string(), "connect failed");
     }
 }
