@@ -23,7 +23,7 @@ use std::{
     env,
     error::Error,
     fs::File,
-    process,
+    io, process,
     sync::atomic::{AtomicBool, Ordering},
     thread::{self},
     time::{Duration, Instant},
@@ -37,6 +37,7 @@ use videostream::{
     camera::{create_camera, CameraBuffer, CameraReader, Mirror},
     colorimetry::{ColorEncoding, ColorRange, ColorSpace, ColorTransfer},
     fourcc::FourCC,
+    Error as VsError,
 };
 use zenoh::{
     bytes::{Encoding, ZBytes},
@@ -63,6 +64,52 @@ const MAX_CONSECUTIVE_READ_FAILURES: u32 = 5;
 /// How often to summarise dropped frames. One line per window, not per
 /// drop: under sustained load every frame can be a drop.
 const DROP_REPORT_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How long to keep retrying the camera open while the vvcam driver reports
+/// EAGAIN, meaning isp_media_server has not started serving the device yet.
+///
+/// Deliberately small. camera.service bounds its own restart loop with
+/// StartLimitIntervalSec=60 / StartLimitBurst=5 so that a camera which cannot
+/// start lands in "failed", where it is visible, rather than hammering the ISP
+/// (EDGEAI-1403). Every second spent retrying in-process is a second that
+/// window cannot account for, and a long enough budget would stop five starts
+/// from ever fitting inside it -- silently restoring the unbounded restart
+/// loop that limiter exists to prevent.
+const ISP_READY_BUDGET: Duration = Duration::from_secs(15);
+
+/// How long to wait between camera open attempts.
+///
+/// Only the first attempt pays the driver's own 5s subscribe timeout
+/// (VIV_EVENT_SUBSCRIBE_TIMEOUT_MS); vvcam then latches `no_subscriber` and
+/// rejects instantly until the daemon subscribes, so this delay -- not the
+/// driver -- sets the retry cadence.
+const ISP_READY_DELAY: Duration = Duration::from_secs(2);
+
+/// How many camera open attempts to make before giving up on the ISP.
+///
+/// A count as well as a budget because videostream 2.5.3's
+/// `CameraReader::init` leaks the device handle when `vsl_camera_init_device`
+/// fails: it returns the errno without calling `vsl_camera_close_device`,
+/// unlike `Camera::formats()`, which does close on its error paths. EAGAIN
+/// reaches us through exactly that call, so every rejected attempt leaves an
+/// fd open until the process exits. Those fds are reclaimed on exit, but an
+/// attempt that fails after REQBUFS leaves vvcam's pipeline_status at
+/// PIPELINE_REQBUFED, and the next VIDIOC_S_FMT is then answered with EBUSY --
+/// not retryable, and a worse error than the one that started the loop.
+/// Capping the attempts bounds that exposure; the real fix belongs in
+/// videostream.
+const ISP_READY_ATTEMPT_LIMIT: u32 = 6;
+
+// These three are one setting, not three. A budget shorter than two delays
+// collapses the loop to a single attempt and the retry buys nothing, so tuning
+// one without the other is a compile error rather than a silent regression.
+//
+// Compared in nanoseconds, not seconds: as_secs() truncates, so a 1s budget
+// against a 750ms delay would satisfy `1 >= 0` and pass while actually
+// violating the invariant. The whole point is to catch a sub-second tuning
+// mistake, which is exactly what the truncating form cannot see.
+const _: () = assert!(ISP_READY_BUDGET.as_nanos() >= ISP_READY_DELAY.as_nanos() * 2);
+const _: () = assert!(ISP_READY_ATTEMPT_LIMIT >= 2);
 
 #[derive(Clone, Copy, Debug)]
 enum TilePosition {
@@ -212,13 +259,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         MirrorSetting::Both => Mirror::Both,
     };
 
-    let cam = create_camera()
-        .with_device(&args.camera)
-        .with_resolution(args.camera_size[0] as i32, args.camera_size[1] as i32)
-        .with_format(FourCC(*b"YUYV"))
-        .with_mirror(mirror)
-        .open()?;
-    cam.start()?;
+    let cam = match open_camera(&args, mirror).await? {
+        Some(cam) => cam,
+        // Stopped before the camera ever opened: nothing has been started, so
+        // there is nothing to tear down and nothing to report as a failure.
+        None => return Ok(()),
+    };
     if cam.width() as u32 != args.camera_size[0] || cam.height() as u32 != args.camera_size[1] {
         warn!(
             "User requested {}x{} resolution but camera set {}x{} resolution",
@@ -273,6 +319,174 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+/// Open and start the camera, retrying while the ISP reports EAGAIN.
+///
+/// Au-Zone's vvcam fork reports "isp_media_server has not subscribed to this
+/// device's events yet" as EAGAIN rather than failing silently (isp-vvcam
+/// commit 22f7775, `viv_v4l2_post_event`). That race is real and not covered
+/// by camera.service's ExecStartPre chain: maivin-camera-wait-ready only
+/// proves VIDIOC_QUERYCAP answers and that the ISP logged no sensor-open
+/// failure, and it deliberately never attaches as a client, so the first real
+/// VIDIOC_S_FMT -- ours -- can still land before the daemon is serving.
+///
+/// Stock NXP vvcam never returns EAGAIN from this path, so on the standard
+/// BSP `is_isp_not_ready` is never true, the loop runs exactly once, and
+/// startup behaves as it did before. This is a Maivin-only improvement by
+/// construction rather than by configuration.
+///
+/// EAGAIN does not distinguish "still starting" from "pipeline failed to come
+/// up". Retrying rides out the first without spending systemd's restart
+/// budget; the second needs the ISP restarted, which only a service restart
+/// does (via maivin-camera-select-mode). So retry briefly, then fail and let
+/// systemd perform the heavier recovery.
+///
+/// Returns `Ok(None)` if a shutdown signal arrived before the camera opened.
+/// That is a successful outcome, not a failure: `stream` treats a shutdown as
+/// a clean `break`, and an intentional `systemctl stop` during startup must
+/// not leave the unit in "failed" -- which is the signal reserved for a
+/// camera that genuinely cannot start.
+async fn open_camera(args: &Args, mirror: Mirror) -> Result<Option<CameraReader>, Box<dyn Error>> {
+    let deadline = Instant::now() + ISP_READY_BUDGET;
+
+    retry_while_isp_not_ready(&args.camera, deadline, ISP_READY_DELAY, || {
+        create_camera()
+            .with_device(&args.camera)
+            .with_resolution(args.camera_size[0] as i32, args.camera_size[1] as i32)
+            .with_format(FourCC(*b"YUYV"))
+            .with_mirror(mirror)
+            .open()
+            .and_then(|cam| cam.start().map(|()| cam))
+    })
+    .await
+}
+
+/// Run `open_once` until it succeeds, the budget runs out, or a shutdown is
+/// requested, retrying only while the ISP reports EAGAIN.
+///
+/// Split out from `open_camera` so that the policy -- the deadline, the
+/// attempt cap, which errno is worth retrying, when to stop for a shutdown --
+/// can be exercised without libvideostream and a live ISP behind it. All the
+/// decisions live here; `open_camera` supplies only the one step that
+/// genuinely needs the hardware. That division is the point: the logic most
+/// likely to be wrong is the logic that was hardest to reach.
+async fn retry_while_isp_not_ready<T, F>(
+    camera: &str,
+    deadline: Instant,
+    delay: Duration,
+    mut open_once: F,
+) -> Result<Option<T>, Box<dyn Error>>
+where
+    F: FnMut() -> Result<T, VsError>,
+{
+    let mut attempt = 0u32;
+
+    loop {
+        // Re-checked before every attempt, not just after a failed one. An
+        // attempt can block in the driver for seconds, so a decision taken
+        // before the wait says nothing about whether the next open is still
+        // inside the budget, or still wanted at all.
+        if SHUTDOWN.load(Ordering::SeqCst) {
+            info!("Shutdown requested while waiting for the ISP to become ready");
+            return Ok(None);
+        }
+
+        attempt += 1;
+        match open_once() {
+            Ok(opened) => {
+                if attempt > 1 {
+                    info!("Camera opened after {attempt} attempts");
+                }
+                return Ok(Some(opened));
+            }
+            Err(err) if is_isp_not_ready(&err) => {
+                if !isp_retry_permitted(attempt, deadline) {
+                    return Err(Box::from(isp_wedged_error(camera, attempt, &err)));
+                }
+                warn!(
+                    "ISP not ready to serve {camera} \
+                     (attempt {attempt}/{ISP_READY_ATTEMPT_LIMIT}): {err}"
+                );
+                if !wait_before_retry(deadline, delay).await {
+                    if SHUTDOWN.load(Ordering::SeqCst) {
+                        info!("Shutdown requested while waiting for the ISP to become ready");
+                        return Ok(None);
+                    }
+                    return Err(Box::from(isp_wedged_error(camera, attempt, &err)));
+                }
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+}
+
+/// Wait before the next open attempt. Returns false when no further attempt
+/// should be made, because the budget ran out or a shutdown was requested.
+///
+/// SHUTDOWN is a plain `AtomicBool` with no wakeup channel, so this polls it
+/// on a short tick instead of sleeping the delay in one go: a `systemctl stop`
+/// arriving mid-wait should not have to sit out the remainder of it and then a
+/// further blocking open on top. The open itself is a synchronous FFI call and
+/// cannot be cancelled, so one already in flight still has to finish -- this
+/// bounds the waiting, not the driver.
+///
+/// The wait never runs past `deadline`, so the budget stays a real ceiling
+/// rather than one the last attempt is free to overshoot.
+///
+/// `delay` is a parameter rather than a direct read of `ISP_READY_DELAY` so
+/// the waiting logic can be tested at millisecond scale instead of the two
+/// seconds the real setting would cost per assertion.
+async fn wait_before_retry(deadline: Instant, delay: Duration) -> bool {
+    const TICK: Duration = Duration::from_millis(100);
+
+    let until = deadline.min(Instant::now() + delay);
+    loop {
+        if SHUTDOWN.load(Ordering::SeqCst) {
+            return false;
+        }
+        let now = Instant::now();
+        if now >= until {
+            break;
+        }
+        tokio::time::sleep(TICK.min(until - now)).await;
+    }
+    Instant::now() < deadline
+}
+
+/// The "gave up on the ISP" message, naming the recovery that actually works.
+///
+/// Kept distinct from a hard open failure: the ISP is wedged rather than slow,
+/// and no amount of further waiting here fixes that.
+fn isp_wedged_error(camera: &str, attempts: u32, err: &VsError) -> String {
+    format!(
+        "ISP still not ready to serve {camera} after {attempts} attempts: {err}. The ISP \
+         pipeline is likely wedged rather than slow; restarting camera.service restarts \
+         imx8-isp.service via maivin-camera-select-mode."
+    )
+}
+
+/// Whether another camera open attempt is allowed: the attempt count and the
+/// wall-clock budget must both still permit one.
+///
+/// The count is not redundant with the deadline. vvcam latches `no_subscriber`
+/// after its first wait and rejects instantly thereafter, so how many attempts
+/// fit inside the budget is set by driver state rather than by anything this
+/// process controls -- and each rejected attempt leaks a device handle (see
+/// `ISP_READY_ATTEMPT_LIMIT`). The cap turns that exposure into a fixed number.
+fn isp_retry_permitted(attempt: u32, deadline: Instant) -> bool {
+    attempt < ISP_READY_ATTEMPT_LIMIT && Instant::now() < deadline
+}
+
+/// EAGAIN from the vvcam driver: the ISP is not serving requests yet.
+///
+/// Deliberately narrow. EBUSY (leaked vvcam state) and EINVAL (the
+/// isp_media_server double-client segfault documented in
+/// maivin-camera-select-mode) also show up at startup, but neither clears on
+/// its own -- both need the ISP restarted -- so retrying them here would only
+/// delay the service restart that actually recovers them.
+fn is_isp_not_ready(err: &VsError) -> bool {
+    matches!(err, VsError::Io(e) if e.kind() == io::ErrorKind::WouldBlock)
 }
 
 /// Reject a stream resolution larger than the capture resolution.
@@ -1836,6 +2050,7 @@ impl ClockOffset {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::path::PathBuf;
 
     /// Build an `Args` pre-populated with the clap defaults so tests can
@@ -2366,5 +2581,289 @@ mod tests {
         assert_eq!(plane.stride, 3840);
         assert_eq!(plane.size, 1920 * 1080 * 2);
         assert!(plane.data.is_empty());
+    }
+
+    /// vvcam reports "isp_media_server has not subscribed yet" as EAGAIN, and
+    /// videostream surfaces it as `Error::Io(io::Error::last_os_error())`.
+    /// Assert against the raw errno rather than `ErrorKind::WouldBlock` so a
+    /// change in that mapping is caught here rather than on target, where the
+    /// only symptom is a retry that silently never fires.
+    #[test]
+    fn test_is_isp_not_ready_matches_eagain() {
+        let eagain = VsError::Io(io::Error::from_raw_os_error(libc::EAGAIN));
+        assert!(is_isp_not_ready(&eagain));
+    }
+
+    /// The errors that need an ISP restart, not a retry: EBUSY is leaked vvcam
+    /// state and EINVAL is the isp_media_server double-client segfault. Both
+    /// must fall through to the service restart that actually recovers them.
+    #[test]
+    fn test_is_isp_not_ready_rejects_unretryable_errno() {
+        for errno in [libc::EBUSY, libc::EINVAL, libc::ENODEV, libc::ENOENT] {
+            let err = VsError::Io(io::Error::from_raw_os_error(errno));
+            assert!(
+                !is_isp_not_ready(&err),
+                "errno {errno} must not be treated as a not-ready ISP"
+            );
+        }
+    }
+
+    /// A non-I/O failure (a missing libvideostream, say) is not an ISP
+    /// readiness problem and must not be retried.
+    #[test]
+    fn test_is_isp_not_ready_rejects_non_io_error() {
+        assert!(!is_isp_not_ready(&VsError::NullPointer));
+    }
+
+    /// The attempt cap has to bind on its own. vvcam rejects instantly once it
+    /// has latched `no_subscriber`, so with a budget still far in the future
+    /// the count is the only thing bounding how many device handles the retry
+    /// loop leaks.
+    #[test]
+    fn test_isp_retry_permitted_stops_at_attempt_limit() {
+        let far_future = Instant::now() + Duration::from_secs(3600);
+        assert!(isp_retry_permitted(ISP_READY_ATTEMPT_LIMIT - 1, far_future));
+        assert!(!isp_retry_permitted(ISP_READY_ATTEMPT_LIMIT, far_future));
+        assert!(!isp_retry_permitted(
+            ISP_READY_ATTEMPT_LIMIT + 1,
+            far_future
+        ));
+    }
+
+    /// The budget has to bind on its own too: an attempt that blocks in the
+    /// driver can burn the whole window well before the count runs out.
+    #[test]
+    fn test_isp_retry_permitted_stops_at_deadline() {
+        // Taken as the deadline and never advanced: every later Instant::now()
+        // is >= this, and the comparison is strict, so the budget is spent
+        // whatever the clock's granularity. Subtracting from Instant::now()
+        // would panic instead on a host less than a second into its uptime,
+        // since Instant is CLOCK_MONOTONIC.
+        let spent = Instant::now();
+        assert!(!isp_retry_permitted(1, spent));
+    }
+
+    /// Restores SHUTDOWN on drop so a failing assertion cannot leave the flag
+    /// set for every later test in the binary. SHUTDOWN is process-global, so
+    /// tests that touch it are also `#[serial]`.
+    struct ShutdownGuard;
+
+    impl ShutdownGuard {
+        fn set() -> Self {
+            SHUTDOWN.store(true, Ordering::SeqCst);
+            ShutdownGuard
+        }
+    }
+
+    impl Drop for ShutdownGuard {
+        fn drop(&mut self) {
+            SHUTDOWN.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// A stop arriving mid-wait must not sit out the remainder of the delay:
+    /// systemd would wait through it, and there is nothing to shut down yet.
+    #[tokio::test]
+    #[serial]
+    async fn test_wait_before_retry_returns_immediately_on_shutdown() {
+        let _guard = ShutdownGuard::set();
+
+        let started = Instant::now();
+        let again =
+            wait_before_retry(Instant::now() + Duration::from_secs(3600), ISP_READY_DELAY).await;
+
+        assert!(!again, "shutdown must stop the retry loop");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "shutdown must not wait out the {ISP_READY_DELAY:?} delay, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The budget is a ceiling on the whole loop, not just on the decision to
+    /// enter it: once spent, no further attempt may start.
+    #[tokio::test]
+    #[serial]
+    async fn test_wait_before_retry_refuses_once_budget_is_spent() {
+        let spent = Instant::now();
+        assert!(!wait_before_retry(spent, Duration::from_millis(10)).await);
+    }
+
+    /// The wait is capped by the deadline, so the last attempt cannot push the
+    /// loop past the advertised budget by a further delay.
+    #[tokio::test]
+    #[serial]
+    async fn test_wait_before_retry_never_waits_past_the_deadline() {
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(50);
+
+        // A delay far longer than the remaining budget: the deadline wins.
+        let again = wait_before_retry(deadline, Duration::from_secs(30)).await;
+
+        assert!(!again, "no attempt may start once the deadline has arrived");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the wait must be capped by the deadline, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// With budget left and no shutdown, the wait completes and another
+    /// attempt is allowed.
+    #[tokio::test]
+    #[serial]
+    async fn test_wait_before_retry_allows_another_attempt_within_budget() {
+        let deadline = Instant::now() + Duration::from_secs(3600);
+        assert!(wait_before_retry(deadline, Duration::from_millis(10)).await);
+    }
+
+    /// The give-up message has to carry what an operator needs: which device,
+    /// how many tries, the underlying errno, and the recovery that works.
+    #[test]
+    fn test_isp_wedged_error_names_device_attempts_and_recovery() {
+        let err = VsError::Io(io::Error::from_raw_os_error(libc::EAGAIN));
+        let msg = isp_wedged_error("/dev/video3", 6, &err);
+
+        assert!(msg.contains("/dev/video3"), "{msg}");
+        assert!(msg.contains("6 attempts"), "{msg}");
+        assert!(msg.contains("camera.service"), "{msg}");
+        assert!(msg.contains("imx8-isp.service"), "{msg}");
+    }
+
+    fn eagain() -> VsError {
+        VsError::Io(io::Error::from_raw_os_error(libc::EAGAIN))
+    }
+
+    /// A generous deadline, so the attempt cap is what binds rather than the
+    /// clock. Tests that want the clock to bind set their own.
+    fn far_deadline() -> Instant {
+        Instant::now() + Duration::from_secs(3600)
+    }
+
+    const FAST: Duration = Duration::from_millis(1);
+
+    /// The ordinary case: the ISP is ready, so nothing retries and nothing
+    /// waits.
+    #[tokio::test]
+    #[serial]
+    async fn test_retry_opens_on_the_first_attempt() {
+        let mut calls = 0u32;
+        let opened = retry_while_isp_not_ready("/dev/video3", far_deadline(), FAST, || {
+            calls += 1;
+            Ok(7u32)
+        })
+        .await
+        .expect("a successful open is not an error");
+
+        assert_eq!(opened, Some(7));
+        assert_eq!(calls, 1, "a working ISP must not be retried");
+    }
+
+    /// The case the whole change exists for: EAGAIN clears on a later attempt
+    /// and the camera comes up instead of the service failing.
+    #[tokio::test]
+    #[serial]
+    async fn test_retry_succeeds_after_transient_eagain() {
+        let mut calls = 0u32;
+        let opened = retry_while_isp_not_ready("/dev/video3", far_deadline(), FAST, || {
+            calls += 1;
+            if calls < 3 {
+                Err(eagain())
+            } else {
+                Ok(7u32)
+            }
+        })
+        .await
+        .expect("a transient EAGAIN must not fail the open");
+
+        assert_eq!(opened, Some(7));
+        assert_eq!(calls, 3, "must retry until the ISP answers");
+    }
+
+    /// A wedged ISP must give up at the attempt cap rather than retrying
+    /// forever -- each attempt leaks a device handle, so the cap is what
+    /// bounds that exposure.
+    #[tokio::test]
+    #[serial]
+    async fn test_retry_stops_at_the_attempt_cap() {
+        let mut calls = 0u32;
+        let err = retry_while_isp_not_ready("/dev/video3", far_deadline(), FAST, || {
+            calls += 1;
+            Err::<u32, _>(eagain())
+        })
+        .await
+        .expect_err("a permanently unready ISP must fail the open");
+
+        assert_eq!(
+            calls, ISP_READY_ATTEMPT_LIMIT,
+            "must try exactly the capped number of times"
+        );
+        assert!(err.to_string().contains("still not ready"), "{err}");
+    }
+
+    /// The budget binds independently of the cap: a slow ISP must not be
+    /// retried past it just because attempts remain.
+    #[tokio::test]
+    #[serial]
+    async fn test_retry_stops_when_the_budget_is_spent() {
+        let mut calls = 0u32;
+        let err = retry_while_isp_not_ready(
+            "/dev/video3",
+            Instant::now() + Duration::from_millis(120),
+            Duration::from_millis(40),
+            || {
+                calls += 1;
+                Err::<u32, _>(eagain())
+            },
+        )
+        .await
+        .expect_err("a spent budget must fail the open");
+
+        assert!(
+            calls < ISP_READY_ATTEMPT_LIMIT,
+            "the deadline should bind before the cap, got {calls} calls"
+        );
+        assert!(err.to_string().contains("still not ready"), "{err}");
+    }
+
+    /// EBUSY means leaked vvcam state, which needs the ISP restarted. Retrying
+    /// it here would only delay the service restart that recovers it, so it
+    /// must fail on the first attempt.
+    #[tokio::test]
+    #[serial]
+    async fn test_retry_does_not_retry_unretryable_errors() {
+        let mut calls = 0u32;
+        let err = retry_while_isp_not_ready("/dev/video3", far_deadline(), FAST, || {
+            calls += 1;
+            Err::<u32, _>(VsError::Io(io::Error::from_raw_os_error(libc::EBUSY)))
+        })
+        .await
+        .expect_err("EBUSY must fail rather than retry");
+
+        assert_eq!(calls, 1, "EBUSY must not be retried");
+        assert!(
+            !err.to_string().contains("still not ready"),
+            "EBUSY is a hard failure, not a not-ready ISP: {err}"
+        );
+    }
+
+    /// A stop that arrives before the camera opens is a clean exit, not a
+    /// failure: reporting it as an error would put the unit in "failed" for an
+    /// intentional `systemctl stop`.
+    #[tokio::test]
+    #[serial]
+    async fn test_retry_reports_shutdown_as_success_not_failure() {
+        let _guard = ShutdownGuard::set();
+
+        let mut calls = 0u32;
+        let opened = retry_while_isp_not_ready("/dev/video3", far_deadline(), FAST, || {
+            calls += 1;
+            Err::<u32, _>(eagain())
+        })
+        .await
+        .expect("a shutdown must not be reported as an open failure");
+
+        assert!(opened.is_none(), "no camera should be returned");
+        assert_eq!(calls, 0, "a pending shutdown must not start an open");
     }
 }

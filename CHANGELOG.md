@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-09-05
+
+Rides out the ISP startup race on Maivin, where the camera could fail to open
+against an isp_media_server that was running but not yet serving. Wire format
+is unchanged from 2.9.1, and behaviour on the stock NXP BSP is unchanged.
+
+### Added
+- The camera open is retried while the vvcam driver reports `EAGAIN`, meaning
+  isp_media_server has not yet subscribed to the device's events. This closes
+  a race the `camera.service` ExecStartPre chain cannot cover:
+  `maivin-camera-wait-ready` proves only that `VIDIOC_QUERYCAP` answers and
+  that the ISP logged no sensor-open failure, and it deliberately never
+  attaches as a client, so the first real `VIDIOC_S_FMT` -- the camera's --
+  could still land before the daemon was serving and fail the start.
+  Retries are bounded to 15s and 6 attempts, after which the service fails and
+  systemd's restart performs the heavier recovery (restarting the ISP via
+  `maivin-camera-select-mode`).
+- `EAGAIN` is reported by Au-Zone's `isp-vvcam` fork only. Stock NXP vvcam
+  never returns it from this path, so on the standard BSP the retry predicate
+  is never true, the open runs exactly once, and startup is byte-identical to
+  2.9.1. The improvement is Maivin-only by construction rather than by
+  configuration.
+- `EBUSY` and `EINVAL` are deliberately *not* retried. Neither clears on its
+  own -- leaked vvcam state and the isp_media_server double-client segfault
+  both need the ISP restarted -- so retrying them would only delay the service
+  restart that actually recovers them.
+- A shutdown signal arriving mid-retry aborts the wait instead of running out
+  the budget, so `systemctl stop` during a slow start no longer blocks with
+  nothing yet to shut down. It also exits successfully rather than as an
+  error: an intentional stop must not leave the unit in `failed`, which is
+  the signal reserved for a camera that genuinely cannot start.
+
 ## [2.9.1] - 2026-09-04
 
 Fixes a startup failure when the shipped `camera.default` is loaded via
@@ -421,7 +453,8 @@ ingest camera data from this release forward.
 - Environment variable control for H264 streaming
 - Flexible runtime configuration
 
-[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.9.1...HEAD
+[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.10.0...HEAD
+[2.10.0]: https://github.com/EdgeFirstAI/camera/compare/v2.9.1...v2.10.0
 [2.9.1]: https://github.com/EdgeFirstAI/camera/compare/v2.9.0...v2.9.1
 [2.9.0]: https://github.com/EdgeFirstAI/camera/compare/v2.8.0...v2.9.0
 [2.8.0]: https://github.com/EdgeFirstAI/camera/compare/v2.7.0...v2.8.0
