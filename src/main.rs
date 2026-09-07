@@ -117,8 +117,23 @@ fn get_env_filter() -> EnvFilter {
         .from_env_lossy()
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
+    // systemd's EnvironmentFile exports `KEY=""` as an empty string rather
+    // than leaving it unset, and clap treats a present-but-empty variable
+    // as a supplied value, so `REPLAY_FPS=""` or `JPEG=""` in
+    // /etc/default/camera aborts argument parsing before anything runs.
+    // Drop those so the declared defaults apply (EDGEAI-1094).
+    //
+    // SAFETY: single-threaded here; runs before the runtime is built below.
+    unsafe { args::scrub_empty_env::<Args>(args::KEEP) };
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> Result<(), Box<dyn Error>> {
     // Set up signal handler for graceful shutdown (SIGTERM/SIGINT)
     // This enables profraw coverage file generation when terminated
     tokio::spawn(async {
@@ -136,12 +151,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         SHUTDOWN.store(true, Ordering::SeqCst);
     });
-
-    // systemd's EnvironmentFile exports `KEY=` as an empty string rather
-    // than leaving it unset, so an option documented in camera.default as
-    // RECORD="" reaches clap as a value-less flag and aborts the process
-    // before anything runs. Drop those first so they read as absent.
-    args::clear_blank_env(&args::BLANK_AS_UNSET_ENV);
 
     let mut args = Args::parse();
 

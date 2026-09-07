@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Empty environment variables in `/etc/default/camera` (`KEY=""`) are now
+  treated as unset so the documented default applies instead of failing to
+  start. 2.9.1 cleared a hand-written list of five variables, which left
+  every other option (`JPEG_QUALITY=""`, `MIRROR=""`, `JPEG=""`, ...)
+  aborting with a clap parse error; the set is now derived from the
+  argument definitions so it cannot drift, and the scrub runs before the
+  tokio runtime starts any threads (EDGEAI-1094).
+
 ## [2.9.1] - 2026-09-04
 
 Fixes a startup failure when the shipped `camera.default` is loaded via
