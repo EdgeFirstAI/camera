@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.2] - 2026-09-07
+
+Patch release for EDGEAI-1094. Argument parsing only; no wire-format or
+configuration-key changes from 2.9.1.
+
 ### Fixed
 - Empty environment variables in `/etc/default/camera` (`KEY=""`) are now
   treated as unset so the documented default applies instead of failing to
@@ -430,7 +435,8 @@ ingest camera data from this release forward.
 - Environment variable control for H264 streaming
 - Flexible runtime configuration
 
-[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.9.1...HEAD
+[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.9.2...HEAD
+[2.9.2]: https://github.com/EdgeFirstAI/camera/compare/v2.9.1...v2.9.2
 [2.9.1]: https://github.com/EdgeFirstAI/camera/compare/v2.9.0...v2.9.1
 [2.9.0]: https://github.com/EdgeFirstAI/camera/compare/v2.8.0...v2.9.0
 [2.8.0]: https://github.com/EdgeFirstAI/camera/compare/v2.7.0...v2.8.0
