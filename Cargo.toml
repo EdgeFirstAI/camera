@@ -27,6 +27,10 @@ harness = false
 name = "convert"
 harness = false
 
+[[test]]
+name = "env_scrub"
+harness = false
+
 [features]
 default = ["tracy"]
 tracy = ["tracing-tracy/enable", "tracy-client/enable"]

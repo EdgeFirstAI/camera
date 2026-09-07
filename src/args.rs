@@ -271,6 +271,23 @@ pub struct Args {
 /// yields the same result as passing "".
 pub const KEEP: &[&str] = &[];
 
+/// Names of this program's env-bound arguments whose value, as reported by
+/// `var`, is present but empty and not listed in `keep`.
+///
+/// Pure: the environment is only read through `var`, so this can be unit
+/// tested with a fake lookup and no process-wide mutation.
+pub fn empty_env_vars<C: CommandFactory>(
+    keep: &[&str],
+    var: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    C::command()
+        .get_arguments()
+        .filter_map(|arg| arg.get_env().map(|e| e.to_string_lossy().into_owned()))
+        .filter(|name| !keep.contains(&name.as_str()))
+        .filter(|name| var(name).is_some_and(|v| v.is_empty()))
+        .collect()
+}
+
 /// Treat an empty environment variable as unset, so clap's declared
 /// `default_value` applies instead of failing to parse.
 ///
@@ -293,15 +310,8 @@ pub const KEEP: &[&str] = &[];
 /// tokio runtime is built. Mutating the process environment is not
 /// thread-safe.
 pub unsafe fn scrub_empty_env<C: CommandFactory>(keep: &[&str]) {
-    for arg in C::command().get_arguments() {
-        let Some(env) = arg.get_env() else { continue };
-        let name = env.to_string_lossy().into_owned();
-        if keep.contains(&name.as_str()) {
-            continue;
-        }
-        if matches!(std::env::var(&name), Ok(v) if v.is_empty()) {
-            std::env::remove_var(&name);
-        }
+    for name in empty_env_vars::<C>(keep, |name| std::env::var(name).ok()) {
+        std::env::remove_var(&name);
     }
 }
 
@@ -417,64 +427,60 @@ mod tests {
         }
     }
 
-    /// Marker the parent half of the test below sets so the child half
-    /// knows it is running with the empty variables already exported.
-    const SCRUB_CHILD_MARKER: &str = "EDGEFIRST_CAMERA_SCRUB_CHILD";
-
-    /// Behavioural check for EDGEAI-1094: a numeric, a boolean, an
-    /// optional and a flag variable exported as "" must parse to their
-    /// declared defaults after scrubbing, and a real value must survive.
-    ///
-    /// Runs the assertion in a child process. Every other test in this
-    /// binary parses `Args` from the shared process environment (some
-    /// via `parse_from`, which exits on error), so exporting "" here even
-    /// briefly would race them; the child gets its own environment.
-    #[test]
-    fn empty_env_vars_fall_back_to_defaults_after_scrub() {
-        if std::env::var_os(SCRUB_CHILD_MARKER).is_some() {
-            // Child: the parent exported the empty variables below.
-            assert!(
-                Args::try_parse_from(["edgefirst-camera"]).is_err(),
-                "precondition: clap must reject the empty variables before scrubbing"
-            );
-
-            // SAFETY: the test harness runs this test on one thread and
-            // the child process spawns no others before this point.
-            unsafe { scrub_empty_env::<Args>(KEEP) };
-
-            let args = Args::try_parse_from(["edgefirst-camera"])
-                .expect("empty variables must be treated as unset");
-            assert_eq!(args.jpeg_quality, 85, "JPEG_QUALITY=\"\" -> default");
-            assert!(args.h264, "H264=\"\" -> default");
-            assert!(!args.jpeg, "JPEG=\"\" -> default");
-            assert_eq!(args.replay_fps, None, "REPLAY_FPS=\"\" -> unset");
-            assert_eq!(
-                args.h264_tiles_fps, 7,
-                "a real value must survive untouched"
-            );
-            return;
+    /// Fake environment lookup for `empty_env_vars`: only the listed
+    /// names are "set", everything else reads as unset.
+    fn lookup<'a>(env: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            env.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_owned())
         }
+    }
 
-        let exe = std::env::current_exe().expect("test binary path");
-        let output = std::process::Command::new(exe)
-            .args([
-                "--exact",
-                "args::tests::empty_env_vars_fall_back_to_defaults_after_scrub",
-            ])
-            .env(SCRUB_CHILD_MARKER, "1")
-            .env("JPEG_QUALITY", "")
-            .env("H264", "")
-            .env("JPEG", "")
-            .env("REPLAY_FPS", "")
-            .env("H264_TILES_FPS", "7")
-            .output()
-            .expect("spawn child test process");
-        assert!(
-            output.status.success(),
-            "child failed:\n{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+    /// Behavioural check for EDGEAI-1094 on the pure selection: a
+    /// numeric, a boolean, an enum and an optional variable exported as
+    /// "" are selected for scrubbing.
+    #[test]
+    fn empty_env_vars_are_selected() {
+        let env = [
+            ("JPEG_QUALITY", ""),
+            ("H264", ""),
+            ("MIRROR", ""),
+            ("REPLAY_FPS", ""),
+        ];
+        let mut found = empty_env_vars::<Args>(KEEP, lookup(&env));
+        found.sort_unstable();
+        assert_eq!(found, ["H264", "JPEG_QUALITY", "MIRROR", "REPLAY_FPS"]);
+    }
+
+    #[test]
+    fn non_empty_env_vars_are_not_selected() {
+        let env = [("H264_TILES_FPS", "7"), ("JPEG_QUALITY", "")];
+        assert_eq!(
+            empty_env_vars::<Args>(KEEP, lookup(&env)),
+            ["JPEG_QUALITY"],
+            "a real value must survive untouched"
         );
+    }
+
+    #[test]
+    fn unset_env_vars_are_not_selected() {
+        assert!(empty_env_vars::<Args>(KEEP, lookup(&[])).is_empty());
+    }
+
+    #[test]
+    fn kept_env_vars_are_not_selected_even_when_empty() {
+        let env = [("JPEG_QUALITY", ""), ("H264", "")];
+        assert_eq!(
+            empty_env_vars::<Args>(&["JPEG_QUALITY"], lookup(&env)),
+            ["H264"]
+        );
+    }
+
+    #[test]
+    fn unbound_env_vars_are_never_selected() {
+        let env = [("EDGEFIRST_CAMERA_NOT_AN_ARG", ""), ("PATH", "")];
+        assert!(empty_env_vars::<Args>(KEEP, lookup(&env)).is_empty());
     }
 
     #[test]
