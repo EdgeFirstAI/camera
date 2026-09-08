@@ -163,7 +163,7 @@ jobs:
           # videostream APIs so they run fine on the GH-hosted runners
           # without the libvideostream.so runtime. cargo-llvm-cov drives
           # the build + test + lcov-export flow in one shot.
-          cargo llvm-cov --bin edgefirst-camera --lcov --output-path coverage.lcov
+          cargo llvm-cov --bin edgefirst-camera --test env_scrub --lcov --output-path coverage.lcov
 
       - name: Build instrumented binary for integration tests (aarch64 only)
         if: matrix.platform.name == 'aarch64'

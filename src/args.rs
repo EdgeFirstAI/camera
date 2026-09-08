@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
-use clap::{ArgAction, Parser};
+use clap::{ArgAction, CommandFactory, Parser};
 use serde_json::json;
 use std::path::PathBuf;
 use zenoh::config::{Config, WhatAmI};
@@ -261,26 +261,57 @@ pub struct Args {
     no_multicast_scouting: bool,
 }
 
-/// Environment variables bound to options that take a value but have no
-/// default -- the ones clap will reject if they are set to an empty
-/// string.
+/// Environment variables where an empty value is meaningful and must be
+/// preserved (i.e. the argument has a non-empty default but "" is a
+/// documented "disable" sentinel).
 ///
-/// systemd's `EnvironmentFile` exports `KEY=` as an empty string rather
-/// than leaving the variable unset, so documenting an option in
-/// `camera.default` as `RECORD=""` makes clap see "the flag was given,
-/// its value is missing" and abort before anything runs. Every
-/// string-valued option here already treats `""` as "not set"
-/// (`CAM_INFO_PATH`, `CONNECT`, `LISTEN`), so these behave the same way.
-pub(crate) const BLANK_AS_UNSET_ENV: [&str; 5] =
-    ["RECORD", "REPLAY", "REPLAY_FPS", "CONNECT", "LISTEN"];
+/// Empty for this service: every option that documents "leave empty to
+/// disable" (`CAM_INFO_PATH`, `CONNECT`, `LISTEN`, `RECORD`, `REPLAY`,
+/// `REPLAY_FPS`) either has no default or an empty one, so scrubbing it
+/// yields the same result as passing "".
+pub const KEEP: &[&str] = &[];
 
-/// Remove any of `vars` that are set to an empty string, so clap sees
-/// them as absent rather than as a value-less flag. Call before parsing.
-pub(crate) fn clear_blank_env(vars: &[&str]) {
-    for var in vars {
-        if std::env::var_os(var).is_some_and(|value| value.is_empty()) {
-            std::env::remove_var(var);
-        }
+/// Names of this program's env-bound arguments whose value, as reported by
+/// `var`, is present but empty and not listed in `keep`.
+///
+/// Pure: the environment is only read through `var`, so this can be unit
+/// tested with a fake lookup and no process-wide mutation.
+pub fn empty_env_vars<C: CommandFactory>(
+    keep: &[&str],
+    var: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    C::command()
+        .get_arguments()
+        .filter_map(|arg| arg.get_env().map(|e| e.to_string_lossy().into_owned()))
+        .filter(|name| !keep.contains(&name.as_str()))
+        .filter(|name| var(name).is_some_and(|v| v.is_empty()))
+        .collect()
+}
+
+/// Treat an empty environment variable as unset, so clap's declared
+/// `default_value` applies instead of failing to parse.
+///
+/// systemd's `EnvironmentFile` exports `KEY=""` as an empty string rather
+/// than leaving the variable unset, and clap treats a present-but-empty
+/// variable as a supplied value: `REPLAY_FPS=""` fails integer parsing,
+/// `JPEG=""` is "a value is required", and `MIRROR=""` is an invalid
+/// enum. A `value_parser` cannot fix this -- it can return a value or an
+/// error but never "absent" -- so the variable must be removed before
+/// clap sees it.
+///
+/// Only variables bound to this program's own arguments are considered;
+/// unrelated process environment is left alone. The list is derived from
+/// `C::command()` rather than written by hand so it cannot drift from
+/// the argument definitions. `keep` names variables where an empty value
+/// is meaningful and must be preserved.
+///
+/// # Safety
+/// Must be called before any thread is spawned -- that is, before the
+/// tokio runtime is built. Mutating the process environment is not
+/// thread-safe.
+pub unsafe fn scrub_empty_env<C: CommandFactory>(keep: &[&str]) {
+    for name in empty_env_vars::<C>(keep, |name| std::env::var(name).ok()) {
+        std::env::remove_var(&name);
     }
 }
 
@@ -347,52 +378,109 @@ impl From<Args> for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::{CommandFactory, Parser};
 
+    /// Env-bound arguments with a non-empty default where we have
+    /// consciously decided that an empty value is NOT meaningful (so
+    /// scrubbing to the default is correct).
+    const SCRUB_REVIEWED: &[&str] = &[
+        "CAMERA",
+        "CAMERA_SIZE",
+        "MIRROR",
+        "FRAME_TOPIC",
+        "INFO_TOPIC",
+        "JPEG_TOPIC",
+        "JPEG_QUALITY",
+        "H264",
+        "H264_TOPIC",
+        "H264_BITRATE",
+        "H264_TILES_TOPICS",
+        "H264_TILES_FPS",
+        "REPLAY_LOOP",
+        "STREAM_SIZE",
+        "CAM_TF_VEC",
+        "CAM_TF_QUAT",
+        "BASE_FRAME_ID",
+        "CAMERA_FRAME_ID",
+        "MODE",
+    ];
+
+    /// Drift guard: adding an env-bound option with a non-empty default
+    /// forces a decision about whether "" means "use the default" (add
+    /// it to `SCRUB_REVIEWED`) or is a meaningful sentinel (add it to
+    /// `KEEP`).
     #[test]
-    fn blank_env_vars_are_cleared_so_clap_sees_them_as_absent() {
-        // Uniquely named so this cannot race the other tests in this
-        // binary, which share one process environment.
-        const BLANK: &str = "EDGEFIRST_TEST_BLANK_VALUE";
-        const SET: &str = "EDGEFIRST_TEST_REAL_VALUE";
-        std::env::set_var(BLANK, "");
-        std::env::set_var(SET, "/tmp/capture.h264");
+    fn every_env_arg_is_either_scrubbable_or_explicitly_kept() {
+        for arg in Args::command().get_arguments() {
+            let Some(env) = arg.get_env() else { continue };
+            let name = env.to_string_lossy().into_owned();
+            let has_nonempty_default = arg
+                .get_default_values()
+                .first()
+                .is_some_and(|d| !d.is_empty());
+            if has_nonempty_default && !KEEP.contains(&name.as_str()) {
+                assert!(
+                    SCRUB_REVIEWED.contains(&name.as_str()),
+                    "{name} has a non-empty default; decide whether empty is meaningful \
+                     and add it to KEEP or SCRUB_REVIEWED"
+                );
+            }
+        }
+    }
 
-        clear_blank_env(&[BLANK, SET]);
+    /// Fake environment lookup for `empty_env_vars`: only the listed
+    /// names are "set", everything else reads as unset.
+    fn lookup<'a>(env: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            env.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_owned())
+        }
+    }
 
-        assert!(
-            std::env::var_os(BLANK).is_none(),
-            "an empty variable must be removed entirely"
-        );
-        assert_eq!(
-            std::env::var(SET).unwrap(),
-            "/tmp/capture.h264",
-            "a variable with a real value must survive untouched"
-        );
-        std::env::remove_var(SET);
+    /// Behavioural check for EDGEAI-1094 on the pure selection: a
+    /// numeric, a boolean, an enum and an optional variable exported as
+    /// "" are selected for scrubbing.
+    #[test]
+    fn empty_env_vars_are_selected() {
+        let env = [
+            ("JPEG_QUALITY", ""),
+            ("H264", ""),
+            ("MIRROR", ""),
+            ("REPLAY_FPS", ""),
+        ];
+        let mut found = empty_env_vars::<Args>(KEEP, lookup(&env));
+        found.sort_unstable();
+        assert_eq!(found, ["H264", "JPEG_QUALITY", "MIRROR", "REPLAY_FPS"]);
     }
 
     #[test]
-    fn every_env_option_without_a_default_is_listed_as_blank_as_unset() {
-        // Any option that takes a value, is bound to an env var and has
-        // no default will abort the process if that variable is exported
-        // empty. Adding one without listing it here reintroduces the
-        // regression that broke camera.service on every fresh unit, so
-        // the list has to stay complete.
-        let cmd = Args::command();
-        let unlisted: Vec<String> = cmd
-            .get_arguments()
-            .filter(|a| a.get_env().is_some())
-            .filter(|a| a.get_num_args().map(|n| n.takes_values()).unwrap_or(false))
-            .filter(|a| a.get_default_values().is_empty())
-            .map(|a| a.get_env().unwrap().to_string_lossy().into_owned())
-            .filter(|env| !BLANK_AS_UNSET_ENV.contains(&env.as_str()))
-            .collect();
-        assert!(
-            unlisted.is_empty(),
-            "these env-bound options take a value, have no default, and are \
-             not in BLANK_AS_UNSET_ENV: {unlisted:?}"
+    fn non_empty_env_vars_are_not_selected() {
+        let env = [("H264_TILES_FPS", "7"), ("JPEG_QUALITY", "")];
+        assert_eq!(
+            empty_env_vars::<Args>(KEEP, lookup(&env)),
+            ["JPEG_QUALITY"],
+            "a real value must survive untouched"
         );
+    }
+
+    #[test]
+    fn unset_env_vars_are_not_selected() {
+        assert!(empty_env_vars::<Args>(KEEP, lookup(&[])).is_empty());
+    }
+
+    #[test]
+    fn kept_env_vars_are_not_selected_even_when_empty() {
+        let env = [("JPEG_QUALITY", ""), ("H264", "")];
+        assert_eq!(
+            empty_env_vars::<Args>(&["JPEG_QUALITY"], lookup(&env)),
+            ["H264"]
+        );
+    }
+
+    #[test]
+    fn unbound_env_vars_are_never_selected() {
+        let env = [("EDGEFIRST_CAMERA_NOT_AN_ARG", ""), ("PATH", "")];
+        assert!(empty_env_vars::<Args>(KEEP, lookup(&env)).is_empty());
     }
 
     #[test]
