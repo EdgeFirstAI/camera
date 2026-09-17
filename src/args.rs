@@ -3,8 +3,114 @@
 
 use clap::{ArgAction, CommandFactory, Parser};
 use serde_json::json;
-use std::path::PathBuf;
+use std::{fmt, path::PathBuf, str::FromStr};
 use zenoh::config::{Config, WhatAmI};
+
+/// A camera mode: named `SIZExFPS` (`1080p30`) or FPS-only (`30FPS`).
+///
+/// Size names: VGA (640×480), WVGA (800×480), 540p (960×540), 720p
+/// (1280×720), 1080p (1920×1080), 4K (3840×2160). Any positive whole
+/// FPS is accepted. Combined modes supply both size and FPS; FPS-only
+/// leaves resolution to `CAMERA_SIZE` or the live device.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CameraMode {
+    /// Named capture size, if this was a combined mode.
+    pub size: Option<(u32, u32)>,
+    /// Requested frames per second.
+    pub fps: u32,
+}
+
+impl CameraMode {
+    /// Capture size from a combined mode, if any.
+    pub fn size(&self) -> Option<(u32, u32)> {
+        self.size
+    }
+
+    /// Requested frames per second.
+    pub fn fps(&self) -> u32 {
+        self.fps
+    }
+}
+
+impl fmt::Display for CameraMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.size {
+            Some((w, h)) => write!(f, "{w}x{h}@{fps}", fps = self.fps),
+            None => write!(f, "{fps}FPS", fps = self.fps),
+        }
+    }
+}
+
+impl FromStr for CameraMode {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        parse_camera_mode(raw)
+    }
+}
+
+fn parse_fps(digits: &str) -> Result<u32, String> {
+    let fps: u32 = digits
+        .parse()
+        .map_err(|_| format!("invalid camera mode FPS '{digits}'"))?;
+    if fps == 0 {
+        return Err("camera mode FPS must be a positive whole number".into());
+    }
+    Ok(fps)
+}
+
+fn named_size(token: &str) -> Result<(u32, u32), String> {
+    match token {
+        "vga" => Ok((640, 480)),
+        "wvga" => Ok((800, 480)),
+        "540p" => Ok((960, 540)),
+        "720p" => Ok((1280, 720)),
+        "1080p" => Ok((1920, 1080)),
+        "4k" => Ok((3840, 2160)),
+        "" => Err("camera mode must be SIZExFPS (e.g. 1080p30) or FPS-only (e.g. 30FPS)".into()),
+        other => Err(format!(
+            "unknown camera size '{other}'; expected VGA, WVGA, 540p, 720p, 1080p, or 4K"
+        )),
+    }
+}
+
+fn parse_camera_mode(raw: &str) -> Result<CameraMode, String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err("camera mode must not be empty".into());
+    }
+    let lower = s.to_ascii_lowercase();
+
+    if let Some(fps_str) = lower.strip_suffix("fps") {
+        if !fps_str.is_empty() && fps_str.bytes().all(|b| b.is_ascii_digit()) {
+            return Ok(CameraMode {
+                size: None,
+                fps: parse_fps(fps_str)?,
+            });
+        }
+    }
+
+    let fps_start = lower
+        .bytes()
+        .rposition(|b| !b.is_ascii_digit())
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    if fps_start == lower.len() {
+        return Err(format!(
+            "camera mode '{raw}' is missing a frame rate; use e.g. 1080p30 or 30FPS"
+        ));
+    }
+    if fps_start == 0 {
+        return Err(format!(
+            "camera mode '{raw}' needs a size name or an FPS suffix; use e.g. 1080p30 or 30FPS"
+        ));
+    }
+
+    Ok(CameraMode {
+        size: Some(named_size(&lower[..fps_start])?),
+        fps: parse_fps(&lower[fps_start..])?,
+    })
+}
 
 /// Camera image mirroring options.
 ///
@@ -65,15 +171,20 @@ pub struct Args {
     #[arg(short, long, env = "CAMERA", default_value = "/dev/video3")]
     pub camera: String,
 
-    /// Camera capture resolution in pixels (width height)
-    #[arg(
-        long,
-        env = "CAMERA_SIZE",
-        default_value = "1920 1080",
-        value_delimiter = ' ',
-        num_args = 2
-    )]
-    pub camera_size: Vec<u32>,
+    /// Camera capture resolution in pixels (width height).
+    ///
+    /// Unset means use the size from `--camera-mode` when that is a
+    /// combined `SIZExFPS` value, otherwise probe the live device.
+    #[arg(long, env = "CAMERA_SIZE", value_delimiter = ' ', num_args = 2)]
+    pub camera_size: Option<Vec<u32>>,
+
+    /// Capture mode: named `SIZExFPS` (`1080p30`) or FPS-only (`30FPS`).
+    ///
+    /// Combined modes override `--camera-size`. FPS-only leaves resolution
+    /// to `--camera-size` or the live device. Unset probes the device for
+    /// both size and rate.
+    #[arg(long, env = "CAMERA_MODE")]
+    pub camera_mode: Option<CameraMode>,
 
     /// Camera image mirroring setting
     #[arg(long, env = "MIRROR", default_value = "both", value_enum)]
@@ -261,6 +372,28 @@ pub struct Args {
     no_multicast_scouting: bool,
 }
 
+impl Args {
+    /// Capture size requested by configuration, if any.
+    ///
+    /// A combined `CAMERA_MODE` size wins over `CAMERA_SIZE`. `None`
+    /// means probe the live device.
+    pub fn requested_capture_size(&self) -> Option<(u32, u32)> {
+        if let Some(mode) = &self.camera_mode {
+            if let Some(size) = mode.size {
+                return Some(size);
+            }
+        }
+        self.camera_size
+            .as_ref()
+            .and_then(|v| (v.len() >= 2).then_some((v[0], v[1])))
+    }
+
+    /// Frame rate requested by `CAMERA_MODE`, if any.
+    pub fn requested_capture_fps(&self) -> Option<u32> {
+        self.camera_mode.as_ref().map(CameraMode::fps)
+    }
+}
+
 /// Environment variables where an empty value is meaningful and must be
 /// preserved (i.e. the argument has a non-empty default but "" is a
 /// documented "disable" sentinel).
@@ -384,7 +517,6 @@ mod tests {
     /// scrubbing to the default is correct).
     const SCRUB_REVIEWED: &[&str] = &[
         "CAMERA",
-        "CAMERA_SIZE",
         "MIRROR",
         "FRAME_TOPIC",
         "INFO_TOPIC",
@@ -575,5 +707,107 @@ mod tests {
                 "tile topic {topic} still has rt/"
             );
         }
+    }
+
+    #[test]
+    fn named_sizes_map_to_pixels() {
+        let cases = [
+            ("VGA30", 640, 480, 30),
+            ("wvga15", 800, 480, 15),
+            ("540p24", 960, 540, 24),
+            ("720p30", 1280, 720, 30),
+            ("1080p30", 1920, 1080, 30),
+            ("4K60", 3840, 2160, 60),
+            ("4k1", 3840, 2160, 1),
+        ];
+        for (raw, w, h, fps) in cases {
+            let mode = CameraMode::from_str(raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
+            assert_eq!(mode.size, Some((w, h)), "{raw}");
+            assert_eq!(mode.fps, fps, "{raw}");
+        }
+    }
+
+    #[test]
+    fn fps_only_modes_leave_size_unset() {
+        for raw in ["30FPS", "30fps", "5FPS", " 60FPS "] {
+            let mode = CameraMode::from_str(raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
+            assert_eq!(mode.size, None, "{raw}");
+            assert!(mode.fps > 0, "{raw}");
+        }
+        assert_eq!(CameraMode::from_str("30FPS").unwrap().fps, 30);
+    }
+
+    #[test]
+    fn malformed_modes_are_rejected() {
+        for raw in [
+            "",
+            "1080p",
+            "30",
+            "FPS30",
+            "1080p0",
+            "QSXGA30",
+            "1080p30fps",
+        ] {
+            assert!(CameraMode::from_str(raw).is_err(), "{raw} must be rejected");
+        }
+    }
+
+    #[test]
+    fn combined_mode_overrides_camera_size() {
+        let args = Args::parse_from([
+            "edgefirst-camera",
+            "--camera-mode",
+            "720p30",
+            "--camera-size",
+            "1920",
+            "1080",
+        ]);
+        assert_eq!(args.requested_capture_size(), Some((1280, 720)));
+        assert_eq!(args.requested_capture_fps(), Some(30));
+    }
+
+    #[test]
+    fn fps_only_mode_uses_camera_size() {
+        let args = Args::parse_from([
+            "edgefirst-camera",
+            "--camera-mode",
+            "30FPS",
+            "--camera-size",
+            "1440",
+            "1080",
+        ]);
+        assert_eq!(args.requested_capture_size(), Some((1440, 1080)));
+        assert_eq!(args.requested_capture_fps(), Some(30));
+    }
+
+    #[test]
+    fn neither_mode_nor_size_means_probe_the_device() {
+        let args = Args::parse_from(["edgefirst-camera"]);
+        assert_eq!(args.camera_size, None);
+        assert_eq!(args.camera_mode, None);
+        assert_eq!(args.requested_capture_size(), None);
+        assert_eq!(args.requested_capture_fps(), None);
+    }
+
+    #[test]
+    fn camera_size_alone_requests_size_but_not_fps() {
+        let args = Args::parse_from(["edgefirst-camera", "--camera-size", "800", "600"]);
+        assert_eq!(args.requested_capture_size(), Some((800, 600)));
+        assert_eq!(args.requested_capture_fps(), None);
+    }
+
+    #[test]
+    fn camera_mode_is_env_bound() {
+        let cmd = Args::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "camera_mode")
+            .expect("camera_mode");
+        assert_eq!(
+            arg.get_env()
+                .map(|e| e.to_string_lossy().into_owned())
+                .as_deref(),
+            Some("CAMERA_MODE")
+        );
     }
 }

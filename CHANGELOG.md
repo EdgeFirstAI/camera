@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `CAMERA_MODE` / `--camera-mode` is a first-class capture mode: combined
+  `SIZExFPS` values (`VGA30`, `WVGA15`, `540p24`, `720p30`, `1080p30`,
+  `4K30`) and FPS-only (`30FPS`). Combined modes override `CAMERA_SIZE`;
+  FPS-only leaves resolution to `CAMERA_SIZE` or the live device
+  (EDGEAI-1445). The parsed FPS is the expected capture rate for the
+  encoder, sidecar, and low-FPS warning even if `VIDIOC_S_PARM` is
+  unsupported, so an intentional 30 FPS cap no longer logs "configured
+  for 60".
+
+### Changed
+- `CAMERA_SIZE` is optional. Unset `CAMERA_MODE` and `CAMERA_SIZE` probes
+  the live camera (`VIDIOC_G_FMT` / `VIDIOC_G_PARM`) and fails only if
+  that query cannot answer. The shipped `camera.default` leaves both
+  empty; product images (Maivin `1080p30`) override via bbappend.
+
 ## [2.10.1] - 2026-09-07
 
 Patch release for EDGEAI-1094. Argument parsing only; no wire-format or

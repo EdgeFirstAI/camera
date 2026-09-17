@@ -151,7 +151,7 @@ cargo build --release --target aarch64-unknown-linux-gnu
 ```bash
 edgefirst-camera \
   --camera /dev/video0 \
-  --camera-size 1920 1080 \
+  --camera-mode 1080p30 \
   --jpeg \
   --h264
 ```
@@ -308,7 +308,8 @@ edgefirst-camera --help
 **Essential Options:**
 
 - `--camera <PATH>` - Camera device path (default: `/dev/video3`)
-- `--camera-size <WIDTH> <HEIGHT>` - Capture resolution (default: `1920 1080`)
+- `--camera-mode <MODE>` - Capture mode: `SIZExFPS` (`1080p30`) or FPS-only (`30FPS`). Unset probes the live device.
+- `--camera-size <WIDTH> <HEIGHT>` - Capture resolution when `--camera-mode` is unset or FPS-only. Unset probes the live device.
 - `--stream-size <WIDTH> <HEIGHT>` - Output resolution for JPEG/H264 (default: `1920 1080`)
 - `--mirror <none|horizontal|vertical|both>` - Mirror camera image (default: `both`)
 
@@ -356,10 +357,11 @@ edgefirst-camera --help
 All command-line flags can be set via environment variables with `EDGEFIRST_CAMERA_` prefix:
 
 ```bash
-export EDGEFIRST_CAMERA_CAMERA=/dev/video0
-export EDGEFIRST_CAMERA_MIRROR=both
-export EDGEFIRST_CAMERA_JPEG=true
-export EDGEFIRST_CAMERA_H264=true
+export CAMERA=/dev/video0
+export CAMERA_MODE=1080p30
+export MIRROR=both
+export JPEG=true
+export H264=true
 
 edgefirst-camera  # Uses environment configuration
 ```

@@ -23,7 +23,13 @@ const TEST_NAME: &str = "empty_env_is_treated_as_unset";
 
 /// Numeric, boolean, enum and optional (no default) arguments, all
 /// written as `KEY=""` in /etc/default/camera.
-const VARS: [&str; 4] = ["JPEG_QUALITY", "H264", "MIRROR", "REPLAY_FPS"];
+const VARS: [&str; 5] = [
+    "JPEG_QUALITY",
+    "H264",
+    "MIRROR",
+    "REPLAY_FPS",
+    "CAMERA_MODE",
+];
 const ARGV: [&str; 1] = ["edgefirst-camera"];
 
 /// libtest flags that consume the following argument, so it is not a filter.
@@ -128,6 +134,7 @@ fn main() {
     assert!(args.h264);
     assert_eq!(args.mirror, MirrorSetting::Both);
     assert_eq!(args.replay_fps, None);
+    assert_eq!(args.camera_mode, None);
     assert_eq!(args.h264_tiles_fps, 7);
     println!("env_scrub: ok");
 }

@@ -19,19 +19,31 @@
 CAMERA="/dev/video3"
 
 # ---------------------------------------------------------------------------
-# Camera Capture Resolution
+# Camera Capture
 # ---------------------------------------------------------------------------
 # Native capture resolution requested from the camera driver (width height).
-# This is independent of STREAM_SIZE — the camera captures at this resolution
-# and frames are scaled to STREAM_SIZE for encoding. Set this to match a
-# resolution the camera sensor actually supports.
-CAMERA_SIZE="1920 1080"
+# Leave empty to use CAMERA_MODE when that is a combined SIZExFPS value,
+# otherwise the live device size from VIDIOC_G_FMT. Set this for sensors
+# whose resolution is not one of the named CAMERA_MODE sizes.
+CAMERA_SIZE=""
+
+# Capture mode. Two forms, case-insensitive:
+#   SIZExFPS  e.g. VGA30, WVGA15, 540p24, 720p30, 1080p30, 4K30
+#             Sizes: VGA 640x480, WVGA 800x480, 540p 960x540,
+#             720p 1280x720, 1080p 1920x1080, 4K 3840x2160.
+#             Combined modes override CAMERA_SIZE.
+#   FPS-only  e.g. 30FPS — only the frame rate; resolution comes from
+#             CAMERA_SIZE or the live device.
+# Leave empty (with CAMERA_SIZE empty) to probe the current camera
+# configuration. Product images such as Maivin set CAMERA_MODE=1080p30
+# via a bbappend, not this file.
+CAMERA_MODE=""
 
 # ---------------------------------------------------------------------------
 # Streaming Resolution
 # ---------------------------------------------------------------------------
 # Resolution used for H.264 and JPEG encoding output (width height). The
-# hardware H.264 encoder supports up to 1920x1080. If CAMERA_SIZE is larger
+# hardware H.264 encoder supports up to 1920x1080. If the capture size is larger
 # (e.g. 4K), frames are downscaled to STREAM_SIZE before encoding unless
 # H264_TILES is enabled.
 STREAM_SIZE="1920 1080"
@@ -67,7 +79,7 @@ H264_BITRATE="auto"
 # and encodes each independently. The four tile streams are published on
 # separate Zenoh topics (camera/h264/tl, camera/h264/tr, camera/h264/bl,
 # camera/h264/br).
-# Only useful when CAMERA_SIZE is 3840x2160 or larger.
+# Only useful when capture is 3840x2160 or larger.
 H264_TILES="false"
 
 # FPS limit applied to tile streams. A lower value than the camera FPS
