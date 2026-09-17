@@ -354,7 +354,8 @@ edgefirst-camera --help
 
 ### Environment Variables
 
-All command-line flags can be set via environment variables with `EDGEFIRST_CAMERA_` prefix:
+All command-line flags can be set using the direct environment-variable
+names shown by `--help` and in `camera.default`:
 
 ```bash
 export CAMERA=/dev/video0

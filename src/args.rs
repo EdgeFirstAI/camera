@@ -56,6 +56,9 @@ fn parse_fps(digits: &str) -> Result<u32, String> {
     if fps == 0 {
         return Err("camera mode FPS must be a positive whole number".into());
     }
+    if fps > i32::MAX as u32 {
+        return Err(format!("camera mode FPS must not exceed {}", i32::MAX));
+    }
     Ok(fps)
 }
 
@@ -745,6 +748,8 @@ mod tests {
             "30",
             "FPS30",
             "1080p0",
+            "2147483648FPS",
+            "4K2147483648",
             "QSXGA30",
             "1080p30fps",
         ] {

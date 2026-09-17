@@ -28,7 +28,6 @@ use std::{
     thread::{self},
     time::{Duration, Instant},
 };
-use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tracing::{error, info, info_span, instrument, level_filters::LevelFilter, warn, Instrument};
 use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter, Layer as _, Registry};
 use tracy_client::{frame_mark, plot, secondary_frame_mark};
@@ -361,6 +360,7 @@ async fn open_camera(
 ) -> Result<Option<CameraReader>, Box<dyn Error>> {
     let deadline = Instant::now() + ISP_READY_BUDGET;
     let (width, height) = (size.0 as i32, size.1 as i32);
+    let requested_fps = args.requested_capture_fps();
 
     retry_while_isp_not_ready(&args.camera, deadline, ISP_READY_DELAY, || {
         create_camera()
@@ -369,7 +369,15 @@ async fn open_camera(
             .with_format(FourCC(*b"YUYV"))
             .with_mirror(mirror)
             .open()
-            .and_then(|cam| cam.start().map(|()| cam))
+            .and_then(|cam| {
+                // Apply the requested interval after format negotiation but
+                // before streaming. Some V4L2 drivers reject S_PARM after
+                // STREAMON.
+                if let Some(fps) = requested_fps {
+                    capture_rate::apply(&args.camera, fps);
+                }
+                cam.start().map(|()| cam)
+            })
     })
     .await
 }
@@ -536,9 +544,9 @@ fn validate_stream_size(args: &Args) -> Result<(), Box<dyn Error>> {
     };
     if sw > cw || sh > ch {
         return Err(Box::from(format!(
-            "STREAM_SIZE {sw}x{sh} is larger than CAMERA_SIZE {cw}x{ch}; the ISP scales down \
+            "STREAM_SIZE {sw}x{sh} is larger than capture size {cw}x{ch}; the ISP scales down \
              but never up, so no stream can be produced. Lower STREAM_SIZE, or raise \
-             CAMERA_SIZE to a resolution the sensor mode supports."
+             CAMERA_SIZE / choose a larger CAMERA_MODE that the sensor supports."
         )));
     }
     Ok(())
@@ -707,13 +715,8 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     // recorded .h264 file will actually contain), not the camera
     // capture dimensions — those can differ when --stream-size
     // rescales from --camera-size.
-    let recorder: Option<tokio::io::BufWriter<tokio::fs::File>> = match args.record.as_ref() {
+    let recorder: Option<std::io::BufWriter<std::fs::File>> = match args.record.as_ref() {
         Some(path) => {
-            let file = tokio::fs::File::create(path)
-                .await
-                .map_err(|e| format!("Cannot create recording file {:?}: {e}", path))?;
-            let bw = tokio::io::BufWriter::with_capacity(256 * 1024, file);
-
             let sidecar = Sidecar::from_live(
                 capture_fps as u32,
                 args.stream_size[0],
@@ -722,11 +725,15 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                 info_fields.clone(),
                 tf_fields.clone(),
             );
-            let sidecar_path = path.clone();
-            let written = tokio::task::spawn_blocking(move || {
-                sidecar
-                    .write_paired(&sidecar_path)
-                    .map_err(|e| e.to_string())
+            let record_path = path.clone();
+            let (bw, written) = tokio::task::spawn_blocking(move || {
+                let file = std::fs::File::create(&record_path)
+                    .map_err(|e| format!("Cannot create recording file {:?}: {e}", record_path))?;
+                let bw = std::io::BufWriter::with_capacity(256 * 1024, file);
+                let written = sidecar
+                    .write_paired(&record_path)
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>((bw, written))
             })
             .await??;
             info!(
@@ -1163,7 +1170,7 @@ async fn h264_task(
     // Pre-opened in `stream()` before the sidecar write so a doomed
     // record run aborts the whole process before producing orphaned
     // metadata. `None` when `--record` is not set.
-    mut recorder: Option<tokio::io::BufWriter<tokio::fs::File>>,
+    mut recorder: Option<std::io::BufWriter<std::fs::File>>,
 ) {
     let publisher = match session
         .declare_publisher(args.h264_topic.clone())
@@ -1221,7 +1228,7 @@ async fn h264_task(
             };
 
             if let Some(w) = recorder.as_mut() {
-                if let Err(e) = write_recording(w, &data, is_key).await {
+                if let Err(e) = tokio::task::block_in_place(|| write_recording(w, &data, is_key)) {
                     error!("h264 recorder write failed: {e}");
                 }
             }
@@ -1243,20 +1250,17 @@ async fn h264_task(
     // last GOP hits disk before we return and the tokio runtime tears
     // this thread down.
     if let Some(mut w) = recorder.take() {
-        if let Err(e) = w.flush().await {
+        let result = tokio::task::block_in_place(|| std::io::Write::flush(&mut w));
+        if let Err(e) = result {
             error!("h264 recorder final flush failed: {e}");
         }
     }
 }
 
-async fn write_recording(
-    writer: &mut (impl AsyncWrite + Unpin),
-    data: &[u8],
-    flush: bool,
-) -> io::Result<()> {
-    writer.write_all(data).await?;
+fn write_recording(writer: &mut impl io::Write, data: &[u8], flush: bool) -> io::Result<()> {
+    writer.write_all(data)?;
     if flush {
-        writer.flush().await?;
+        writer.flush()?;
     }
     Ok(())
 }
@@ -2115,12 +2119,10 @@ mod tests {
         validate_record_replay_args(&args).expect("plain live path must validate");
     }
 
-    #[tokio::test]
-    async fn recording_write_appends_encoded_frame() {
+    #[test]
+    fn recording_write_appends_encoded_frame() {
         let mut output = Vec::new();
-        write_recording(&mut output, b"encoded frame", false)
-            .await
-            .expect("in-memory recording write");
+        write_recording(&mut output, b"encoded frame", false).expect("in-memory recording write");
         assert_eq!(output, b"encoded frame");
     }
 
@@ -2134,8 +2136,8 @@ mod tests {
         args.stream_size = vec![3840, 2160];
         let err = validate_stream_size(&args).unwrap_err().to_string();
         assert!(
-            err.contains("STREAM_SIZE") && err.contains("CAMERA_SIZE"),
-            "error must name both settings, got: {err}"
+            err.contains("STREAM_SIZE") && err.contains("capture size 1920x1080"),
+            "error must identify the output and effective capture sizes, got: {err}"
         );
     }
 

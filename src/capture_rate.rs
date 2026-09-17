@@ -236,7 +236,8 @@ fn query_size_fd(fd: libc::c_int) -> Option<(u32, u32)> {
             height: 0,
             _rest: [0; 192],
         };
-        // SAFETY: `fmt` is the 204-byte v4l2_format payload; `fd` is live.
+        // SAFETY: `fmt` is the 208-byte 64-bit v4l2_format payload; `fd`
+        // is live.
         let rc = unsafe { libc::ioctl(fd, VIDIOC_G_FMT, &mut fmt) };
         if rc == 0 && fmt.width > 0 && fmt.height > 0 {
             return Some((fmt.width, fmt.height));
@@ -278,10 +279,10 @@ pub(crate) fn resolve(reported: Option<u32>) -> i32 {
 /// driver-reported rate (or the historic 30 FPS fallback).
 pub(crate) fn configured(device: &str, requested: Option<u32>) -> i32 {
     match requested {
-        Some(fps) if fps > 0 => {
-            apply(device, fps);
-            fps as i32
-        }
+        // The requested rate was applied before STREAMON in open_camera.
+        // It remains the service expectation if the best-effort ioctl was
+        // unsupported or clamped.
+        Some(fps) if fps > 0 => fps as i32,
         _ => resolve(query(device)),
     }
 }
