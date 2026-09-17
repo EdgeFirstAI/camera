@@ -194,7 +194,8 @@ All options can be set via command line or environment variables. Environment va
 | CLI Flag | Env Var | Default | Description |
 |----------|---------|---------|-------------|
 | `--camera` | `CAMERA` | `/dev/video3` | V4L2 device path |
-| `--camera-size` | `CAMERA_SIZE` | `1920 1080` | Capture resolution |
+| `--camera-size` | `CAMERA_SIZE` | unset (probe device) | Capture resolution |
+| `--camera-mode` | `CAMERA_MODE` | unset (probe device) | `1080p30` or `30FPS` |
 | `--stream-size` | `STREAM_SIZE` | `1920 1080` | Output encoding resolution |
 | `--mirror` | `MIRROR` | `both` | Image mirroring (none/horizontal/vertical/both) |
 | `--jpeg` | `JPEG` | false | Enable JPEG streaming |

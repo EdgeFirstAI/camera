@@ -203,7 +203,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     // Validate arg combinations before touching anything.
     validate_record_replay_args(&args)?;
-    validate_stream_size(&args)?;
+    // STREAM_SIZE vs capture size is checked after the camera is open so
+    // a probe-the-device startup knows the live capture size first.
 
     args.tracy.then(tracy_client::Client::start);
 
@@ -268,17 +269,18 @@ async fn run() -> Result<(), Box<dyn Error>> {
         MirrorSetting::Both => Mirror::Both,
     };
 
-    let cam = match open_camera(&args, mirror).await? {
+    let requested_size = resolve_capture_size(&args)?;
+    let cam = match open_camera(&args, mirror, requested_size).await? {
         Some(cam) => cam,
         // Stopped before the camera ever opened: nothing has been started, so
         // there is nothing to tear down and nothing to report as a failure.
         None => return Ok(()),
     };
-    if cam.width() as u32 != args.camera_size[0] || cam.height() as u32 != args.camera_size[1] {
+    if cam.width() as u32 != requested_size.0 || cam.height() as u32 != requested_size.1 {
         warn!(
             "User requested {}x{} resolution but camera set {}x{} resolution",
-            args.camera_size[0],
-            args.camera_size[1],
+            requested_size.0,
+            requested_size.1,
             cam.width(),
             cam.height()
         );
@@ -293,28 +295,23 @@ async fn run() -> Result<(), Box<dyn Error>> {
         args.stream_size[1],
         mirror
     );
-    args.camera_size[0] = cam.width() as u32;
-    args.camera_size[1] = cam.height() as u32;
+    let capture_w = cam.width() as u32;
+    let capture_h = cam.height() as u32;
+    args.camera_size = Some(vec![capture_w, capture_h]);
+    validate_stream_size(&args)?;
 
     // Automatically enable tiling for resolutions greater than 1080p
-    if args.camera_size[1] > 1080 {
+    if capture_h > 1080 {
         if !args.h264_tiles {
             info!(
-                "Camera resolution {}x{} exceeds 1080p, automatically enabling H264 tiling",
-                args.camera_size[0], args.camera_size[1]
+                "Camera resolution {capture_w}x{capture_h} exceeds 1080p, automatically enabling H264 tiling"
             );
             args.h264_tiles = true;
         } else {
-            info!(
-                "H264 tiling already enabled for {}x{} resolution",
-                args.camera_size[0], args.camera_size[1]
-            );
+            info!("H264 tiling already enabled for {capture_w}x{capture_h} resolution");
         }
     } else if args.h264_tiles {
-        info!(
-            "H264 tiling manually enabled for {}x{} resolution",
-            args.camera_size[0], args.camera_size[1]
-        );
+        info!("H264 tiling manually enabled for {capture_w}x{capture_h} resolution");
     }
 
     let stream_task = stream(cam, session, args);
@@ -356,17 +353,31 @@ async fn run() -> Result<(), Box<dyn Error>> {
 /// a clean `break`, and an intentional `systemctl stop` during startup must
 /// not leave the unit in "failed" -- which is the signal reserved for a
 /// camera that genuinely cannot start.
-async fn open_camera(args: &Args, mirror: Mirror) -> Result<Option<CameraReader>, Box<dyn Error>> {
+async fn open_camera(
+    args: &Args,
+    mirror: Mirror,
+    size: (u32, u32),
+) -> Result<Option<CameraReader>, Box<dyn Error>> {
     let deadline = Instant::now() + ISP_READY_BUDGET;
+    let (width, height) = (size.0 as i32, size.1 as i32);
+    let requested_fps = args.requested_capture_fps();
 
     retry_while_isp_not_ready(&args.camera, deadline, ISP_READY_DELAY, || {
         create_camera()
             .with_device(&args.camera)
-            .with_resolution(args.camera_size[0] as i32, args.camera_size[1] as i32)
+            .with_resolution(width, height)
             .with_format(FourCC(*b"YUYV"))
             .with_mirror(mirror)
             .open()
-            .and_then(|cam| cam.start().map(|()| cam))
+            .and_then(|cam| {
+                // Apply the requested interval after format negotiation but
+                // before streaming. Some V4L2 drivers reject S_PARM after
+                // STREAMON.
+                if let Some(fps) = requested_fps {
+                    capture_rate::apply(&args.camera, fps);
+                }
+                cam.start().map(|()| cam)
+            })
     })
     .await
 }
@@ -498,19 +509,44 @@ fn is_isp_not_ready(err: &VsError) -> bool {
     matches!(err, VsError::Io(e) if e.kind() == io::ErrorKind::WouldBlock)
 }
 
+/// Capture size from `CAMERA_MODE` / `CAMERA_SIZE`, or the live device.
+///
+/// Fails if neither setting supplied a size and `VIDIOC_G_FMT` cannot
+/// answer -- videostream would otherwise silently force 1920×1080.
+fn resolve_capture_size(args: &Args) -> Result<(u32, u32), Box<dyn Error>> {
+    if let Some(size) = args.requested_capture_size() {
+        return Ok(size);
+    }
+    capture_rate::query_size(&args.camera).ok_or_else(|| {
+        Box::from(format!(
+            "cannot read live capture size from {}; set CAMERA_MODE (e.g. 1080p30) or CAMERA_SIZE",
+            args.camera
+        ))
+    })
+}
+
 /// Reject a stream resolution larger than the capture resolution.
 ///
 /// The ISP scales down, never up, so this combination cannot produce a
 /// valid stream -- it silently yielded one the WebUI would not display
-/// (EDGEAI-1230).
+/// (EDGEAI-1230). Capture size must already be known (`args.camera_size`
+/// filled from the mode, `CAMERA_SIZE`, or the live device).
 fn validate_stream_size(args: &Args) -> Result<(), Box<dyn Error>> {
     let (sw, sh) = (args.stream_size[0], args.stream_size[1]);
-    let (cw, ch) = (args.camera_size[0], args.camera_size[1]);
+    let (cw, ch) = match args.camera_size.as_deref() {
+        Some([w, h, ..]) => (*w, *h),
+        _ => {
+            return Err(Box::from(
+                "capture size is not known; set CAMERA_MODE or CAMERA_SIZE, or ensure the \
+                 camera answers VIDIOC_G_FMT",
+            ))
+        }
+    };
     if sw > cw || sh > ch {
         return Err(Box::from(format!(
-            "STREAM_SIZE {sw}x{sh} is larger than CAMERA_SIZE {cw}x{ch}; the ISP scales down \
+            "STREAM_SIZE {sw}x{sh} is larger than capture size {cw}x{ch}; the ISP scales down \
              but never up, so no stream can be produced. Lower STREAM_SIZE, or raise \
-             CAMERA_SIZE to a resolution the sensor mode supports."
+             CAMERA_SIZE / choose a larger CAMERA_MODE that the sensor supports."
         )));
     }
     Ok(())
@@ -556,7 +592,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     // driver. Everything that needs to know how fast frames arrive -- the
     // encoders, the recording metadata, the low-rate warning -- takes it
     // from here rather than assuming a fixed rate.
-    let capture_fps = capture_rate::resolve(capture_rate::query(&args.camera));
+    let capture_fps = capture_rate::configured(&args.camera, args.requested_capture_fps());
     info!("Camera configured for {capture_fps} fps");
 
     // Compute monotonic→realtime offset once at startup for V4L2 timestamp conversion
@@ -681,10 +717,6 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     // rescales from --camera-size.
     let recorder: Option<std::io::BufWriter<std::fs::File>> = match args.record.as_ref() {
         Some(path) => {
-            let file = std::fs::File::create(path)
-                .map_err(|e| format!("Cannot create recording file {:?}: {e}", path))?;
-            let bw = std::io::BufWriter::with_capacity(256 * 1024, file);
-
             let sidecar = Sidecar::from_live(
                 capture_fps as u32,
                 args.stream_size[0],
@@ -693,7 +725,17 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                 info_fields.clone(),
                 tf_fields.clone(),
             );
-            let written = sidecar.write_paired(path)?;
+            let record_path = path.clone();
+            let (bw, written) = tokio::task::spawn_blocking(move || {
+                let file = std::fs::File::create(&record_path)
+                    .map_err(|e| format!("Cannot create recording file {:?}: {e}", record_path))?;
+                let bw = std::io::BufWriter::with_capacity(256 * 1024, file);
+                let written = sidecar
+                    .write_paired(&record_path)
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>((bw, written))
+            })
+            .await??;
             info!(
                 "Recording: H.264 bitstream → {:?}, sidecar → {:?}",
                 path, written
@@ -1186,13 +1228,8 @@ async fn h264_task(
             };
 
             if let Some(w) = recorder.as_mut() {
-                use std::io::Write;
-                if let Err(e) = w.write_all(&data) {
+                if let Err(e) = tokio::task::block_in_place(|| write_recording(w, &data, is_key)) {
                     error!("h264 recorder write failed: {e}");
-                } else if is_key {
-                    if let Err(e) = w.flush() {
-                        error!("h264 recorder flush failed: {e}");
-                    }
                 }
             }
 
@@ -1213,11 +1250,19 @@ async fn h264_task(
     // last GOP hits disk before we return and the tokio runtime tears
     // this thread down.
     if let Some(mut w) = recorder.take() {
-        use std::io::Write;
-        if let Err(e) = w.flush() {
+        let result = tokio::task::block_in_place(|| std::io::Write::flush(&mut w));
+        if let Err(e) = result {
             error!("h264 recorder final flush failed: {e}");
         }
     }
+}
+
+fn write_recording(writer: &mut impl io::Write, data: &[u8], flush: bool) -> io::Result<()> {
+    writer.write_all(data)?;
+    if flush {
+        writer.flush()?;
+    }
+    Ok(())
 }
 
 async fn jpeg_task(
@@ -2075,24 +2120,31 @@ mod tests {
     }
 
     #[test]
+    fn recording_write_appends_encoded_frame() {
+        let mut output = Vec::new();
+        write_recording(&mut output, b"encoded frame", false).expect("in-memory recording write");
+        assert_eq!(output, b"encoded frame");
+    }
+
+    #[test]
     fn validate_rejects_stream_size_larger_than_camera_size() {
         // EDGEAI-1230: STREAM_SIZE larger than CAMERA_SIZE silently
         // produced a stream the WebUI would not display. The ISP does not
         // upscale, so this combination has no valid meaning.
         let mut args = default_args();
-        args.camera_size = vec![1920, 1080];
+        args.camera_size = Some(vec![1920, 1080]);
         args.stream_size = vec![3840, 2160];
         let err = validate_stream_size(&args).unwrap_err().to_string();
         assert!(
-            err.contains("STREAM_SIZE") && err.contains("CAMERA_SIZE"),
-            "error must name both settings, got: {err}"
+            err.contains("STREAM_SIZE") && err.contains("capture size 1920x1080"),
+            "error must identify the output and effective capture sizes, got: {err}"
         );
     }
 
     #[test]
     fn validate_accepts_stream_size_within_camera_size() {
         let mut args = default_args();
-        args.camera_size = vec![3840, 2160];
+        args.camera_size = Some(vec![3840, 2160]);
         args.stream_size = vec![1920, 1080];
         validate_stream_size(&args).unwrap();
     }
@@ -2100,9 +2152,43 @@ mod tests {
     #[test]
     fn validate_accepts_stream_size_equal_to_camera_size() {
         let mut args = default_args();
-        args.camera_size = vec![1920, 1080];
+        args.camera_size = Some(vec![1920, 1080]);
         args.stream_size = vec![1920, 1080];
         validate_stream_size(&args).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_unknown_capture_size() {
+        let args = default_args();
+        assert!(args.camera_size.is_none());
+        let err = validate_stream_size(&args).unwrap_err().to_string();
+        assert!(err.contains("capture size is not known"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_capture_size_uses_combined_mode() {
+        let args = Args::parse_from(["edgefirst-camera", "--camera-mode", "720p30"]);
+        assert_eq!(resolve_capture_size(&args).unwrap(), (1280, 720));
+    }
+
+    #[test]
+    fn resolve_capture_size_uses_camera_size_when_mode_is_fps_only() {
+        let args = Args::parse_from([
+            "edgefirst-camera",
+            "--camera-mode",
+            "30FPS",
+            "--camera-size",
+            "1440",
+            "1080",
+        ]);
+        assert_eq!(resolve_capture_size(&args).unwrap(), (1440, 1080));
+    }
+
+    #[test]
+    fn resolve_capture_size_fails_when_the_device_cannot_be_probed() {
+        let args = Args::parse_from(["edgefirst-camera", "--camera", "/path/that/does/not/exist"]);
+        let err = resolve_capture_size(&args).unwrap_err().to_string();
+        assert!(err.contains("cannot read live capture size"), "got: {err}");
     }
 
     #[test]
