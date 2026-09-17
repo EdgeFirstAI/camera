@@ -658,4 +658,4 @@ For questions or support, see our [Contributing Guide](CONTRIBUTING.md) or open 
 - [ROS2 CDR](https://design.ros2.org/) - Message serialization
 - [NXP i.MX8](https://www.nxp.com/products/processors-and-microcontrollers/arm-processors/i-mx-applications-processors/i-mx-8-applications-processors:IMX8-SERIES) - Hardware acceleration platform
 
-<img referrerpolicy="no-referrer-when-downgrade" src="https://px.edgefirst.ai/a.png?x-pxid=eda40ac2-5129-48cb-84fd-4183c54d1ca0" alt="" width="1" height="1" style="position:absolute; width:1px; height:1px; opacity:0; pointer-events:none;" />
+<img referrerpolicy="no-referrer" src="https://px.edgefirst.ai/a.png?x-pxid=eda40ac2-5129-48cb-84fd-4183c54d1ca0" alt="" width="1" height="1" style="position:absolute; width:1px; height:1px; opacity:0; pointer-events:none;" />
