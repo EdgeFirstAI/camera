@@ -47,7 +47,7 @@ jobs:
       runner-class-linux-arm: hosted
       pre-command: bash .github/scripts/ci-setup.sh
       board-pre-command: bash .github/scripts/ci-board-setup.sh
-      board-extra-args: --include-ignored -j 1
+      board-extra-args: -j 1 -- --include-ignored
       nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub
       archive-profile: profiling
       archive-args: --locked --bin edgefirst-camera --test test_image
