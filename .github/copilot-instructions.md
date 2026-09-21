@@ -171,7 +171,7 @@ cargo llvm-cov --all-features --workspace --html
 
 **CI/CD Workflows** (`.github/workflows/`):
 
-- `ci.yml` - Tiered CI: **Quick** on every PR (`ci-gate` required), **Full** with label `ci:full`, board lane with `ci:hardware` (not on ordinary pushes)
+- `ci.yml` - Tiered CI: **Quick** on every PR including drafts (`ci-gate` before review), **Full** with label `ci:full`, board lane with `ci:hardware` (not on ordinary pushes)
 - `nightly.yml` - Scheduled Full + advisories + Sonar main baseline
 - `build.yml` - Release binaries on version tags (native aarch64 + x86_64)
 - `sbom.yml` - Full scancode SBOM on release tags
