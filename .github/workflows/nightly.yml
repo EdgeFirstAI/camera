@@ -1,0 +1,60 @@
+# Nightly Full tier + advisories + Sonar main baseline.
+# Ticket: EDGEAI-1557
+#
+# Shared workflows: EdgeFirstAI/.github@3722c5c1550dfc27efef2aa39bdf60a443c82f13 (1.2.1)
+
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Run even if main has not moved since the last nightly.
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  changed:
+    uses: EdgeFirstAI/.github/.github/workflows/nightly-gate.yml@3722c5c1550dfc27efef2aa39bdf60a443c82f13
+    with:
+      force: ${{ inputs.force || false }}
+
+  advisories:
+    uses: EdgeFirstAI/.github/.github/workflows/advisories.yml@3722c5c1550dfc27efef2aa39bdf60a443c82f13
+
+  nightly:
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
+    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@3722c5c1550dfc27efef2aa39bdf60a443c82f13
+    with:
+      lanes: all
+      nightly: true
+      boards: nxp-imx8mp-latest
+      sonar: false
+      scancode: true
+      skip-macos: true
+      skip-windows: true
+      timeout-minutes: 45
+      board-timeout-minutes: 45
+      runner-class-linux: hosted
+      runner-class-linux-arm: hosted
+      pre-command: bash .github/scripts/ci-setup.sh
+      board-pre-command: bash .github/scripts/ci-board-setup.sh
+      board-command: bash .github/scripts/ci-board-run.sh
+      nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub
+      archive-profile: profiling
+      archive-args: --locked --bin edgefirst-camera --test test_image --cargo-profile profiling
+    secrets: inherit
+
+  sonar:
+    needs: [changed, nightly]
+    if: needs.changed.outputs.run == 'true' && needs.nightly.result == 'success'
+    uses: ./.github/workflows/sonar.yml
+    secrets: inherit

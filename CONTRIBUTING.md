@@ -575,7 +575,7 @@ fn test_jpeg_round_trip() {
 - **Public APIs**: 100%
 - **Hardware paths**: Best effort (requires device)
 
-**Coverage is enforced in CI pipeline**
+**Coverage is enforced in CI** on **Full** runs (label `ci:full`, merge queue, or nightly). Every PR runs the **Quick** tier (`ci-gate`); apply `ci:full` before merge for host coverage and Sonar. Apply `ci:hardware` when i.MX8MP board validation is needed (JPEG/H.264/record/replay and G2D integration tests).
 
 ---
 
@@ -652,7 +652,7 @@ fn test_jpeg_round_trip() {
 
 - **1 approval** for merges to `develop`
 - **2 approvals** for merges to `main`
-- All CI checks must pass
+- All CI checks must pass (required check: **`ci-gate`**)
 
 ### Merge
 

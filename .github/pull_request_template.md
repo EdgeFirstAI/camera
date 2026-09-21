@@ -43,7 +43,13 @@ JIRA: EDGEAI-
 - Camera: <!-- e.g., MIPI CSI-2 1080p, USB UVC -->
 - OS: <!-- e.g., Yocto Kirkstone, Ubuntu 22.04 -->
 
-**Automated tests:**
+**CI tiers (GitHub Actions):**
+
+- [ ] **Quick** tier green (`ci-gate`) — runs on every push
+- [ ] **`ci:full`** label applied (or merge queue) before merge when changing runtime/coverage-sensitive code
+- [ ] **`ci:hardware`** label applied when board validation is required (not run on ordinary pushes)
+
+**Automated tests (local):**
 
 - [ ] `cargo fmt --check` passes
 - [ ] `cargo clippy -- -D warnings` passes
