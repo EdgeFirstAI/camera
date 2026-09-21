@@ -1,4 +1,6 @@
 # Camera CI — Quick on every non-draft PR; Full when labeled ci:full / ci:hardware.
+# Draft PRs skip Quick until "Ready for review", unless ci:full / ci:hardware is set
+# (so tier labels still dispatch Full on a draft meta-PR).
 # Design: https://au-zone.atlassian.net/wiki/spaces/EAM/pages/2750906369/CICD+Pipelines
 # Ticket: EDGEAI-1557 (T4)
 #
@@ -37,7 +39,10 @@ permissions:
 
 jobs:
   changes:
-    if: github.event.pull_request.draft != true
+    if: >-
+      github.event.pull_request.draft != true ||
+      contains(format(',{0},', join(github.event.pull_request.labels.*.name, ',')), ',ci:full,') ||
+      contains(format(',{0},', join(github.event.pull_request.labels.*.name, ',')), ',ci:hardware,')
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
