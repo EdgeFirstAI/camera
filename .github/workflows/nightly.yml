@@ -50,7 +50,7 @@ jobs:
       board-command: bash .github/scripts/ci-board-run.sh
       nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub
       archive-profile: profiling
-      archive-args: --locked --bin edgefirst-camera --test test_image --cargo-profile profiling
+      archive-args: --locked --bin edgefirst-camera --test test_image
     secrets: inherit
 
   sonar:
