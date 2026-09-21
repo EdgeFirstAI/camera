@@ -108,11 +108,12 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7  # stable
       - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375  # v2.87.12
         with:
           tool: cargo-cyclonedx
       - name: Resolve dependency graph and check NOTICE
-        run: make sbom
+        run: bash .github/scripts/ci-notice.sh
 
   full:
     needs: changes
