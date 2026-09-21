@@ -135,7 +135,6 @@ jobs:
       # Use shared board-run archive flow (custom board-command skips download-artifact).
       board-extra-args: -j 1 -- --include-ignored
       nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub
-      archive-profile: profiling
       archive-args: --locked --bin edgefirst-camera --test test_image
     secrets: inherit
 
