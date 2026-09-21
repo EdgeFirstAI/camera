@@ -6,12 +6,52 @@ set -euo pipefail
 mkdir -p coverage/profraw coverage/test-output board-archive board-extract board-tmp
 export TMPDIR="${GITHUB_WORKSPACE}/board-tmp"
 
-if ! command -v gh >/dev/null 2>&1; then
-  echo "::error::gh CLI is required on the board runner to fetch the nextest archive"
-  exit 1
-fi
+# board-run skips download-artifact when board-command is set; fetch the archive here.
+if [[ -z "$(find board-archive -name 'nextest-archive.tar.zst' 2>/dev/null | head -1)" ]]; then
+  if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+    echo "::error::GITHUB_TOKEN is required to download nextest-archive-aarch64 on the board runner"
+    exit 1
+  fi
+  python3 <<'PY'
+import io
+import json
+import os
+import urllib.error
+import urllib.request
+import zipfile
 
-gh run download "${GITHUB_RUN_ID}" -n nextest-archive-aarch64 -D board-archive
+token = os.environ["GITHUB_TOKEN"]
+repo = os.environ["GITHUB_REPOSITORY"]
+run_id = os.environ["GITHUB_RUN_ID"]
+headers = {
+    "Authorization": f"Bearer {token}",
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "edgefirst-camera-ci-board-run",
+}
+
+
+def api_get(url: str) -> bytes:
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req) as resp:
+        return resp.read()
+
+
+artifacts = json.loads(
+    api_get(
+        f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100"
+    )
+)["artifacts"]
+match = next((a for a in artifacts if a.get("name") == "nextest-archive-aarch64"), None)
+if match is None:
+    raise SystemExit("::error::nextest-archive-aarch64 artifact not found for this workflow run")
+zip_bytes = api_get(
+    f"https://api.github.com/repos/{repo}/actions/artifacts/{match['id']}/zip"
+)
+os.makedirs("board-archive", exist_ok=True)
+with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+    zf.extractall("board-archive")
+PY
+fi
 
 archive="$(find board-archive -name 'nextest-archive.tar.zst' | head -1)"
 if [[ -z "$archive" ]]; then
