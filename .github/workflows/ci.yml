@@ -132,7 +132,8 @@ jobs:
       runner-class-linux-arm: larger
       pre-command: bash .github/scripts/ci-setup.sh
       board-pre-command: bash .github/scripts/ci-board-setup.sh
-      board-command: bash .github/scripts/ci-board-run.sh
+      # Use shared board-run archive flow (custom board-command skips download-artifact).
+      board-extra-args: --include-ignored -j 1
       nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub
       archive-profile: profiling
       archive-args: --locked --bin edgefirst-camera --test test_image
