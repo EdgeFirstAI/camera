@@ -75,7 +75,7 @@ ALLOWED_LICENSES: Set[str] = {
     "LLVM-exception",  # Apache-2.0 WITH LLVM-exception
     "CDLA-Permissive-2.0",  # Community Data License Agreement
     "CC0-1.0",  # Creative Commons Zero (public domain dedication)
-    "WTFPL",  # public-domain-equivalent (org policy 2.1 / EDGEAI-1977)
+    "WTFPL",  # public-domain-equivalent (policy 2.1)
     "OFL-1.1",  # SIL Open Font License (for fonts)
     "Ubuntu-font-1.0",  # Ubuntu Font License
     "MPL-2.0",  # Mozilla Public License 2.0 - file-level copyleft, safe as dependency

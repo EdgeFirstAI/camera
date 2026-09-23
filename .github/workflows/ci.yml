@@ -1,7 +1,6 @@
-# Camera CI — Quick on every PR push (including drafts); Full when labeled ci:full / ci:hardware.
-# Draft/ready-for-review must not gate CI: reviewers expect a green ci-gate before review (EDGEAI-1557).
+# Camera CI — Quick on every PR push, drafts included, so ci-gate is green
+# before review starts; Full when labeled ci:full / ci:hardware.
 # Design: https://au-zone.atlassian.net/wiki/spaces/EAM/pages/2750906369/CICD+Pipelines
-# Ticket: EDGEAI-1557 (T4)
 #
 # Shared workflows: EdgeFirstAI/.github@3722c5c1550dfc27efef2aa39bdf60a443c82f13 (1.2.1)
 #
@@ -132,7 +131,6 @@ jobs:
       runner-class-linux-arm: larger
       pre-command: bash .github/scripts/ci-setup.sh
       board-pre-command: bash .github/scripts/ci-board-setup.sh
-      # Use shared board-run archive flow (custom board-command skips download-artifact).
       board-extra-args: -j 1 -- --include-ignored
       nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub
       archive-args: --locked --bin edgefirst-camera --test test_image

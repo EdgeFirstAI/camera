@@ -1,6 +1,4 @@
 # Nightly Full tier + advisories + Sonar main baseline.
-# Ticket: EDGEAI-1557
-#
 # Shared workflows: EdgeFirstAI/.github@3722c5c1550dfc27efef2aa39bdf60a443c82f13 (1.2.1)
 
 name: Nightly
