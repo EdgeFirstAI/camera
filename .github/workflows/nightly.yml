@@ -1,5 +1,5 @@
 # Nightly Full tier + advisories + Sonar main baseline.
-# Shared workflows: EdgeFirstAI/.github@8b104b2fd96f4712d2d63184880aa19d88d11354 (EdgeFirstAI/.github#53, pending merge)
+# Shared workflows: EdgeFirstAI/.github@b65fec89d297d73f193892996373659c4eaeb93a (main after 2.0.0, includes #53)
 
 name: Nightly
 
@@ -21,17 +21,17 @@ permissions:
 
 jobs:
   changed:
-    uses: EdgeFirstAI/.github/.github/workflows/nightly-gate.yml@8b104b2fd96f4712d2d63184880aa19d88d11354
+    uses: EdgeFirstAI/.github/.github/workflows/nightly-gate.yml@b65fec89d297d73f193892996373659c4eaeb93a
     with:
       force: ${{ inputs.force || false }}
 
   advisories:
-    uses: EdgeFirstAI/.github/.github/workflows/advisories.yml@8b104b2fd96f4712d2d63184880aa19d88d11354
+    uses: EdgeFirstAI/.github/.github/workflows/advisories.yml@b65fec89d297d73f193892996373659c4eaeb93a
 
   nightly:
     needs: changed
     if: needs.changed.outputs.run == 'true'
-    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@8b104b2fd96f4712d2d63184880aa19d88d11354
+    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@b65fec89d297d73f193892996373659c4eaeb93a
     with:
       lanes: all
       nightly: true
