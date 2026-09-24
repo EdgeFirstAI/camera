@@ -6,7 +6,11 @@ use edgefirst_camera::{
     image::{encode_jpeg, Image, ImageManager, Rotation},
 };
 use serial_test::serial;
-use std::{error::Error, time::Instant};
+use std::{
+    error::Error,
+    io::{self, ErrorKind},
+    time::Instant,
+};
 use videostream::{
     camera::{create_camera, Mirror},
     fourcc::FourCC,
@@ -53,47 +57,64 @@ fn test_4k() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Allocations this large need contiguous CMA, which a board running a
+/// camera stack (the vvcam ISP daemon holds buffers for its lifetime) may
+/// not have. Exhausted CMA is reported as a CI warning, not a failure.
+fn is_enomem(err: &(dyn Error + 'static)) -> bool {
+    err.downcast_ref::<io::Error>()
+        .is_some_and(|e| e.kind() == ErrorKind::OutOfMemory)
+}
+
+/// Prints a GitHub Actions `::warning` annotation so the run shows the test
+/// passed with a caveat. nextest only surfaces this output for tests listed
+/// with `success-output` in `.config/nextest.toml`.
+fn warn_enomem(test: &str, err: &dyn Error) {
+    println!("::warning title={test} passed with warning::insufficient contiguous CMA, allocation skipped ({err})");
+}
+
 #[test]
 #[serial]
 fn test_8k() -> Result<(), Box<dyn Error>> {
-    let img1 = Image::new(7680, 4320, image::RGBA)?;
-    let img2 = Image::new(7680, 4320, image::RGBA)?;
+    let mut images = Vec::new();
+    for _ in 0..2 {
+        match Image::new(7680, 4320, image::RGBA) {
+            Ok(img) => images.push(img),
+            Err(e) if is_enomem(e.as_ref()) => {
+                warn_enomem("test_8k", e.as_ref());
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
+    }
 
-    assert_eq!(img1.size(), 132710400);
-    assert_eq!(img2.size(), 132710400);
-
-    println!("{} {}", img1, img2);
+    for img in &images {
+        assert_eq!(img.size(), 132710400);
+        println!("{}", img);
+    }
 
     Ok(())
 }
 
 /// This test verifies that extremely large allocations eventually fail.
 /// A single 16K image requires ~530MB of CMA memory. We attempt to allocate
-/// multiple to exhaust available CMA. If all allocations succeed, the test
-/// passes (indicating very large CMA), but we verify cleanup works.
-/// If even the first allocation fails, we skip the test as the system has
-/// insufficient CMA memory for 16K images.
+/// multiple to exhaust available CMA; running out after the first is the
+/// expected outcome. If even the first allocation fails with ENOMEM the board
+/// cannot hold one 16K image, which is reported as a CI warning.
 #[test]
 #[serial]
 fn test_16k() -> Result<(), Box<dyn Error>> {
-    // Try to allocate multiple 16K images to exhaust CMA
     // Each 15360x8640 RGBA image = ~530MB
     let mut images = Vec::new();
-    for i in 0..4 {
+    for _ in 0..4 {
         match Image::new(15360, 8640, image::RGBA) {
-            Ok(img) => {
-                images.push(img);
-            }
-            Err(e) => {
-                if i == 0 {
-                    // First allocation failed - system has insufficient CMA for 16K
-                    // This is an environment limitation, not a test failure
-                    eprintln!("Skipping test_16k: insufficient CMA memory ({e})");
-                    return Ok(());
+            Ok(img) => images.push(img),
+            Err(e) if is_enomem(e.as_ref()) => {
+                if images.is_empty() {
+                    warn_enomem("test_16k", e.as_ref());
                 }
-                // Subsequent allocation failed - CMA exhausted as expected
                 return Ok(());
             }
+            Err(e) => return Err(e),
         }
     }
     // If we get here, device has >2GB CMA - just verify images are valid
