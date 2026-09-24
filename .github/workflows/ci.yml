@@ -1,0 +1,165 @@
+# Camera CI — Quick on every PR push, drafts included, so ci-gate is green
+# before review starts; Full when labeled ci:full / ci:hardware.
+# Design: https://au-zone.atlassian.net/wiki/spaces/EAM/pages/2750906369/CICD+Pipelines
+#
+# Shared workflows: EdgeFirstAI/.github@b65fec89d297d73f193892996373659c4eaeb93a (main after 2.0.0, includes #53)
+#
+# Action Versions (hash-pinned):
+# - actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 (v7.0.1)
+# - dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d (v4.0.3)
+# - taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 (v2.87.12)
+
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  merge_group:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      full:
+        type: boolean
+        default: false
+      hardware:
+        type: boolean
+        default: false
+
+# A label other than ci:* queues behind the in-flight run instead of
+# cancelling it. Skipping that run is not an option: a skipped ci-gate
+# counts as passing for branch protection.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' &&
+        (github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')) }}
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.f.outputs.code }}
+      full: ${{ steps.mode.outputs.full }}
+      hardware: ${{ steps.mode.outputs.hardware }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
+        id: f
+        with:
+          filters: |
+            code:
+              - 'src/**'
+              - 'tests/**'
+              - 'benches/**'
+              - 'Cargo.*'
+              - 'rustfmt.toml'
+              - 'Makefile'
+              - 'NOTICE'
+              - 'camera.default'
+              - '.github/**'
+      - id: mode
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          DISPATCH_FULL: ${{ inputs.full }}
+          DISPATCH_HARDWARE: ${{ inputs.hardware }}
+        run: |
+          full=false
+          hardware=false
+          case "$EVENT_NAME" in
+            workflow_dispatch)
+              full="$DISPATCH_FULL"
+              hardware="$DISPATCH_HARDWARE"
+              ;;
+          esac
+          case ",$LABELS," in *,ci:full,*) full=true ;; esac
+          case ",$LABELS," in *,ci:hardware,*) hardware=true ;; esac
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+          echo "hardware=$hardware" >> "$GITHUB_OUTPUT"
+
+  quick:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    uses: EdgeFirstAI/.github/.github/workflows/rust-quick.yml@b65fec89d297d73f193892996373659c4eaeb93a
+    with:
+      pre-command: bash .github/scripts/ci-setup.sh
+      nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub --test on_target
+      clippy-args: --workspace --all-targets --all-features --locked -- -D warnings
+      clippy-report: true
+      cross-targets: aarch64-unknown-linux-gnu
+      cache-key: quick-x86_64
+      timeout-minutes: 15
+      workflow-lint: true
+
+  notice:
+    name: NOTICE attribution
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7  # stable
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375  # v2.87.12
+        with:
+          tool: cargo-cyclonedx
+      - name: Resolve dependency graph and check NOTICE
+        run: bash .github/scripts/ci-notice.sh
+
+  full:
+    needs: changes
+    if: needs.changes.outputs.full == 'true' || needs.changes.outputs.hardware == 'true'
+    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@b65fec89d297d73f193892996373659c4eaeb93a
+    with:
+      lanes: ${{ needs.changes.outputs.full == 'true' && 'all' || 'hardware' }}
+      # Any board with a working V4L2 capture path; libcamera-only boards
+      # cannot run the camera.
+      boards: camera-v4l2
+      sonar: false
+      scancode: true
+      skip-macos: true
+      skip-windows: true
+      timeout-minutes: 45
+      board-timeout-minutes: 45
+      runner-class-linux: larger
+      runner-class-linux-arm: larger
+      pre-command: bash .github/scripts/ci-setup.sh
+      board-pre-command: bash .github/scripts/ci-board-setup.sh
+      board-extra-args: -j 1 --no-fail-fast -- --include-ignored
+      nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub --test on_target
+      archive-args: --locked --bin edgefirst-camera --test test_image --test on_target
+    secrets: inherit
+
+  sonar:
+    needs: [changes, quick, full]
+    if: >-
+      always() && !cancelled() &&
+      needs.changes.outputs.full == 'true' &&
+      needs.full.result == 'success' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    uses: ./.github/workflows/sonar.yml
+    secrets: inherit
+
+  ci-gate:
+    if: always()
+    needs: [changes, quick, notice, full, sonar]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -e 'to_entries | all(.value.result == "success" or .value.result == "skipped")'

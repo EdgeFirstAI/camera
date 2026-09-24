@@ -1,0 +1,3 @@
+# GitHub requests review from owners of changed paths when a PR opens.
+# The catch-all goes first; the last matching pattern wins.
+* @sebastient

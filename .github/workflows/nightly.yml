@@ -1,0 +1,60 @@
+# Nightly Full tier + advisories + Sonar main baseline.
+# Shared workflows: EdgeFirstAI/.github@b65fec89d297d73f193892996373659c4eaeb93a (main after 2.0.0, includes #53)
+
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Run even if main has not moved since the last nightly.
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  changed:
+    uses: EdgeFirstAI/.github/.github/workflows/nightly-gate.yml@b65fec89d297d73f193892996373659c4eaeb93a
+    with:
+      force: ${{ inputs.force || false }}
+
+  advisories:
+    uses: EdgeFirstAI/.github/.github/workflows/advisories.yml@b65fec89d297d73f193892996373659c4eaeb93a
+
+  nightly:
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
+    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@b65fec89d297d73f193892996373659c4eaeb93a
+    with:
+      lanes: all
+      nightly: true
+      # Any board with a working V4L2 capture path; libcamera-only boards
+      # cannot run the camera.
+      boards: camera-v4l2
+      sonar: false
+      scancode: true
+      skip-macos: true
+      skip-windows: true
+      timeout-minutes: 45
+      board-timeout-minutes: 45
+      runner-class-linux: hosted
+      runner-class-linux-arm: hosted
+      pre-command: bash .github/scripts/ci-setup.sh
+      board-pre-command: bash .github/scripts/ci-board-setup.sh
+      board-extra-args: -j 1 --no-fail-fast -- --include-ignored
+      nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub --test on_target
+      archive-args: --locked --bin edgefirst-camera --test test_image --test on_target
+    secrets: inherit
+
+  sonar:
+    needs: [changed, nightly]
+    if: needs.changed.outputs.run == 'true' && needs.nightly.result == 'success'
+    uses: ./.github/workflows/sonar.yml
+    secrets: inherit

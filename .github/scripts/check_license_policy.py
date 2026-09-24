@@ -5,7 +5,7 @@ Validates that all dependencies comply with the Au-Zone Software Process Specifi
 
 LICENSE POLICY SOURCE:
 This script implements the license policy defined in the Au-Zone Software Process Specification.
-Last synchronized with policy version: 2.0 (2025-11-24)
+Last synchronized with policy version: 2.1 (2026-09-21)
 
 CUSTOMIZATION REQUIRED:
 - Review ALLOWED_LICENSES against your organization's policy
@@ -75,6 +75,7 @@ ALLOWED_LICENSES: Set[str] = {
     "LLVM-exception",  # Apache-2.0 WITH LLVM-exception
     "CDLA-Permissive-2.0",  # Community Data License Agreement
     "CC0-1.0",  # Creative Commons Zero (public domain dedication)
+    "WTFPL",  # public-domain-equivalent (policy 2.1)
     "OFL-1.1",  # SIL Open Font License (for fonts)
     "Ubuntu-font-1.0",  # Ubuntu Font License
     "MPL-2.0",  # Mozilla Public License 2.0 - file-level copyleft, safe as dependency
