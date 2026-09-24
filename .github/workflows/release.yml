@@ -83,7 +83,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Wait for Build workflow (x86_64)
-        uses: lewagon/wait-on-check-action@74049309dfeff245fe8009a0137eacf28136cb3c  # v1.5.0
+        uses: lewagon/wait-on-check-action@369769072fe522a3a8a85c03c96af1e5242a1994  # v1.9.1
         with:
           ref: ${{ github.sha }}
           check-name: 'Build (x86_64)'
@@ -91,7 +91,7 @@ jobs:
           wait-interval: 10
 
       - name: Wait for Build workflow (aarch64)
-        uses: lewagon/wait-on-check-action@74049309dfeff245fe8009a0137eacf28136cb3c  # v1.5.0
+        uses: lewagon/wait-on-check-action@369769072fe522a3a8a85c03c96af1e5242a1994  # v1.9.1
         with:
           ref: ${{ github.sha }}
           check-name: 'Build (aarch64)'
@@ -99,7 +99,7 @@ jobs:
           wait-interval: 10
 
       - name: Wait for SBOM workflow
-        uses: lewagon/wait-on-check-action@74049309dfeff245fe8009a0137eacf28136cb3c  # v1.5.0
+        uses: lewagon/wait-on-check-action@369769072fe522a3a8a85c03c96af1e5242a1994  # v1.9.1
         with:
           ref: ${{ github.sha }}
           check-name: 'Generate SBOM & Check License Compliance'
@@ -120,14 +120,14 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Download build artifacts from commit
-        uses: dawidd6/action-download-artifact@0bd50d53a6d7fb5cb921e607957e9cc12b4ce392  # v12
+        uses: dawidd6/action-download-artifact@d63b86af1b34672e53c440b1b83979861906bad7  # v24
         with:
           workflow: build.yml
           commit: ${{ github.sha }}
           path: artifacts
 
       - name: Download SBOM artifact from commit
-        uses: dawidd6/action-download-artifact@0bd50d53a6d7fb5cb921e607957e9cc12b4ce392  # v12
+        uses: dawidd6/action-download-artifact@d63b86af1b34672e53c440b1b83979861906bad7  # v24
         with:
           workflow: sbom.yml
           commit: ${{ github.sha }}
@@ -163,7 +163,7 @@ jobs:
           ls -lh release-assets/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b  # v2.5.0
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
         with:
           name: EdgeFirst Camera v${{ needs.prepare-release.outputs.version }}
           body: |
