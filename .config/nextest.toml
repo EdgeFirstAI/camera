@@ -1,4 +1,5 @@
-# The shared CI workflows run `--profile ci` whenever this file exists.
+# The shared Full workflow's x86_64 coverage lane runs `--profile ci` whenever
+# this file exists, so the profile must be defined even though it is empty.
 [profile.ci]
 
 # Show output from these tests even when they pass, so the `::warning`

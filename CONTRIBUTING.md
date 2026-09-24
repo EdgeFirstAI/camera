@@ -575,7 +575,7 @@ fn test_jpeg_round_trip() {
 - **Public APIs**: 100%
 - **Hardware paths**: Best effort (requires device)
 
-**Coverage is enforced in CI** on **Full** runs (label `ci:full`, merge queue, or nightly). Every PR runs the **Quick** tier (`ci-gate`), **including draft PRs** — CI is not gated on “Ready for review”; the expected flow is a green `ci-gate` before reviewers start. Apply `ci:full` before merge for host coverage and Sonar. Apply `ci:hardware` when on-target validation is needed: it runs on a board with a V4L2 camera (runner label `camera-v4l2`) and covers JPEG/H.264 capture, record and replay (`tests/on_target.rs`) and the G2D image tests (`tests/test_image.rs`).
+**Coverage is measured in CI** by the nightly **Full** run, which covers host, board and SonarCloud every day `main` changes. Every PR runs the **Quick** tier (`ci-gate`), **including draft PRs** — CI is not gated on “Ready for review”; the expected flow is a green `ci-gate` before reviewers start. Full and hardware runs on a PR are opt-in, decided per change: apply `ci:full` for host coverage, board tests and Sonar when a change warrants it. Apply `ci:hardware` when on-target validation alone is needed: it runs on a board with a V4L2 camera (runner label `camera-v4l2`) and covers JPEG/H.264 capture, record and replay (`tests/on_target.rs`) and the G2D image tests (`tests/test_image.rs`).
 
 ---
 
