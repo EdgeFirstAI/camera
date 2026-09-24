@@ -120,7 +120,9 @@ jobs:
     uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@3722c5c1550dfc27efef2aa39bdf60a443c82f13
     with:
       lanes: ${{ needs.changes.outputs.full == 'true' && 'all' || 'hardware' }}
-      boards: nxp-imx8mp-latest
+      # Any board with a working V4L2 capture path; libcamera-only boards
+      # cannot run the camera.
+      boards: camera-v4l2
       sonar: false
       scancode: true
       skip-macos: true

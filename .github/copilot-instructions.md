@@ -272,7 +272,7 @@ All options can be set via command line or environment variables. Environment va
 - **Maivin & Raivin**: NXP i.MX8M Plus, MIPI CSI-2 cameras
 - **NXP i.MX 8M Plus EVK**: i.MX8M Plus evaluation kits
 - **Testing**: x86_64 for software-only tests (no hardware acceleration)
-- **CI**: Native `ubuntu-22.04-arm` runners for aarch64 builds, `nxp-imx8mp-latest` for on-target hardware tests
+- **CI**: Native `ubuntu-22.04-arm` runners for aarch64 builds, `camera-v4l2` boards for on-target hardware tests
 
 ### Testing Conventions
 
@@ -336,7 +336,7 @@ cargo llvm-cov --all-features --workspace --html
 **Hardware Testing:**
 
 - **CI**: Native aarch64 testing on `ubuntu-22.04-arm` runner
-- **On-target**: `nxp-imx8mp-latest` self-hosted runner for JPEG, H.264, and integration tests
+- **On-target**: self-hosted boards labelled `camera-v4l2` for JPEG, H.264, and integration tests; libcamera-only boards are not supported
 - **Coverage**: Collected from on-target tests via `cargo llvm-cov`
 
 ---
