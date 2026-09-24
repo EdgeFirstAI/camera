@@ -2,7 +2,7 @@
 # before review starts; Full when labeled ci:full / ci:hardware.
 # Design: https://au-zone.atlassian.net/wiki/spaces/EAM/pages/2750906369/CICD+Pipelines
 #
-# Shared workflows: EdgeFirstAI/.github@3722c5c1550dfc27efef2aa39bdf60a443c82f13 (1.2.1)
+# Shared workflows: EdgeFirstAI/.github@8b104b2fd96f4712d2d63184880aa19d88d11354 (EdgeFirstAI/.github#53, pending merge)
 #
 # Action Versions (hash-pinned):
 # - actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 (v7.0.1)
@@ -13,7 +13,7 @@ name: CI
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, labeled]
+    types: [opened, synchronize, reopened, labeled]
   merge_group:
   push:
     branches: [main]
@@ -26,9 +26,14 @@ on:
         type: boolean
         default: false
 
+# A label other than ci:* queues behind the in-flight run instead of
+# cancelling it. Skipping that run is not an option: a skipped ci-gate
+# counts as passing for branch protection.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' &&
+        (github.event.action != 'labeled' || startsWith(github.event.label.name, 'ci:')) }}
 
 permissions:
   contents: read
@@ -86,10 +91,10 @@ jobs:
   quick:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    uses: EdgeFirstAI/.github/.github/workflows/rust-quick.yml@3722c5c1550dfc27efef2aa39bdf60a443c82f13
+    uses: EdgeFirstAI/.github/.github/workflows/rust-quick.yml@8b104b2fd96f4712d2d63184880aa19d88d11354
     with:
       pre-command: bash .github/scripts/ci-setup.sh
-      nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub
+      nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub --test on_target
       clippy-args: --workspace --all-targets --all-features --locked -- -D warnings
       clippy-report: true
       cross-targets: aarch64-unknown-linux-gnu
@@ -117,7 +122,7 @@ jobs:
   full:
     needs: changes
     if: needs.changes.outputs.full == 'true' || needs.changes.outputs.hardware == 'true'
-    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@3722c5c1550dfc27efef2aa39bdf60a443c82f13
+    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@8b104b2fd96f4712d2d63184880aa19d88d11354
     with:
       lanes: ${{ needs.changes.outputs.full == 'true' && 'all' || 'hardware' }}
       # Any board with a working V4L2 capture path; libcamera-only boards
@@ -134,8 +139,8 @@ jobs:
       pre-command: bash .github/scripts/ci-setup.sh
       board-pre-command: bash .github/scripts/ci-board-setup.sh
       board-extra-args: -j 1 --no-fail-fast -- --include-ignored
-      nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub
-      archive-args: --locked --bin edgefirst-camera --test test_image
+      nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub --test on_target
+      archive-args: --locked --bin edgefirst-camera --test test_image --test on_target
     secrets: inherit
 
   sonar:

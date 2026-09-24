@@ -1,5 +1,5 @@
 # Nightly Full tier + advisories + Sonar main baseline.
-# Shared workflows: EdgeFirstAI/.github@3722c5c1550dfc27efef2aa39bdf60a443c82f13 (1.2.1)
+# Shared workflows: EdgeFirstAI/.github@8b104b2fd96f4712d2d63184880aa19d88d11354 (EdgeFirstAI/.github#53, pending merge)
 
 name: Nightly
 
@@ -21,17 +21,17 @@ permissions:
 
 jobs:
   changed:
-    uses: EdgeFirstAI/.github/.github/workflows/nightly-gate.yml@3722c5c1550dfc27efef2aa39bdf60a443c82f13
+    uses: EdgeFirstAI/.github/.github/workflows/nightly-gate.yml@8b104b2fd96f4712d2d63184880aa19d88d11354
     with:
       force: ${{ inputs.force || false }}
 
   advisories:
-    uses: EdgeFirstAI/.github/.github/workflows/advisories.yml@3722c5c1550dfc27efef2aa39bdf60a443c82f13
+    uses: EdgeFirstAI/.github/.github/workflows/advisories.yml@8b104b2fd96f4712d2d63184880aa19d88d11354
 
   nightly:
     needs: changed
     if: needs.changed.outputs.run == 'true'
-    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@3722c5c1550dfc27efef2aa39bdf60a443c82f13
+    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@8b104b2fd96f4712d2d63184880aa19d88d11354
     with:
       lanes: all
       nightly: true
@@ -49,8 +49,8 @@ jobs:
       pre-command: bash .github/scripts/ci-setup.sh
       board-pre-command: bash .github/scripts/ci-board-setup.sh
       board-extra-args: -j 1 --no-fail-fast -- --include-ignored
-      nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub
-      archive-args: --locked --bin edgefirst-camera --test test_image
+      nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub --test on_target
+      archive-args: --locked --bin edgefirst-camera --test test_image --test on_target
     secrets: inherit
 
   sonar:
