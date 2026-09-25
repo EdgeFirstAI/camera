@@ -2,12 +2,14 @@
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
 mod args;
+mod clock;
 mod replay;
 mod sidecar;
 mod video;
 
 use args::{Args, MirrorSetting};
 use clap::Parser;
+use clock::RealtimeClock;
 use edgefirst_camera::image::{encode_jpeg, Image, ImageManager, Rotation, RGBA};
 use edgefirst_schemas::{
     builtin_interfaces::{self, Time},
@@ -31,10 +33,9 @@ use std::{
 use tracing::{error, info, info_span, instrument, level_filters::LevelFilter, warn, Instrument};
 use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter, Layer as _, Registry};
 use tracy_client::{frame_mark, plot, secondary_frame_mark};
-use unix_ts::Timestamp;
 use video::VideoManager;
 use videostream::{
-    camera::{create_camera, CameraBuffer, CameraReader, Mirror},
+    camera::{create_camera, CameraBuffer, CameraReader, Mirror, TimestampClock, TimestampSource},
     colorimetry::{ColorEncoding, ColorRange, ColorSpace, ColorTransfer},
     fourcc::FourCC,
     Error as VsError,
@@ -595,12 +596,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     let capture_fps = capture_rate::configured(&args.camera, args.requested_capture_fps());
     info!("Camera configured for {capture_fps} fps");
 
-    // Compute monotonic→realtime offset once at startup for V4L2 timestamp conversion
-    let clock_offset = ClockOffset::new()?;
-    info!(
-        "Clock offset: REALTIME - MONOTONIC = {}s {}ns",
-        clock_offset.offset_sec, clock_offset.offset_nsec
-    );
+    let mut clock = RealtimeClock::new();
 
     let publ_info = match session
         .declare_publisher(args.info_topic.clone())
@@ -647,7 +643,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                     .enable_all()
                     .build()
                     .unwrap()
-                    .block_on(jpeg_task(session, args, rx, clock_offset));
+                    .block_on(jpeg_task(session, args, rx));
             })?;
     }
 
@@ -685,7 +681,6 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                             capture_fps,
                             tile_pos,
                             tile_topic,
-                            clock_offset,
                         ));
                 })?;
 
@@ -767,14 +762,7 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                     .enable_all()
                     .build()
                     .unwrap()
-                    .block_on(h264_task(
-                        session,
-                        args,
-                        rx,
-                        clock_offset,
-                        capture_fps,
-                        recorder,
-                    ));
+                    .block_on(h264_task(session, args, rx, capture_fps, recorder));
             })?;
     } else {
         // --record requires --h264 (enforced by validate_record_replay_args),
@@ -785,12 +773,9 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
     }
 
     let tf_session = session.clone();
-    let tf_msg = ZBytes::from(tf_fields.build_msg()?.into_cdr());
-    let tf_enc = Encoding::APPLICATION_CDR.with_schema("geometry_msgs/msg/TransformStamped");
-    let tf_task = tokio::spawn(async move { tf_static(tf_session, tf_msg, tf_enc).await });
+    let tf_task = tokio::spawn(async move { tf_static(tf_session, tf_fields).await });
     std::mem::drop(tf_task);
 
-    let info_msg = ZBytes::from(info_fields.build_msg()?.into_cdr());
     let info_enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/CameraInfo");
 
     let src_pid = process::id();
@@ -854,16 +839,22 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
         }
         args.tracy.then(|| plot!("fps", fps));
 
+        if fourcc_str.is_none() {
+            log_timestamp_source(&camera_buffer);
+        }
         let fourcc = fourcc_str.get_or_insert_with(|| camera_buffer.format().to_string());
 
-        let cam_ts = camera_buffer.timestamp()?;
-        let frame_sample_ts = zenoh_ts_for_frame(&session, &clock_offset, &cam_ts);
+        // Every representation of this frame (raw, H.264, JPEG, tiles,
+        // camera/info) carries this one stamp; the encoder threads must not
+        // convert again or a clock step between them would split the frame
+        // across two time domains.
+        let stamp = clock.convert(&camera_buffer.timestamp()?)?;
+        let frame_sample_ts = zenoh_ts_from_ros_time(&session, stamp);
         let (msg, enc) = camera_frame_serialize(
             &camera_buffer,
-            &cam_ts,
+            stamp,
             src_pid,
             &args.camera_frame_id,
-            &clock_offset,
             &colorimetry,
             fourcc,
         )?;
@@ -881,31 +872,29 @@ async fn stream(cam: CameraReader, session: Session, args: Args) -> Result<(), B
                 .unwrap();
         }
         .instrument(span);
+        let info_msg = ZBytes::from(info_fields.build_msg(stamp)?.into_cdr());
         let info_task = publ_info
-            .put(info_msg.clone())
+            .put(info_msg)
             .encoding(info_enc.clone())
-            .timestamp(session.new_timestamp());
+            .timestamp(frame_sample_ts);
 
         if args.h264 {
-            let ts = camera_buffer.timestamp()?;
             let src_img = Image::from_camera(&camera_buffer)?;
-            try_send(&h264_tx, src_img, ts, "h264", &mut drops);
+            try_send(&h264_tx, src_img, stamp, "h264", &mut drops);
         }
 
         if args.jpeg {
-            let ts = camera_buffer.timestamp()?;
             let src_img = Image::from_camera(&camera_buffer)?;
-            try_send(&jpeg_tx, src_img, ts, "jpeg", &mut drops);
+            try_send(&jpeg_tx, src_img, stamp, "jpeg", &mut drops);
         }
 
         if args.h264_tiles {
-            let ts = camera_buffer.timestamp()?;
             for (i, tx) in h264_tiles_txs.iter().enumerate() {
                 let src_img = Image::from_camera(&camera_buffer)?;
                 try_send(
                     tx,
                     src_img,
-                    ts,
+                    stamp,
                     TILE_SINKS.get(i).copied().unwrap_or("h264/tile"),
                     &mut drops,
                 );
@@ -1108,9 +1097,9 @@ impl TilePacer {
 }
 
 fn try_send(
-    tx: &Sender<(Image, Timestamp)>,
+    tx: &Sender<(Image, Time)>,
     img: Image,
-    ts: Timestamp,
+    ts: Time,
     sink: &'static str,
     stats: &mut DropStats,
 ) {
@@ -1143,20 +1132,24 @@ fn record_send_outcome(
     }
 }
 
+/// Republish the camera transform at 1 Hz, stamped at each republish so it
+/// follows the wall clock rather than the instant the service started.
 async fn tf_static(
     session: Session,
-    msg: ZBytes,
-    enc: Encoding,
+    fields: TfStaticFields,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let topic = "tf_static".to_string();
+    let enc = Encoding::APPLICATION_CDR.with_schema("geometry_msgs/msg/TransformStamped");
     let mut interval = tokio::time::interval(Duration::from_secs(1));
 
     loop {
         interval.tick().await;
+        let stamp = clock::now()?;
+        let msg = fields.build_msg(stamp).map_err(|e| e.to_string())?;
         session
-            .put(&topic, msg.clone())
+            .put(&topic, ZBytes::from(msg.into_cdr()))
             .encoding(enc.clone())
-            .timestamp(session.new_timestamp())
+            .timestamp(zenoh_ts_from_ros_time(&session, stamp))
             .await?;
     }
 }
@@ -1164,8 +1157,7 @@ async fn tf_static(
 async fn h264_task(
     session: Session,
     args: Args,
-    rx: Receiver<(Image, Timestamp)>,
-    clock_offset: ClockOffset,
+    rx: Receiver<(Image, Time)>,
     capture_fps: i32,
     // Pre-opened in `stream()` before the sidecar write so a doomed
     // record run aborts the whole process before producing orphaned
@@ -1202,7 +1194,7 @@ async fn h264_task(
     .unwrap();
 
     loop {
-        let (msg, ts) = match rx.recv() {
+        let (msg, stamp) = match rx.recv() {
             Ok(v) => v,
             Err(_) => {
                 // main thread exited
@@ -1211,8 +1203,7 @@ async fn h264_task(
         };
 
         let span = info_span!("h264");
-        let sample_ts = zenoh_ts_for_frame(&session, &clock_offset, &ts);
-        let stamp = clock_offset.to_realtime(&ts);
+        let sample_ts = zenoh_ts_from_ros_time(&session, stamp);
         async {
             // Encode once. The bytes feed both the recorder tap and the
             // Zenoh publish path so a late publish-side drop doesn't
@@ -1265,12 +1256,7 @@ fn write_recording(writer: &mut impl io::Write, data: &[u8], flush: bool) -> io:
     Ok(())
 }
 
-async fn jpeg_task(
-    session: Session,
-    args: Args,
-    rx: Receiver<(Image, Timestamp)>,
-    clock_offset: ClockOffset,
-) {
+async fn jpeg_task(session: Session, args: Args, rx: Receiver<(Image, Time)>) {
     let publisher = match session
         .declare_publisher(args.jpeg_topic.clone())
         .priority(Priority::Data)
@@ -1291,7 +1277,7 @@ async fn jpeg_task(
     let img_jpeg = Image::new(args.stream_size[0], args.stream_size[1], RGBA).unwrap();
 
     loop {
-        let (msg, ts) = match rx.recv() {
+        let (msg, stamp) = match rx.recv() {
             Ok(v) => v,
             Err(_) => {
                 // main thread exited
@@ -1300,10 +1286,9 @@ async fn jpeg_task(
         };
 
         let span = info_span!("jpeg");
-        let sample_ts = zenoh_ts_for_frame(&session, &clock_offset, &ts);
+        let sample_ts = zenoh_ts_from_ros_time(&session, stamp);
         async {
-            let (msg, enc) =
-                build_jpeg_msg(&msg, &ts, &imgmgr, &img_jpeg, &args, &clock_offset).unwrap();
+            let (msg, enc) = build_jpeg_msg(&msg, stamp, &imgmgr, &img_jpeg, &args).unwrap();
             publisher
                 .put(msg)
                 .encoding(enc)
@@ -1320,11 +1305,10 @@ async fn jpeg_task(
 async fn h264_single_tile_task(
     session: Session,
     args: Args,
-    rx: Receiver<(Image, Timestamp)>,
+    rx: Receiver<(Image, Time)>,
     capture_fps: i32,
     tile_pos: TilePosition,
     topic: String,
-    clock_offset: ClockOffset,
 ) {
     let publisher = match session
         .declare_publisher(topic.clone())
@@ -1404,21 +1388,18 @@ async fn h264_single_tile_task(
             }
 
             match vid_mgr.encode_direct(&source_img) {
-                Ok((data, _is_key)) => {
-                    match build_tile_video_msg(&data, &ts, &args, tile_pos, &clock_offset) {
-                        Ok((msg, enc)) => {
-                            let sample_ts = zenoh_ts_for_frame(&session, &clock_offset, &ts);
-                            if let Err(e) =
-                                publisher.put(msg).encoding(enc).timestamp(sample_ts).await
-                            {
-                                error!("Failed to publish tile {:?}: {:?}", tile_pos, e);
-                            }
-                        }
-                        Err(e) => {
-                            error!("Failed to build tile video message: {:?}", e);
+                Ok((data, _is_key)) => match build_tile_video_msg(&data, ts, &args, tile_pos) {
+                    Ok((msg, enc)) => {
+                        let sample_ts = zenoh_ts_from_ros_time(&session, ts);
+                        if let Err(e) = publisher.put(msg).encoding(enc).timestamp(sample_ts).await
+                        {
+                            error!("Failed to publish tile {:?}: {:?}", tile_pos, e);
                         }
                     }
-                }
+                    Err(e) => {
+                        error!("Failed to build tile video message: {:?}", e);
+                    }
+                },
                 Err(e) => {
                     error!("Failed to encode tile {:?}: {:?}", tile_pos, e);
                 }
@@ -1432,11 +1413,10 @@ async fn h264_single_tile_task(
 
 fn build_jpeg_msg(
     buf: &Image,
-    ts: &Timestamp,
+    stamp: Time,
     imgmgr: &ImageManager,
     img: &Image,
     args: &Args,
-    clock_offset: &ClockOffset,
 ) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
     info_span!("jpeg_convert").in_scope(|| imgmgr.convert(buf, img, None, Rotation::Rotation0))?;
 
@@ -1454,7 +1434,7 @@ fn build_jpeg_msg(
 
     info_span!("jpeg_publish").in_scope(|| {
         let msg = CompressedImage::builder()
-            .stamp(clock_offset.to_realtime(ts))
+            .stamp(stamp)
             .frame_id(args.camera_frame_id.as_str())
             .format("jpeg")
             .data(jpeg.as_ref())
@@ -1489,15 +1469,14 @@ fn build_h264_msg(
 
 fn build_tile_video_msg(
     data: &[u8],
-    ts: &Timestamp,
+    stamp: Time,
     args: &Args,
     tile_pos: TilePosition,
-    clock_offset: &ClockOffset,
 ) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
     info_span!("h264_tile_publish").in_scope(|| {
         let frame_id = format!("{}_{:?}", args.camera_frame_id, tile_pos).to_lowercase();
         let msg = FoxgloveCompressedVideo::builder()
-            .stamp(clock_offset.to_realtime(ts))
+            .stamp(stamp)
             .frame_id(frame_id.as_str())
             .data(data)
             .format("h264")
@@ -1628,18 +1607,36 @@ pub(crate) fn build_camera_frame_msg(
     Ok((bytes, enc))
 }
 
+/// Log which clock and which instant within the frame the driver stamps
+/// capture buffers with. The realtime conversion assumes CLOCK_MONOTONIC.
+fn log_timestamp_source(buf: &CameraBuffer<'_>) {
+    let flags = match buf.flags() {
+        Ok(flags) => flags,
+        Err(e) => {
+            warn!("V4L2 timestamp source unknown: {e}");
+            return;
+        }
+    };
+    let clock = TimestampClock::from_flags(flags);
+    let source = TimestampSource::from_flags(flags);
+    if clock == TimestampClock::Monotonic {
+        info!("V4L2 capture timestamps: CLOCK_MONOTONIC, {source}");
+    } else {
+        warn!("V4L2 capture timestamps: clock {clock}, {source}; stamps assume CLOCK_MONOTONIC");
+    }
+}
+
 #[instrument(skip_all, fields(width = buf.width(), height = buf.height(), format = fourcc))]
 fn camera_frame_serialize(
     buf: &CameraBuffer<'_>,
-    ts: &Timestamp,
+    stamp: Time,
     pid: u32,
     frame_id: &str,
-    clock_offset: &ClockOffset,
     colorimetry: &Colorimetry,
     fourcc: &str,
 ) -> Result<(ZBytes, Encoding), Box<dyn Error>> {
     build_camera_frame_msg(
-        clock_offset.to_realtime(ts),
+        stamp,
         frame_id,
         buf.sequence()? as u64,
         pid,
@@ -1666,23 +1663,6 @@ fn zenoh_ts_from_ros_time(session: &Session, t: builtin_interfaces::Time) -> Zen
     };
     ZenohTimestamp::new(NTP64::from(dur), session.zid().into())
 }
-
-/// Convenience: derive a Zenoh sample Timestamp from a V4L2 camera frame
-/// timestamp, converting monotonic → wall-clock via the cached ClockOffset.
-/// Matches the `Header.stamp` used in the CDR payload.
-fn zenoh_ts_for_frame(
-    session: &Session,
-    clock_offset: &ClockOffset,
-    cam_ts: &Timestamp,
-) -> ZenohTimestamp {
-    zenoh_ts_from_ros_time(session, clock_offset.to_realtime(cam_ts))
-}
-
-/// Saturated timestamp used when the system clock exceeds the ROS 2 Y2038 limit.
-const SATURATED_TIME: builtin_interfaces::Time = builtin_interfaces::Time {
-    sec: i32::MAX,
-    nanosec: 999_999_999,
-};
 
 /// Geometry fields shared by the calibration loader and the built-in
 /// fallback: `(width, height, distortion_model, d, k, r, p)`.
@@ -1880,16 +1860,8 @@ impl CameraInfoFields {
     }
 
     /// Serialize these fields into a fresh `sensor_msgs/CameraInfo` CDR
-    /// buffer stamped with the current wall-clock time.
-    pub(crate) fn build_msg(&self) -> Result<CameraInfo<Vec<u8>>, Box<dyn Error>> {
-        let stamp = match timestamp() {
-            Ok(t) => t,
-            Err(TimestampError::Overflow) => {
-                warn!("Timestamp overflow: system clock exceeds i32 range (Y2038), saturating");
-                SATURATED_TIME
-            }
-            Err(e) => return Err(e.into()),
-        };
+    /// buffer stamped with the acquisition time of the frame it describes.
+    pub(crate) fn build_msg(&self, stamp: Time) -> Result<CameraInfo<Vec<u8>>, Box<dyn Error>> {
         Ok(CameraInfo::builder()
             .stamp(stamp)
             .frame_id(self.frame_id.as_str())
@@ -1934,19 +1906,10 @@ impl TfStaticFields {
         }
     }
 
-    pub(crate) fn build_msg(&self) -> Result<TransformStamped<Vec<u8>>, Box<dyn Error>> {
-        let stamp = match timestamp() {
-            Ok(t) => t,
-            Err(TimestampError::Overflow) => {
-                warn!("Timestamp overflow: system clock exceeds i32 range (Y2038), saturating");
-                SATURATED_TIME
-            }
-            Err(e) => {
-                warn!("Failed to get timestamp: {e}");
-                Time { sec: 0, nanosec: 0 }
-            }
-        };
-
+    pub(crate) fn build_msg(
+        &self,
+        stamp: Time,
+    ) -> Result<TransformStamped<Vec<u8>>, Box<dyn Error>> {
         let transform = Transform {
             translation: Vector3 {
                 x: self.translation[0],
@@ -1967,137 +1930,6 @@ impl TfStaticFields {
             .child_frame_id(self.child_frame_id.as_str())
             .transform(transform)
             .build()?)
-    }
-}
-
-/// Errors that can occur when generating timestamps.
-#[derive(Debug)]
-enum TimestampError {
-    /// System clock is before Unix epoch.
-    BeforeEpoch(std::time::SystemTimeError),
-    /// System clock seconds exceed i32 range (Y2038).
-    Overflow,
-}
-
-impl std::fmt::Display for TimestampError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::BeforeEpoch(e) => write!(f, "system clock is before Unix epoch: {e}"),
-            Self::Overflow => write!(f, "system clock seconds exceed i32::MAX (Y2038)"),
-        }
-    }
-}
-
-impl std::error::Error for TimestampError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::BeforeEpoch(e) => Some(e),
-            Self::Overflow => None,
-        }
-    }
-}
-
-/// Returns the current wall-clock time as a ROS2-compatible timestamp.
-///
-/// `SystemTime::now()` uses CLOCK_REALTIME on Linux (via vDSO, no actual syscall).
-/// On embedded systems without battery-backed RTC (e.g., i.MX8MP), the wall clock
-/// may jump once at boot when NTP syncs, but is stable afterward (NTP only slews).
-///
-/// Returns `TimestampError::Overflow` if the system clock exceeds `i32::MAX` seconds
-/// (2038-01-19T03:14:07Z), which is the ROS 2 `builtin_interfaces/msg/Time` limit.
-fn timestamp() -> Result<builtin_interfaces::Time, TimestampError> {
-    let duration = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(TimestampError::BeforeEpoch)?;
-
-    let secs = duration.as_secs();
-    if secs > i32::MAX as u64 {
-        return Err(TimestampError::Overflow);
-    }
-
-    Ok(builtin_interfaces::Time {
-        sec: secs as i32,
-        nanosec: duration.subsec_nanos(),
-    })
-}
-
-/// Cached offset between CLOCK_REALTIME and CLOCK_MONOTONIC for converting V4L2
-/// hardware timestamps to wall-clock time.
-///
-/// V4L2 captures frame timestamps using CLOCK_MONOTONIC, but ROS2 Header stamps
-/// require CLOCK_REALTIME. This offset converts between the two clock domains:
-///
-///   wall_time = v4l2_monotonic_timestamp + offset
-///
-/// This is the same pattern used by ROS2 image_transport and usb_cam drivers.
-/// The offset is stable after NTP settles (typically within 30s of boot).
-#[derive(Clone, Copy)]
-struct ClockOffset {
-    offset_sec: i64,
-    offset_nsec: i64,
-}
-
-impl ClockOffset {
-    /// Compute the offset by reading both clocks back-to-back.
-    fn new() -> Result<Self, std::io::Error> {
-        let mut realtime = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        let mut monotonic = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-
-        unsafe {
-            if libc::clock_gettime(libc::CLOCK_REALTIME, &mut realtime) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut monotonic) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-        }
-
-        // offset = realtime - monotonic (using i128 to avoid overflow during subtraction)
-        let real_ns = realtime.tv_sec as i128 * 1_000_000_000 + realtime.tv_nsec as i128;
-        let mono_ns = monotonic.tv_sec as i128 * 1_000_000_000 + monotonic.tv_nsec as i128;
-        let offset_ns = real_ns - mono_ns;
-
-        Ok(Self {
-            offset_sec: (offset_ns / 1_000_000_000) as i64,
-            offset_nsec: (offset_ns % 1_000_000_000) as i64,
-        })
-    }
-
-    /// Convert a V4L2 CLOCK_MONOTONIC timestamp to CLOCK_REALTIME for ROS2 Header stamps.
-    fn to_realtime(self, ts: &Timestamp) -> builtin_interfaces::Time {
-        let mono_sec = ts.seconds();
-        let mono_nsec = ts.subsec(9) as i64;
-
-        let mut real_sec = mono_sec + self.offset_sec;
-        let mut real_nsec = mono_nsec + self.offset_nsec;
-
-        // Normalize nanoseconds into [0, 999_999_999]
-        if real_nsec >= 1_000_000_000 {
-            real_sec += 1;
-            real_nsec -= 1_000_000_000;
-        } else if real_nsec < 0 {
-            real_sec -= 1;
-            real_nsec += 1_000_000_000;
-        }
-
-        // Clamp to i32 range for ROS2 builtin_interfaces::Time (Y2038 limit)
-        let sec = if real_sec > i32::MAX as i64 {
-            warn!("Timestamp overflow: V4L2 converted time exceeds i32 range (Y2038), saturating");
-            return SATURATED_TIME;
-        } else {
-            real_sec as i32
-        };
-
-        builtin_interfaces::Time {
-            sec,
-            nanosec: real_nsec as u32,
-        }
     }
 }
 
@@ -2606,8 +2438,13 @@ mod tests {
     fn tf_static_fields_build_msg_produces_nonempty_cdr() {
         let args = default_args();
         let tf = TfStaticFields::from_args(&args);
-        let msg = tf.build_msg().expect("tf CDR build must succeed");
+        let stamp = Time {
+            sec: 1_790_000_000,
+            nanosec: 123_456_789,
+        };
+        let msg = tf.build_msg(stamp).expect("tf CDR build must succeed");
         assert!(!msg.as_cdr().is_empty());
+        assert_eq!(msg.stamp(), stamp);
     }
 
     #[test]
@@ -2615,8 +2452,13 @@ mod tests {
         let mut args = default_args();
         args.cam_info_path = String::new();
         let info = CameraInfoFields::from_args(&args);
-        let msg = info.build_msg().expect("info CDR build must succeed");
+        let stamp = Time {
+            sec: 1_790_000_000,
+            nanosec: 123_456_789,
+        };
+        let msg = info.build_msg(stamp).expect("info CDR build must succeed");
         assert!(!msg.as_cdr().is_empty());
+        assert_eq!(msg.stamp(), stamp);
     }
 
     #[test]

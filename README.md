@@ -206,6 +206,8 @@ The camera node publishes standard ROS2 message types using CDR serialization, e
 | `camera/h264/br` | `foxglove_msgs/CompressedVideo` | 4K tile: bottom-right (1080p) |
 | `tf_static` | `geometry_msgs/TransformStamped` | Camera frame transform |
 
+Every frame-tied topic (`camera/frame`, `camera/info`, `camera/jpeg`, `camera/h264` and the tiles) is stamped with the frame's acquisition time: the V4L2 capture timestamp converted to `CLOCK_REALTIME`. The Zenoh sample timestamp carries the same instant. Stamps follow wall-clock steps (for example NTP or GNSS sync after boot) without a service restart. `tf_static` is stamped at each 1 Hz republish. See [ARCHITECTURE.md](ARCHITECTURE.md#timestamps).
+
 **ROS2 Bridge Integration:**
 
 ```bash

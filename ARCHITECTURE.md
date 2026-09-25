@@ -737,18 +737,19 @@ Each span appears as a zone in Tracy with timing information.
 
 ---
 
-## ROS 2 Year 2038 Limit
+## Timestamps
 
-The ROS 2 `builtin_interfaces/msg/Time` message uses `int32` for the `sec` field, which overflows on 2038-01-19T03:14:07Z. This is an inherent limitation of the ROS 2 message definition.
+Camera topics follow the EdgeFirst middleware timestamp contract (Perception > Clock Synchronization and Timestamps in the EdgeFirst manual): `header.stamp` is the acquisition instant as Unix time from the host `CLOCK_REALTIME`, and the Zenoh sample timestamp carries the same instant.
 
-The camera node handles this as follows:
+- **Acquisition instant.** The V4L2 buffer timestamp, recorded by the capture driver on `CLOCK_MONOTONIC`. No exposure or readout correction is applied; a constant residual to the physical event is a consumer-side offset.
+- **One stamp per frame.** The capture loop converts the V4L2 timestamp once (`clock::RealtimeClock::convert`) and passes the resulting `Time` to the H.264, JPEG and tile encoder threads, so every representation of a frame carries an identical stamp. `camera/info` is re-stamped with the stamp of the frame it accompanies.
+- **Clock steps.** The offset `CLOCK_REALTIME - CLOCK_MONOTONIC` is measured at every conversion, bracketing the monotonic read between two realtime reads and using their midpoint. A wall-clock step (NTP or GNSS sync on a unit without a working RTC) is followed on the next frame without a restart and logged once at INFO. Nothing orders the service after time synchronization.
+- **Metadata.** `tf_static` is re-stamped at each 1 Hz republish. Replay has no acquisition time and stamps at the publish instant.
+- **Zenoh timestamp precision.** Zenoh timestamps are NTP64 (32.32 fixed point, about 0.23 ns resolution), so a decoded Zenoh timestamp matches `header.stamp` to within a nanosecond rather than bit for bit.
 
-1. The `timestamp()` function detects when `SystemTime` seconds exceed `i32::MAX` and returns a `TimestampError::Overflow` error.
-2. The `ClockOffset::to_realtime()` method clamps converted V4L2 timestamps to `i32::MAX` with a warning.
-3. Callers log a warning and publish messages with a saturated timestamp (`sec = i32::MAX`, `nanosec = 999_999_999`).
-4. Camera data (frames, calibration, transforms) is still published — only the header timestamp is clamped.
+### ROS 2 Year 2038 Limit
 
-This ensures the service continues delivering camera data past 2038 rather than silently dropping frames. Downstream consumers should be aware that saturated timestamps indicate the Y2038 limit has been reached.
+The ROS 2 `builtin_interfaces/msg/Time` message uses `int32` for the `sec` field, which overflows on 2038-01-19T03:14:07Z. Every stamp is produced by `clock.rs`, which saturates times past the limit to `sec = i32::MAX`, `nanosec = 999_999_999` with a warning and clamps pre-epoch times to the epoch, so the header stamp and the Zenoh timestamp always agree. Camera data continues to be published; only the stamp is clamped. Downstream consumers should treat a saturated stamp as the Y2038 limit having been reached.
 
 ---
 

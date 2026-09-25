@@ -38,8 +38,8 @@ use zenoh::{
 };
 
 use crate::{
-    args::Args, build_camera_frame_msg, build_h264_msg, sidecar::Sidecar, timestamp,
-    zenoh_ts_from_ros_time, CameraInfoFields, TfStaticFields, SATURATED_TIME, SHUTDOWN,
+    args::Args, build_camera_frame_msg, build_h264_msg, clock, sidecar::Sidecar, tf_static,
+    zenoh_ts_from_ros_time, CameraInfoFields, TfStaticFields, SHUTDOWN,
 };
 
 /// Read-chunk size for pulling Annex-B bytes off disk. Matches the
@@ -69,8 +69,7 @@ pub(crate) async fn run_replay(session: Session, args: Args) -> Result<(), Box<d
     warn_on_sidecar_overrides(&args, &sidecar);
 
     // Camera info and tf static are published from the sidecar values
-    // rather than CLI defaults; we build the CDR payloads once here and
-    // reuse the bytes per publish, same pattern as the live path.
+    // rather than CLI defaults, stamped per publish like the live path.
     let info_fields: CameraInfoFields = sidecar.camera_info.clone();
     let tf_fields: TfStaticFields = sidecar.tf_static.clone();
 
@@ -83,12 +82,9 @@ pub(crate) async fn run_replay(session: Session, args: Args) -> Result<(), Box<d
 
     // tf_static runs on its own loop exactly like the live path.
     let tf_session = session.clone();
-    let tf_bytes = ZBytes::from(tf_fields.build_msg()?.into_cdr());
-    let tf_enc = Encoding::APPLICATION_CDR.with_schema("geometry_msgs/msg/TransformStamped");
-    let tf_task = tokio::spawn(async move { tf_static_loop(tf_session, tf_bytes, tf_enc).await });
+    let tf_task = tokio::spawn(async move { tf_static(tf_session, tf_fields).await });
     std::mem::drop(tf_task);
 
-    let info_bytes = ZBytes::from(info_fields.build_msg()?.into_cdr());
     let info_enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/CameraInfo");
 
     // Replay always forwards the recorded Annex-B verbatim on
@@ -261,20 +257,16 @@ pub(crate) async fn run_replay(session: Session, args: Args) -> Result<(), Box<d
 
         ticker.tick().await;
 
-        // Synthesize a ROS2 Header.stamp at the publish instant. The
-        // live path stamps from the V4L2 frame's monotonic time
-        // through `ClockOffset::to_realtime`; replay has no source
-        // timestamp, so we use wall-clock `SystemTime::now()` via
-        // the shared `timestamp()` helper. Result is same shape /
-        // same CLOCK_REALTIME semantics as the live path so
+        // Replay has no acquisition time, so the stamp is synthesized at
+        // the publish instant. It is CLOCK_REALTIME like the live path, so
         // consumers can't tell replay from live.
-        let stamp = timestamp().unwrap_or(SATURATED_TIME);
+        let stamp = clock::now()?;
 
         publish_replayed_frame(
             &session,
             &publ_info,
             &publ_h264,
-            &info_bytes,
+            &info_fields,
             &info_enc,
             &frame,
             &last_data,
@@ -430,7 +422,7 @@ async fn publish_replayed_frame(
     session: &Session,
     publ_info: &zenoh::pubsub::Publisher<'_>,
     publ_h264: &zenoh::pubsub::Publisher<'_>,
-    info_bytes: &ZBytes,
+    info_fields: &CameraInfoFields,
     info_enc: &Encoding,
     frame: &Frame,
     h264_bytes: &[u8],
@@ -474,11 +466,11 @@ async fn publish_replayed_frame(
         .await
         .map_err(zerr)?;
 
-    // camera/info — same content every frame, same cadence as the live path.
+    // camera/info — same content every frame, stamped with the frame.
     publ_info
-        .put(info_bytes.clone())
+        .put(ZBytes::from(info_fields.build_msg(stamp)?.into_cdr()))
         .encoding(info_enc.clone())
-        .timestamp(session.new_timestamp())
+        .timestamp(sample_ts)
         .await
         .map_err(zerr)?;
 
@@ -547,23 +539,6 @@ fn warn_on_sidecar_overrides(args: &Args, sidecar: &Sidecar) {
             "--cam-tf-quat {:?} differs from sidecar tf_static.rotation {:?}; using the sidecar value",
             arg_r, sidecar.tf_static.rotation
         );
-    }
-}
-
-async fn tf_static_loop(
-    session: Session,
-    msg: ZBytes,
-    enc: Encoding,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let topic = "tf_static".to_string();
-    let mut interval = tokio::time::interval(Duration::from_secs(1));
-    loop {
-        interval.tick().await;
-        session
-            .put(&topic, msg.clone())
-            .encoding(enc.clone())
-            .timestamp(session.new_timestamp())
-            .await?;
     }
 }
 
