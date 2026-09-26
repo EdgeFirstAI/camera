@@ -232,7 +232,7 @@ All options can be set via command line or environment variables. Environment va
 **Performance Profiling:**
 
 - Use Tracy profiler (connect with tracy-profiler GUI)
-- V4L2 frame timestamps (CLOCK_MONOTONIC) converted to wall-clock via `ClockOffset` for ROS2 Header stamps
+- V4L2 frame timestamps (CLOCK_MONOTONIC) converted to wall-clock via `clock::RealtimeClock` for ROS2 Header stamps
 - FPS monitoring with `Instant::now()` (monotonic) with warnings when below threshold
 
 ### Hardware Specifics
@@ -256,10 +256,11 @@ All options can be set via command line or environment variables. Environment va
 - **Timestamp / Clock Management**:
   - **CLOCK_REALTIME** for all ROS2 Header stamps (ROS2 convention, human-readable, log-correlatable)
   - **CLOCK_MONOTONIC** only for internal duration/interval measurements (FPS tracking, rate limiting via `Instant::now()`)
-  - V4L2 provides frame timestamps in CLOCK_MONOTONIC; convert to CLOCK_REALTIME via a cached offset (`ClockOffset` struct)
-  - Offset formula: `offset = CLOCK_REALTIME - CLOCK_MONOTONIC` (computed once at startup, stable after NTP settles)
-  - Conversion: `wall_time = v4l2_monotonic_timestamp + offset` (same pattern as ROS2 `usb_cam` / `image_transport`)
-  - On embedded systems without battery-backed RTC (i.MX8MP), CLOCK_REALTIME may jump once at boot when NTP syncs; after initial correction NTP only slews (gradual adjustment)
+  - V4L2 provides frame timestamps in CLOCK_MONOTONIC; convert to CLOCK_REALTIME with `clock::RealtimeClock::convert`
+  - Offset formula: `offset = CLOCK_REALTIME - CLOCK_MONOTONIC`, measured at every conversion (monotonic read bracketed by two realtime reads, midpoint used); **never cache the offset**, since CLOCK_REALTIME can step after the service starts
+  - Conversion: `wall_time = v4l2_monotonic_timestamp + offset`
+  - Convert once per frame in the capture loop and pass the resulting `Time` to every encoder and topic, so all representations of a frame carry an identical stamp; the Zenoh sample timestamp must equal `header.stamp`
+  - On embedded systems without battery-backed RTC (i.MX8MP), CLOCK_REALTIME may step after boot when NTP or GNSS syncs, possibly after the camera service has started
   - **Never use CLOCK_MONOTONIC_RAW** for message timestamps — it is not NTP-adjusted and not compatible with ROS2
 - **Platform quirks**:
   - G2D requires physically contiguous memory (DMA heap)

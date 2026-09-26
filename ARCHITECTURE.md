@@ -600,8 +600,8 @@ reads the `.h264` file in 256 KiB chunks and emits decoded `Frame`s
    ▼                  ▼                    ▼                 ▼
 camera/frame     camera/h264     camera/info      tf_static
 (CameraFrame)    (Annex-B bytes     (from sidecar,      (from sidecar,
-                  forwarded          built at start,     built at start,
-                  verbatim)          published/frame)    1 Hz background)
+                  forwarded          stamped and         re-stamped at each
+                  verbatim)          published/frame)    1 Hz republish)
 ```
 
 Key semantics:

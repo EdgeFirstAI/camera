@@ -311,11 +311,22 @@ mod tests {
     fn system_clocks_convert_to_now() {
         let mut clock = RealtimeClock::new();
         let mut src = SystemClocks;
+        let real_before = src.realtime_ns().unwrap();
         let mono_now = src.monotonic_ns().unwrap();
+        let real_after = src.realtime_ns().unwrap();
         let ts = Timestamp::new((mono_now / S) as i64, (mono_now % S) as u32);
         let converted = clock.convert(&ts).unwrap();
-        let real_now = src.realtime_ns().unwrap();
         let converted_ns = converted.sec as i128 * S + converted.nanosec as i128;
-        assert!((real_now - converted_ns).abs() < 10_000_000);
+        // The monotonic read happened between the two realtime reads, so its
+        // conversion must land in that window regardless of scheduling delay.
+        let slack = 1_000_000;
+        assert!(
+            converted_ns >= real_before - slack,
+            "{converted_ns} < {real_before}"
+        );
+        assert!(
+            converted_ns <= real_after + slack,
+            "{converted_ns} > {real_after}"
+        );
     }
 }
