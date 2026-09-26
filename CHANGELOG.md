@@ -16,12 +16,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   encoder, sidecar, and low-FPS warning even if `VIDIOC_S_PARM` is
   unsupported, so an intentional 30 FPS cap no longer logs "configured
   for 60".
+- The V4L2 timestamp clock and source (end of frame or start of exposure) reported by the capture driver are logged once at startup, with a warning if the clock is not `CLOCK_MONOTONIC`. Requires videostream 2.6.0 (EDGEAI-1938).
 
 ### Changed
 - `CAMERA_SIZE` is optional. Unset `CAMERA_MODE` and `CAMERA_SIZE` probes
   the live camera (`VIDIOC_G_FMT` / `VIDIOC_G_PARM`) and fails only if
   that query cannot answer. The shipped `camera.default` leaves both
   empty; product images (Maivin `1080p30`) override via bbappend.
+- `camera/info` is stamped with the acquisition time of the frame it accompanies, and its Zenoh sample timestamp matches, instead of a stamp taken once at startup and a publish-time Zenoh timestamp (EDGEAI-1938).
+- `tf_static` is re-stamped at each 1 Hz republish, with the Zenoh sample timestamp equal to the header stamp (EDGEAI-1938).
+- Pre-epoch times clamp to the epoch in both the header stamp and the Zenoh timestamp; previously the header could carry a negative time while the Zenoh timestamp clamped (EDGEAI-1938).
+- Dependencies updated: videostream 2.6.0, zenoh 1.10.1, clap 4.6.7 and dma-buf 0.5.0; development dependencies criterion 0.8.2 and serial_test 4.0.1.
+
+### Fixed
+- Frame stamps follow wall-clock steps without a restart. The `CLOCK_REALTIME - CLOCK_MONOTONIC` offset was measured once at startup, so on a unit without a working RTC every frame-tied topic stayed in the pre-sync clock domain (475 days behind in the field) until the service restarted. The offset is now measured at every conversion and a step is logged once (EDGEAI-1938).
+- The H.264, JPEG and tile encoders receive the stamp computed once per frame by the capture loop, so every representation of a frame carries an identical `header.stamp` (EDGEAI-1938).
 
 ## [2.10.1] - 2026-09-07
 
