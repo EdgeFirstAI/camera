@@ -504,7 +504,8 @@ ingest camera data from this release forward.
 - Environment variable control for H264 streaming
 - Flexible runtime configuration
 
-[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.11.0...HEAD
+[Unreleased]: https://github.com/EdgeFirstAI/camera/compare/v2.12.0...HEAD
+[2.12.0]: https://github.com/EdgeFirstAI/camera/compare/v2.11.0...v2.12.0
 [2.11.0]: https://github.com/EdgeFirstAI/camera/compare/v2.10.1...v2.11.0
 [2.10.1]: https://github.com/EdgeFirstAI/camera/compare/v2.10.0...v2.10.1
 [2.10.0]: https://github.com/EdgeFirstAI/camera/compare/v2.9.1...v2.10.0
