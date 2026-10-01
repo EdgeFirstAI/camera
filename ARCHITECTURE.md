@@ -457,8 +457,10 @@ Frames are captured using blocking reads that dequeue V4L2 buffers (`VIDIOC_DQBU
 **Buffer Management:**
 
 - **Type:** V4L2_MEMORY_MMAP (memory-mapped)
-- **Queue Size:** 4 buffers (driver default)
+- **Queue Size:** `CAMERA_BUFFERS` (2–32), or 4 when unset (videostream default)
 - **Dequeue/Enqueue:** Handled by `videostream` library
+
+**Frame lifetime for subscribers:** a buffer is re-queued as soon as its frame is published, behind the buffers already queued. The driver starts overwriting it when the frame `N - 1` captures later begins, so a frame published on `FRAME_TOPIC` stays intact for about `(N - 1) × frame period` after its end-of-frame stamp: 100 ms with 4 buffers at 30 FPS, 50 ms at 60 FPS. Subscribers that import the DMA-BUF must copy or convert within that window. Subscribers can infer `N` from the distinct `fd` values in consecutive `CameraFrame` messages.
 
 ### NXP G2D - Hardware Accelerator
 

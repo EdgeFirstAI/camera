@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-10-01
+
+Configurable capture buffer count. Wire format is unchanged from 2.11.0.
+
+### Added
+- `CAMERA_BUFFERS` / `--camera-buffers` sets the number of V4L2 capture buffers (2–32). Unset keeps the videostream default of 4. Subscribers of `FRAME_TOPIC` must read each frame within about `CAMERA_BUFFERS - 1` frame periods before its DMA buffer is overwritten, so a deeper pool gives the model and fusion services more time to convert frames they pair with slower sensors (EDGEAI-1940).
+
 ## [2.11.0] - 2026-09-26
 
 Camera-mode selection and wall-clock-correct timestamps. Wire format is

@@ -189,6 +189,22 @@ pub struct Args {
     #[arg(long, env = "CAMERA_MODE")]
     pub camera_mode: Option<CameraMode>,
 
+    /// Number of V4L2 capture buffers to request from the driver.
+    ///
+    /// Each published frame references one of these buffers by DMA-BUF
+    /// file descriptor, and the driver refills a buffer once the frames
+    /// queued ahead of it are captured. A subscriber therefore has about
+    /// `(buffers - 1)` frame periods to read a frame before its pixels
+    /// are overwritten: 100 ms with 4 buffers at 30 FPS, 50 ms at 60 FPS.
+    /// Each buffer costs one capture frame of CMA memory. Unset uses the
+    /// videostream default of 4. The driver may adjust the count.
+    #[arg(
+        long,
+        env = "CAMERA_BUFFERS",
+        value_parser = clap::value_parser!(u32).range(2..=32)
+    )]
+    pub camera_buffers: Option<u32>,
+
     /// Camera image mirroring setting
     #[arg(long, env = "MIRROR", default_value = "both", value_enum)]
     pub mirror: MirrorSetting,
@@ -799,6 +815,39 @@ mod tests {
         let args = Args::parse_from(["edgefirst-camera", "--camera-size", "800", "600"]);
         assert_eq!(args.requested_capture_size(), Some((800, 600)));
         assert_eq!(args.requested_capture_fps(), None);
+    }
+
+    #[test]
+    fn camera_buffers_defaults_to_unset() {
+        let args = Args::parse_from(["edgefirst-camera"]);
+        assert_eq!(args.camera_buffers, None);
+    }
+
+    #[test]
+    fn camera_buffers_accepts_the_supported_range() {
+        let args = Args::parse_from(["edgefirst-camera", "--camera-buffers", "6"]);
+        assert_eq!(args.camera_buffers, Some(6));
+        for bad in ["0", "1", "33", "four"] {
+            assert!(
+                Args::try_parse_from(["edgefirst-camera", "--camera-buffers", bad]).is_err(),
+                "{bad} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn camera_buffers_is_env_bound() {
+        let cmd = Args::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "camera_buffers")
+            .expect("camera_buffers");
+        assert_eq!(
+            arg.get_env()
+                .map(|e| e.to_string_lossy().into_owned())
+                .as_deref(),
+            Some("CAMERA_BUFFERS")
+        );
     }
 
     #[test]
