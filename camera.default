@@ -39,6 +39,18 @@ CAMERA_SIZE=""
 # via a bbappend, not this file.
 CAMERA_MODE=""
 
+# Number of V4L2 capture buffers (2-32). Every frame published on
+# FRAME_TOPIC references one of these DMA buffers, which the driver
+# overwrites once the frames queued ahead of it are captured. Subscribers
+# such as the model and fusion services must read a frame within about
+# (CAMERA_BUFFERS - 1) frame periods: 100 ms with 4 buffers at 30 FPS,
+# but only 50 ms at 60 FPS. More buffers give subscribers more time and
+# add no latency while this service keeps up; each one costs one capture
+# frame of CMA memory (about 4 MB at 1080p YUYV). Use 6 or more when
+# downstream services pair frames with slower sensors such as radar.
+# Leave empty for the default of 4.
+CAMERA_BUFFERS=""
+
 # ---------------------------------------------------------------------------
 # Streaming Resolution
 # ---------------------------------------------------------------------------

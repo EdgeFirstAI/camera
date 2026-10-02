@@ -363,22 +363,30 @@ async fn open_camera(
     let (width, height) = (size.0 as i32, size.1 as i32);
     let requested_fps = args.requested_capture_fps();
 
+    if let Some(n) = args.camera_buffers {
+        info!("Requesting {n} V4L2 capture buffers");
+    }
+
     retry_while_isp_not_ready(&args.camera, deadline, ISP_READY_DELAY, || {
-        create_camera()
+        let camera = create_camera()
             .with_device(&args.camera)
             .with_resolution(width, height)
             .with_format(FourCC(*b"YUYV"))
-            .with_mirror(mirror)
-            .open()
-            .and_then(|cam| {
-                // Apply the requested interval after format negotiation but
-                // before streaming. Some V4L2 drivers reject S_PARM after
-                // STREAMON.
-                if let Some(fps) = requested_fps {
-                    capture_rate::apply(&args.camera, fps);
-                }
-                cam.start().map(|()| cam)
-            })
+            .with_mirror(mirror);
+        match args.camera_buffers {
+            Some(n) => camera.with_buffers(n as i32),
+            None => camera,
+        }
+        .open()
+        .and_then(|cam| {
+            // Apply the requested interval after format negotiation but
+            // before streaming. Some V4L2 drivers reject S_PARM after
+            // STREAMON.
+            if let Some(fps) = requested_fps {
+                capture_rate::apply(&args.camera, fps);
+            }
+            cam.start().map(|()| cam)
+        })
     })
     .await
 }

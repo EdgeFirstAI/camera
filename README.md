@@ -332,6 +332,7 @@ edgefirst-camera --help
 
 - `--h264-bitrate <auto|mbps5|mbps25|mbps50|mbps100>` - H264 bitrate (default: `auto`)
 - `--h264-tiles-fps <FPS>` - FPS limit for 4K tiles (default: `15`)
+- `--camera-buffers <N>` - V4L2 capture buffers to request, 2–32 (default: unset, which uses 4). Subscribers of `--frame-topic` must read each frame within about `N - 1` frame periods before the driver overwrites its DMA buffer: 100 ms with 4 buffers at 30 FPS, 50 ms at 60 FPS. Each extra buffer costs one capture frame of CMA memory.
 
 **Recording and Replay:**
 
