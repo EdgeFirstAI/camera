@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `edgefirst-camera` SDK crate (`crates/camera`): a camera capture API that delivers frames as `edgefirst-tensor` tensors with capture metadata and wall-clock acquisition time, plus the `mock` backend (EDGEAI-1518). The V4L2, file and libcamera backends follow.
+
+### Changed
+- The repository is a Cargo workspace. The application package is renamed `edgefirst-camera-app`; its binary is still `edgefirst-camera`. The application and the SDK share version 3.0.0 (EDGEAI-1518).
+- The Rust toolchain is pinned to 1.94.0 by `rust-toolchain.toml`, matching the HAL (EDGEAI-1518).
+
 ## [2.12.0] - 2026-10-01
 
 Configurable capture buffer count. Wire format is unchanged from 2.11.0.

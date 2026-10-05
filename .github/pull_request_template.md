@@ -74,6 +74,32 @@ edgefirst-camera --jpeg --h264
 # Actual: ...
 ```
 
+### Camera hardware validation
+
+<!--
+Required when the PR touches capture behaviour: crates/camera/src/backend/,
+buffer or frame lifetime in the SDK, controls or timestamps, or the
+application capture pipeline. Otherwise write "Not applicable" and why.
+Hosted macOS and Windows runners have no camera; their CI lanes do not
+validate capture.
+-->
+
+**Scope.** List the backends and platforms this change can affect (V4L2 vvcam / ISI / UVC, libcamera neo / pisp, codec, mock only).
+
+**Devices tested.** One row per device:
+
+| Device | Sensor and path | Kernel / BSP | libcamera | Runner offline and rebooted first |
+|---|---|---|---|---|
+| <!-- e.g. imx8mpevk-06 --> | <!-- OS08A20 on vvcam --> | <!-- 6.18.20-2.0.0 --> | <!-- n/a --> | <!-- yes / not a fleet board --> |
+
+Fleet boards follow "Taking a runner offline for hands-on work" in the Self-Hosted Runner Fleet Inventory.
+
+**Probe results.** Paste or link the output of `cargo run -p edgefirst-camera --example probe -- --source <spec> --frames 300 --close-test --json` for each device. Note any change from the previous run on the same device: negotiated format and pitch, `Auto` resolution, contiguity, fps, drops, dequeue latency, timestamp clock and source, close/reopen result.
+
+**Not tested.** List the platforms this change can affect but that were not tested, and why.
+
+**Application changes.** For changes to the camera application, give the 2.12 parity results: topics and schemas, fps, and DMA / JPEG / H.264 publish latency against the targets in Testing and Validation.
+
 ## Documentation
 
 <!-- Check all that apply to your changes -->

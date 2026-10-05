@@ -2,7 +2,7 @@
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use edgefirst_camera::image::{self, Image, ImageManager, Rotation};
+use edgefirst_camera_app::image::{self, Image, ImageManager, Rotation};
 
 pub fn benchmark_resize(c: &mut Criterion) {
     let fmts = [image::RGBA, image::RGB3, image::YUYV, image::NV12];

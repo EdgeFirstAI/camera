@@ -59,10 +59,12 @@ jobs:
           filters: |
             code:
               - 'src/**'
+              - 'crates/**'
               - 'tests/**'
               - 'benches/**'
               - 'Cargo.*'
               - 'rustfmt.toml'
+              - 'rust-toolchain.toml'
               - 'Makefile'
               - 'NOTICE'
               - 'camera.default'
@@ -93,7 +95,7 @@ jobs:
     uses: EdgeFirstAI/.github/.github/workflows/rust-quick.yml@b65fec89d297d73f193892996373659c4eaeb93a
     with:
       pre-command: bash .github/scripts/ci-setup.sh
-      nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub --test on_target
+      nextest-args: --workspace --locked --features edgefirst-camera/mock --lib --bin edgefirst-camera --test env_scrub --test on_target --test mock
       clippy-args: --workspace --all-targets --all-features --locked -- -D warnings
       clippy-report: true
       cross-targets: aarch64-unknown-linux-gnu
@@ -129,6 +131,9 @@ jobs:
       boards: camera-v4l2
       sonar: false
       scancode: true
+      # macOS and Windows lanes live in camera-full.yml: the application
+      # crate is Linux-only, and these lanes would run the same
+      # workspace-wide nextest-args string as Linux.
       skip-macos: true
       skip-windows: true
       timeout-minutes: 45
@@ -138,9 +143,14 @@ jobs:
       pre-command: bash .github/scripts/ci-setup.sh
       board-pre-command: bash .github/scripts/ci-board-setup.sh
       board-extra-args: -j 1 --no-fail-fast -- --include-ignored
-      nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub --test on_target
+      nextest-args: --workspace --locked --features edgefirst-camera/mock --lib --bin edgefirst-camera --test env_scrub --test on_target --test mock
       archive-args: --locked --bin edgefirst-camera --test test_image --test on_target
     secrets: inherit
+
+  camera-full:
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
+    uses: ./.github/workflows/camera-full.yml
 
   sonar:
     needs: [changes, quick, full]
@@ -154,7 +164,7 @@ jobs:
 
   ci-gate:
     if: always()
-    needs: [changes, quick, notice, full, sonar]
+    needs: [changes, quick, notice, full, camera-full, sonar]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     permissions: {}

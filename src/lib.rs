@@ -21,7 +21,7 @@
 //! ## Example
 //!
 //! ```no_run
-//! use edgefirst_camera::image::{Image, ImageManager, Rotation, RGBA, YUYV};
+//! use edgefirst_camera_app::image::{Image, ImageManager, Rotation, RGBA, YUYV};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create image manager for G2D hardware operations

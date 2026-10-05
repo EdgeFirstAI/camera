@@ -10,7 +10,7 @@ mod video;
 use args::{Args, MirrorSetting};
 use clap::Parser;
 use clock::RealtimeClock;
-use edgefirst_camera::image::{encode_jpeg, Image, ImageManager, Rotation, RGBA};
+use edgefirst_camera_app::image::{encode_jpeg, Image, ImageManager, Rotation, RGBA};
 use edgefirst_schemas::{
     builtin_interfaces::{self, Time},
     edgefirst_msgs::{CameraFrame, TensorFields, TensorPlaneView},

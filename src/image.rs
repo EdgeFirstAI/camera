@@ -229,7 +229,7 @@ fn surface_from_frame(frame: &Frame) -> Result<G2DSurface, Box<dyn Error>> {
 /// # Example
 ///
 /// ```no_run
-/// use edgefirst_camera::image::{Image, ImageManager, Rotation, NV12, YUYV};
+/// use edgefirst_camera_app::image::{Image, ImageManager, Rotation, NV12, YUYV};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let imgmgr = ImageManager::new()?;
@@ -378,7 +378,7 @@ impl ImageManager {
 /// # Example
 ///
 /// ```no_run
-/// use edgefirst_camera::image::{Image, YUYV};
+/// use edgefirst_camera_app::image::{Image, YUYV};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // Allocate a 1080p YUYV image in DMA memory
@@ -440,7 +440,7 @@ impl Image {
     /// # Example
     ///
     /// ```no_run
-    /// use edgefirst_camera::image::{Image, YUYV};
+    /// use edgefirst_camera_app::image::{Image, YUYV};
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let img = Image::new(1920, 1080, YUYV)?;
@@ -618,7 +618,7 @@ impl Drop for MappedImage {
 /// # Example
 ///
 /// ```no_run
-/// use edgefirst_camera::image::{encode_jpeg, Image, RGBA};
+/// use edgefirst_camera_app::image::{encode_jpeg, Image, RGBA};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut img = Image::new(640, 480, RGBA)?;

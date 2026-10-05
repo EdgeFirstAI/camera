@@ -1,0 +1,81 @@
+# Camera-only Full lanes. Called from ci.yml (ci:full) and nightly.yml.
+#
+# The SDK crate (crates/camera) builds and runs on macOS and Windows against
+# its mock backend. The application crate is Linux-only (V4L2, G2D,
+# videostream), and rust-full.yml runs its macOS and Windows lanes with the
+# same workspace-wide nextest-args string as Linux, so those shared lanes stay
+# skipped and these lanes test the SDK package alone.
+#
+# Runners follow CICD Pipelines 6.5 rule 1: hosted standard runners, which
+# these small lanes fit within the Full budget. No fleet runner is needed:
+# the mac group is empty, and the SDK lanes need no GPU.
+#
+# These lanes have no camera. They keep platform-specific code out of the SDK
+# core, run the SDK's non-Linux paths (for example wall-clock stamps where
+# there is no monotonic clock to read), and run the mock-backend tests against
+# edgefirst-tensor on each platform. Coverage comes from the Linux lanes;
+# capture is validated on camera boards and devices (Testing and Validation).
+
+name: Camera Full extras
+
+on:
+  workflow_call:
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -e -o pipefail {0}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test-macos:
+    name: Build & Test (macOS, SDK)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      # rust-toolchain.toml is the single source of the compiler version.
+      - name: Install the pinned toolchain
+        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal --component clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          shared-key: rust-macos
+          cache-on-failure: true
+          cache-bin: false
+      - name: Clippy
+        run: cargo clippy -p edgefirst-camera --all-targets --features mock --locked -- -D warnings
+      - name: Rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p edgefirst-camera --no-deps --features mock --locked
+      - name: Tests
+        run: cargo test -p edgefirst-camera --features mock --locked
+
+  test-windows:
+    name: Build & Test (Windows, SDK)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      # rust-toolchain.toml is the single source of the compiler version.
+      - name: Install the pinned toolchain
+        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal --component clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          shared-key: rust-windows
+          cache-on-failure: true
+          cache-bin: false
+      - name: Clippy
+        run: cargo clippy -p edgefirst-camera --all-targets --features mock --locked -- -D warnings
+      - name: Rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p edgefirst-camera --no-deps --features mock --locked
+      - name: Tests
+        run: cargo test -p edgefirst-camera --features mock --locked

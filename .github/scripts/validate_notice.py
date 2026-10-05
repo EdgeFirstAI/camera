@@ -171,22 +171,25 @@ def parse_notice_file(notice_path: str) -> Set[str]:
     return listed_deps
 
 
-def validate_notice(notice_path: str, sbom_path: str) -> Tuple[bool, List[str], List[str]]:
+def validate_notice(notice_path: str, sbom_paths: List[str]) -> Tuple[bool, List[str], List[str]]:
     """
-    Validate NOTICE file against SBOM.
+    Validate NOTICE file against one SBOM per workspace package.
+
+    The NOTICE file covers the union of every package's first-level
+    dependencies.
 
     Returns:
         (passed, missing_deps, extra_deps)
     """
-    try:
-        with open(sbom_path, 'r') as f:
-            sbom = json.load(f)
-    except Exception as e:
-        print(f"Error reading SBOM: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    # Get first-level dependencies from SBOM
-    sbom_first_level = get_first_level_dependencies(sbom)
+    sbom_first_level: Set[str] = set()
+    for sbom_path in sbom_paths:
+        try:
+            with open(sbom_path, 'r') as f:
+                sbom = json.load(f)
+        except Exception as e:
+            print(f"Error reading SBOM {sbom_path}: {e}", file=sys.stderr)
+            sys.exit(1)
+        sbom_first_level |= get_first_level_dependencies(sbom)
 
     # Get listed dependencies from NOTICE
     notice_deps = parse_notice_file(notice_path)
@@ -204,14 +207,14 @@ def validate_notice(notice_path: str, sbom_path: str) -> Tuple[bool, List[str], 
 
 
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: validate_notice.py <NOTICE> <sbom.json>", file=sys.stderr)
+    if len(sys.argv) < 3:
+        print("Usage: validate_notice.py <NOTICE> <sbom.json> [<sbom.json> ...]", file=sys.stderr)
         sys.exit(1)
 
     notice_path = sys.argv[1]
-    sbom_path = sys.argv[2]
+    sbom_paths = sys.argv[2:]
 
-    passed, missing_deps, extra_deps = validate_notice(notice_path, sbom_path)
+    passed, missing_deps, extra_deps = validate_notice(notice_path, sbom_paths)
 
     print("=" * 80)
     print("NOTICE File Validation")

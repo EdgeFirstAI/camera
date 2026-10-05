@@ -40,6 +40,7 @@ jobs:
       boards: camera-v4l2
       sonar: false
       scancode: true
+      # macOS and Windows lanes live in camera-full.yml (nightly-camera).
       skip-macos: true
       skip-windows: true
       timeout-minutes: 45
@@ -49,9 +50,14 @@ jobs:
       pre-command: bash .github/scripts/ci-setup.sh
       board-pre-command: bash .github/scripts/ci-board-setup.sh
       board-extra-args: -j 1 --no-fail-fast -- --include-ignored
-      nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub --test on_target
+      nextest-args: --workspace --locked --features edgefirst-camera/mock --lib --bin edgefirst-camera --test env_scrub --test on_target --test mock
       archive-args: --locked --bin edgefirst-camera --test test_image --test on_target
     secrets: inherit
+
+  nightly-camera:
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
+    uses: ./.github/workflows/camera-full.yml
 
   sonar:
     needs: [changed, nightly]

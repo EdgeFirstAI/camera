@@ -173,6 +173,7 @@ cargo llvm-cov --all-features --workspace --html
 
 - `ci.yml` - Tiered CI: **Quick** on every PR including drafts (`ci-gate` before review), **Full** with label `ci:full`, board lane with `ci:hardware` (not on ordinary pushes)
 - `nightly.yml` - Scheduled Full + advisories + Sonar main baseline
+- `camera-full.yml` - Full-tier macOS and Windows lanes for the SDK crate (`crates/camera`), called by `ci.yml` (`ci:full`) and `nightly.yml`; the shared macOS and Windows lanes stay skipped because the application crate is Linux-only
 - `build.yml` - Release binaries on version tags (native aarch64 + x86_64)
 - `sbom.yml` - Full scancode SBOM on release tags
 - `release.yml` - Automated release with binary artifacts

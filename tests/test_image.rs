@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
-use edgefirst_camera::{
+use edgefirst_camera_app::{
     image,
     image::{encode_jpeg, Image, ImageManager, Rotation},
 };

@@ -31,7 +31,7 @@ PROJECT_TYPE="application"  # Options: library, application, framework
 VERSION_FILE="Cargo.toml"  # Single source of truth for version
 
 # Source directories to scan (space-separated)
-SOURCE_DIRS="src tests benches"
+SOURCE_DIRS="src tests benches crates"
 
 # Package manifest files (for dependency parsing)
 MANIFEST_FILES="Cargo.toml Cargo.lock"
@@ -183,8 +183,10 @@ if [ -f "Cargo.toml" ] && cargo cyclonedx --version &> /dev/null; then
     # Use --all to include all features and workspace members
     cargo cyclonedx --format json --all
     # Rename output to deps-sbom.json
-    if [ -f "$PROJECT_NAME.cdx.json" ]; then
-        mv "$PROJECT_NAME.cdx.json" deps-sbom.json
+    # The application package's graph; it includes the SDK crate once the
+    # application depends on it.
+    if [ -f "edgefirst-camera-app.cdx.json" ]; then
+        mv "edgefirst-camera-app.cdx.json" deps-sbom.json
     fi
 fi
 

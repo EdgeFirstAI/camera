@@ -2,7 +2,9 @@
 # Quick-tier NOTICE check: dependency SBOM via cargo-cyclonedx (no scancode).
 set -euo pipefail
 
-PROJECT_NAME="edgefirst-camera"
+# One dependency SBOM per workspace package: the application at the root
+# and each crate under crates/. NOTICE covers their union.
+SBOMS=("edgefirst-camera-app.cdx.json" "crates/camera/edgefirst-camera.cdx.json")
 
 if ! command -v cargo >/dev/null 2>&1; then
   echo "::error::Rust toolchain required for cargo cyclonedx"
@@ -10,11 +12,13 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 cargo cyclonedx --format json --all
-if [[ ! -f "${PROJECT_NAME}.cdx.json" ]]; then
-  echo "::error::expected ${PROJECT_NAME}.cdx.json after cargo cyclonedx"
-  exit 1
-fi
-mv "${PROJECT_NAME}.cdx.json" sbom.json
+for sbom in "${SBOMS[@]}"; do
+  if [[ ! -f "$sbom" ]]; then
+    echo "::error::expected $sbom after cargo cyclonedx"
+    exit 1
+  fi
+  python3 .github/scripts/check_license_policy.py "$sbom"
+done
+cp "${SBOMS[0]}" sbom.json
 
-python3 .github/scripts/check_license_policy.py sbom.json
-python3 .github/scripts/validate_notice.py NOTICE sbom.json
+python3 .github/scripts/validate_notice.py NOTICE "${SBOMS[@]}"

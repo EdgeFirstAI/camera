@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
-use edgefirst_camera::image::{Image, ImageManager, Rotation};
+use edgefirst_camera_app::image::{Image, ImageManager, Rotation};
 use std::{error::Error, os::raw::c_int};
 use tracing::{debug, info_span};
 use tracy_client::plot;
@@ -22,12 +22,12 @@ use crate::args::H264Bitrate;
 /// # Example
 ///
 /// ```no_run
-/// use edgefirst_camera::{
+/// use edgefirst_camera_app::{
 ///     image::{Image, NV12},
 ///     video::VideoManager,
 /// };
 /// use videostream::fourcc::FourCC;
-/// # use edgefirst_camera::args::H264Bitrate;
+/// # use edgefirst_camera_app::args::H264Bitrate;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut video_mgr = VideoManager::new(FourCC(*b"H264"), 1920, 1080, H264Bitrate::Mbps25)?;
@@ -122,8 +122,8 @@ impl VideoManager {
     /// # Example
     ///
     /// ```no_run
-    /// # use edgefirst_camera::video::VideoManager;
-    /// # use edgefirst_camera::args::H264Bitrate;
+    /// # use edgefirst_camera_app::video::VideoManager;
+    /// # use edgefirst_camera_app::args::H264Bitrate;
     /// # use videostream::fourcc::FourCC;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// // Encode top-left tile of a 4K image

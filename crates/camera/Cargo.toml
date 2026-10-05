@@ -1,0 +1,38 @@
+[package]
+name = "edgefirst-camera"
+description = "EdgeFirst Camera SDK: portable camera capture into edgefirst-tensor zero-copy buffers"
+repository = "https://github.com/EdgeFirstAI/camera"
+license = "Apache-2.0"
+version = "3.0.0-dev"
+edition = "2021"
+rust-version = "1.94"
+readme = "README.md"
+keywords = ["camera", "v4l2", "libcamera", "zero-copy", "edge"]
+categories = ["multimedia::video", "hardware-support"]
+include = ["src/**", "tests/**", "README.md", "ARCHITECTURE.md", "TESTING.md"]
+
+[features]
+default = ["static"]
+# Forwarding alias to edgefirst-tensor; never a pin.
+static = ["edgefirst-tensor/static"]
+# Synthetic frame source for tests, CI and as the worked example for backends.
+mock = []
+
+[dependencies]
+edgefirst-tensor = { version = "0.33", default-features = false }
+tracing = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[[test]]
+name = "mock"
+required-features = ["mock"]
+
+[lints.rust]
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+
+[package.metadata.docs.rs]
+features = ["mock"]

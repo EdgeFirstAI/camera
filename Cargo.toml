@@ -1,10 +1,20 @@
 [package]
-name = "edgefirst-camera"
+name = "edgefirst-camera-app"
 description = "EdgeFirst Camera Publisher"
 repository = "https://github.com/EdgeFirstAI/camera"
 license = "Apache-2.0"
-version = "2.12.0"
+version = "3.0.0-dev"
 edition = "2021"
+rust-version = "1.94"
+default-run = "edgefirst-camera"
+
+[[bin]]
+name = "edgefirst-camera"
+path = "src/main.rs"
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/edgefirst-camera-linux-{ target-arch }"
+pkg-fmt = "bin"
 
 [profile.release]
 opt-level = 3
@@ -18,6 +28,8 @@ strip = false
 debug = true
 
 [workspace]
+members = ["crates/camera"]
+resolver = "2"
 
 [[bench]]
 name = "encode"
