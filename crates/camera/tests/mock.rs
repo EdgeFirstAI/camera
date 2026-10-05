@@ -248,3 +248,109 @@ fn test_mock_enumerates_and_probes_modes() {
     camera.start().unwrap();
     assert_eq!(camera.next_frame(WAIT).unwrap().width(), Some(640));
 }
+
+#[test]
+fn test_mock_pool_depths_two_to_eight() {
+    for depth in 2..=8usize {
+        let mut camera = CameraBuilder::source("mock:32x32@240")
+            .unwrap()
+            .buffers(depth)
+            .open()
+            .unwrap();
+        camera.start().unwrap();
+        let held: Vec<_> = (0..depth)
+            .map(|_| camera.next_frame(WAIT).unwrap())
+            .collect();
+        let mut slots: Vec<_> = held.iter().map(|f| f.slot()).collect();
+        slots.sort_unstable();
+        assert_eq!(
+            slots,
+            (0..depth).collect::<Vec<_>>(),
+            "depth {depth}: every slot used once"
+        );
+        assert_eq!(camera.stats().held, depth);
+
+        let err = camera
+            .next_frame(Some(Duration::from_millis(20)))
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Timeout, "depth {depth}");
+        assert!(
+            camera.stats().dropped > 0,
+            "depth {depth}: starvation counts drops"
+        );
+
+        // Releasing one frame frees exactly that slot.
+        let mut held = held;
+        let freed = held.remove(depth / 2).slot();
+        let next = camera.next_frame(WAIT).unwrap();
+        assert_eq!(next.slot(), freed, "depth {depth}");
+    }
+}
+
+#[test]
+fn test_mock_frame_held_across_restart_stays_valid_and_requeues() {
+    let mut camera = CameraBuilder::source("mock:32x32@240")
+        .unwrap()
+        .buffers(2)
+        .open()
+        .unwrap();
+    camera.start().unwrap();
+    let held = camera.next_frame(WAIT).unwrap();
+    let held_slot = held.slot();
+    camera.stop().unwrap();
+    camera.start().unwrap();
+
+    // The held frame is untouched by the restart.
+    let first = held.map_bytes(CpuAccess::Read).unwrap()[0];
+    let other = camera.next_frame(WAIT).unwrap();
+    assert_ne!(other.slot(), held_slot, "a held slot is never refilled");
+    assert_eq!(held.map_bytes(CpuAccess::Read).unwrap()[0], first);
+
+    // Both slots held: no frame until one drops, then the held slot returns.
+    assert_eq!(
+        camera
+            .next_frame(Some(Duration::from_millis(20)))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Timeout
+    );
+    drop(held);
+    assert_eq!(camera.next_frame(WAIT).unwrap().slot(), held_slot);
+}
+
+#[test]
+fn test_mock_frame_outlives_camera_and_changed_pool() {
+    let mut camera = CameraBuilder::source("mock:32x32@240")
+        .unwrap()
+        .buffers(2)
+        .open()
+        .unwrap();
+    camera.start().unwrap();
+    let before_change = camera.next_frame(WAIT).unwrap();
+    camera.stop().unwrap();
+    // A new pool detaches the old one; its frames keep their memory.
+    camera.set_buffers(BufferPool::Sdk).unwrap();
+    camera.start().unwrap();
+    let after_change = camera.next_frame(WAIT).unwrap();
+    drop(camera);
+    assert_eq!(
+        before_change.map_bytes(CpuAccess::Read).unwrap().len(),
+        32 * 32 * 2
+    );
+    assert_eq!(
+        after_change.map_bytes(CpuAccess::Read).unwrap().len(),
+        32 * 32 * 2
+    );
+}
+
+#[test]
+fn test_mock_pool_depth_limits() {
+    for depth in [0usize, 1, 33] {
+        let err = CameraBuilder::source("mock")
+            .unwrap()
+            .buffers(depth)
+            .open()
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidConfig, "depth {depth}");
+    }
+}

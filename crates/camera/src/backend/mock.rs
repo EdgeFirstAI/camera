@@ -6,22 +6,26 @@
 //! Produces a moving gradient at the requested size and rate, in host
 //! memory, with the full control surface reporting `Unsupported(Backend)`
 //! except the frame rate. It is the SDK's own test source and the worked
-//! example for third-party backends: frames are built with [`Frame::new`]
-//! and returned through [`SlotRelease`].
+//! example for third-party backends: buffers live in a [`SlotTable`], the
+//! "driver" is a FIFO of queued slots, and released slots go back to it.
+//!
+//! The mock behaves like an Import backend: `stop()` keeps the table, so
+//! frames held across a restart stay valid and requeue when they drop.
+//! Changing the pool or dropping the camera detaches the table.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use edgefirst_tensor::{CpuAccess, DType, PixelFormat, TensorDyn, TensorMemory};
 
 use crate::builder::Source;
+use crate::pool::{self, BufferInfo, PoolRequirements};
 use crate::{
     timestamp, Applied, Backend, BufferPool, Camera, CameraBuilder, CameraDescriptor, CaptureClock,
     CaptureStats, Contiguity, Control, ControlId, ControlInfo, ControlSet, ControlValue, Error,
-    ErrorKind, FormatInfo, Frame, FrameMeta, PlaneLayout, Rates, RealtimeClock, Rejection,
-    ResolvedMemory, Result, Sizes, SlotRelease, StreamConfig, StreamRequest, Timestamp,
-    TimestampSource, Unsupported, WaitHandle,
+    ErrorKind, FormatInfo, Frame, FrameMeta, PlaneLayout, Rates, RealtimeClock, ResolvedMemory,
+    Result, Sizes, SlotTable, StreamConfig, StreamRequest, Timestamp, TimestampSource, Unsupported,
+    WaitHandle,
 };
 
 const FORMATS: [PixelFormat; 4] = [
@@ -32,6 +36,11 @@ const FORMATS: [PixelFormat; 4] = [
 ];
 const MIN_FPS: f64 = 1.0;
 const MAX_FPS: f64 = 240.0;
+/// Pool depth limits, matching `--camera-buffers`.
+const MIN_BUFFERS: usize = 2;
+const MAX_BUFFERS: usize = 32;
+/// The mock writes with the CPU, so any CPU-mappable memory will do.
+const NATIVE: &[TensorMemory] = &[TensorMemory::Mem, TensorMemory::Shm, TensorMemory::DmaBuf];
 
 pub(crate) fn descriptor(id: &str) -> CameraDescriptor {
     let mut d = CameraDescriptor::new(Backend::Mock, id, "Synthetic camera", "mock");
@@ -53,20 +62,6 @@ pub(crate) fn descriptor(id: &str) -> CameraDescriptor {
     d
 }
 
-/// Free-slot list shared with outstanding frames.
-#[derive(Debug, Default)]
-struct Slots {
-    free: Mutex<VecDeque<usize>>,
-}
-
-impl SlotRelease for Slots {
-    fn release(&self, slot: usize) {
-        if let Ok(mut free) = self.free.lock() {
-            free.push_back(slot);
-        }
-    }
-}
-
 #[derive(Debug)]
 struct MockCamera {
     descriptor: CameraDescriptor,
@@ -74,11 +69,15 @@ struct MockCamera {
     config: StreamConfig,
     controls: ControlSet,
     provided: Option<Vec<TensorDyn>>,
-    pool: Vec<Arc<TensorDyn>>,
-    slots: Arc<Slots>,
+    table: Option<SlotTable>,
+    /// Slots the "driver" owns, in the order it fills them.
+    driver: VecDeque<usize>,
     clock: RealtimeClock,
     streaming: bool,
+    /// Start of the current pacing run.
     epoch: Instant,
+    /// Frame periods elapsed in the current pacing run, delivered or lost.
+    periods: u64,
     seq: u64,
     stats: CaptureStats,
 }
@@ -100,6 +99,15 @@ pub(crate) fn open(builder: CameraBuilder) -> Result<Box<dyn Camera>> {
         return Err(Error::new(
             ErrorKind::InvalidConfig,
             format!("mock size {width}x{height} must be even and at least 16x16"),
+        ));
+    }
+    if builder.provided.is_none() && !(MIN_BUFFERS..=MAX_BUFFERS).contains(&request.buffers) {
+        return Err(Error::new(
+            ErrorKind::InvalidConfig,
+            format!(
+                "pool depth {} outside {MIN_BUFFERS}..={MAX_BUFFERS}",
+                request.buffers
+            ),
         ));
     }
     let fps = request.frame_rate.unwrap_or(fps).clamp(MIN_FPS, MAX_FPS);
@@ -124,11 +132,12 @@ pub(crate) fn open(builder: CameraBuilder) -> Result<Box<dyn Camera>> {
         config,
         controls,
         provided: builder.provided,
-        pool: Vec::new(),
-        slots: Arc::new(Slots::default()),
+        table: None,
+        driver: VecDeque::new(),
         clock: RealtimeClock::new(),
         streaming: false,
         epoch: Instant::now(),
+        periods: 0,
         seq: 0,
         stats: CaptureStats::default(),
     };
@@ -160,20 +169,28 @@ impl MockCamera {
     }
 
     fn validate(&self, pool: &[TensorDyn]) -> Result<()> {
-        if pool.len() < 2 {
-            return Err(Error::buffers_rejected(Rejection::Count, None));
+        let infos: Vec<_> = pool.iter().map(BufferInfo::of).collect();
+        let req = PoolRequirements {
+            format: self.config.format,
+            width: self.config.width as usize,
+            height: self.config.height as usize,
+            // The mock adapts to any pitch, as a driver honouring padding does.
+            row_stride: None,
+            min_count: MIN_BUFFERS,
+            max_count: MAX_BUFFERS,
+            contiguity: self.request.contiguity,
+            native: NATIVE,
+        };
+        pool::validate(&infos, &req).map_err(|(reason, slot)| Error::buffers_rejected(reason, slot))
+    }
+
+    /// Retires the current table: held frames keep their memory and never
+    /// requeue.
+    fn detach(&mut self) {
+        if let Some(table) = self.table.take() {
+            table.detach();
         }
-        for (slot, t) in pool.iter().enumerate() {
-            if t.format() != Some(self.config.format) {
-                return Err(Error::buffers_rejected(Rejection::Format, Some(slot)));
-            }
-            if t.width() != Some(self.config.width as usize)
-                || t.height() != Some(self.config.height as usize)
-            {
-                return Err(Error::buffers_rejected(Rejection::Size, Some(slot)));
-            }
-        }
-        Ok(())
+        self.driver.clear();
     }
 
     fn planes(&self, tensor: &TensorDyn) -> Vec<PlaneLayout> {
@@ -191,7 +208,8 @@ impl MockCamera {
             .collect()
     }
 
-    fn fill(&self, tensor: &TensorDyn, stride: usize) -> Result<()> {
+    fn fill(&self, tensor: &TensorDyn) -> Result<()> {
+        let stride = self.config.row_stride;
         let mut map = tensor.map_bytes(CpuAccess::Write)?;
         let shift = self.seq as usize;
         if stride == 0 {
@@ -204,8 +222,24 @@ impl MockCamera {
         Ok(())
     }
 
-    fn take_free_slot(&self) -> Option<usize> {
-        self.slots.free.lock().ok()?.pop_front()
+    /// The next slot the driver fills, after taking back released slots.
+    fn next_driver_slot(&mut self) -> Option<usize> {
+        let table = self.table.as_ref()?;
+        while let Some(slot) = table.pop_released() {
+            self.driver.push_back(slot);
+        }
+        self.driver.pop_front()
+    }
+
+    fn restart_pacing(&mut self) {
+        self.epoch = Instant::now();
+        self.periods = 0;
+    }
+}
+
+impl Drop for MockCamera {
+    fn drop(&mut self) {
+        self.detach();
     }
 }
 
@@ -237,6 +271,7 @@ impl Camera for MockCamera {
             Control::FrameRate(fps) if fps.is_finite() && fps > 0.0 => {
                 let applied = fps.clamp(MIN_FPS, MAX_FPS);
                 self.config.frame_rate = Some(applied);
+                self.restart_pacing();
                 Ok(if applied == fps {
                     Applied::Driver
                 } else {
@@ -255,35 +290,35 @@ impl Camera for MockCamera {
         if self.streaming {
             return Ok(());
         }
-        let pool = match self.provided.take() {
-            Some(pool) => {
-                if let Err(e) = self.validate(&pool) {
-                    self.provided = Some(pool);
-                    return Err(e);
+        if self.table.is_none() {
+            let pool = match self.provided.take() {
+                Some(pool) => {
+                    if let Err(e) = self.validate(&pool) {
+                        // The caller can take the pool back with take_buffers().
+                        self.provided = Some(pool);
+                        return Err(e);
+                    }
+                    pool
                 }
-                pool
-            }
-            None => self.allocate()?,
-        };
-        self.config.row_stride = pool[0].effective_row_stride().unwrap_or(0);
-        self.config.planes = self.planes(&pool[0]).len();
-        self.config.buffer_count = pool.len();
-        self.config.memory = ResolvedMemory::Import;
-        // Host memory: contiguity is not a property the mock can promise.
-        self.config.contiguous = None;
-        self.pool = pool.into_iter().map(Arc::new).collect();
-        // A fresh slot list: frames still held from an earlier run release
-        // into the old list and are never reused.
-        self.slots = Arc::new(Slots::default());
-        if let Ok(mut free) = self.slots.free.lock() {
-            free.extend(0..self.pool.len());
+                None => self.allocate()?,
+            };
+            self.config.row_stride = pool[0].effective_row_stride().unwrap_or(0);
+            self.config.planes = self.planes(&pool[0]).len();
+            self.config.buffer_count = pool.len();
+            self.config.memory = ResolvedMemory::Import;
+            // Host memory: contiguity is not a property the mock can promise.
+            self.config.contiguous = None;
+            self.driver = (0..pool.len()).collect();
+            self.table = Some(SlotTable::new(pool));
         }
-        self.epoch = Instant::now();
+        self.restart_pacing();
         self.streaming = true;
         Ok(())
     }
 
     fn stop(&mut self) -> Result<()> {
+        // Import semantics: the table and its buffers are kept, so frames
+        // held across a restart stay valid and requeue when they drop.
         self.streaming = false;
         Ok(())
     }
@@ -295,7 +330,7 @@ impl Camera for MockCamera {
                 "set_buffers while streaming",
             ));
         }
-        self.pool.clear();
+        self.detach();
         self.provided = match pool {
             BufferPool::Sdk => None,
             BufferPool::Provided(p) => Some(p),
@@ -328,15 +363,14 @@ impl Camera for MockCamera {
                 "next_frame while stopped",
             ));
         }
-        let fps = self.config.frame_rate.unwrap_or(30.0);
-        let interval = Duration::from_secs_f64(1.0 / fps);
+        let interval = Duration::from_secs_f64(1.0 / self.config.frame_rate.unwrap_or(30.0));
         let deadline = timeout.map(|t| Instant::now() + t);
         loop {
-            let due = self.epoch + interval.mul_f64((self.seq + self.stats.dropped) as f64);
+            let due = self.epoch + interval.mul_f64(self.periods as f64);
             let now = Instant::now();
             if due > now {
-                if deadline.is_some_and(|d| d < due) {
-                    std::thread::sleep(deadline.unwrap().saturating_duration_since(now));
+                if let Some(deadline) = deadline.filter(|d| *d < due) {
+                    std::thread::sleep(deadline.saturating_duration_since(now));
                     self.stats.timeouts += 1;
                     return Err(Error::new(
                         ErrorKind::Timeout,
@@ -345,50 +379,57 @@ impl Camera for MockCamera {
                 }
                 std::thread::sleep(due - now);
             }
-            match self.take_free_slot() {
-                Some(slot) => {
-                    let tensor = self.pool[slot].clone();
-                    self.fill(&tensor, self.config.row_stride)?;
-                    let clock = if cfg!(unix) {
-                        CaptureClock::Monotonic
-                    } else {
-                        CaptureClock::Realtime
-                    };
-                    let ts = Timestamp {
-                        clock,
-                        source: TimestampSource::EndOfFrame,
-                        nanos: timestamp::now(clock)?,
-                    };
-                    let mut meta = FrameMeta::new(slot, self.seq, ts);
-                    meta.driver_sequence = Some(self.seq as u32);
-                    meta.realtime = self.clock.to_realtime(ts).ok();
-                    meta.planes = self.planes(&tensor);
-                    meta.bytes_used = meta.planes.iter().map(|p| p.used).sum();
-                    self.seq += 1;
-                    self.stats.frames += 1;
-                    let release: Arc<dyn SlotRelease> = self.slots.clone();
-                    return Ok(Frame::new(tensor, meta, Some(release)));
+            self.periods += 1;
+            let Some(slot) = self.next_driver_slot() else {
+                // Every buffer is held, so this frame period is lost.
+                self.stats.dropped += 1;
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    self.stats.timeouts += 1;
+                    return Err(Error::new(
+                        ErrorKind::Timeout,
+                        "no free buffer within the timeout; every buffer is held",
+                    ));
                 }
-                None => {
-                    // Every buffer is held: this frame period is lost.
-                    self.stats.dropped += 1;
-                    if deadline.is_some_and(|d| Instant::now() >= d) {
-                        self.stats.timeouts += 1;
-                        return Err(Error::new(
-                            ErrorKind::Timeout,
-                            "no free buffer within the timeout; every buffer is held",
-                        ));
-                    }
-                }
-            }
+                continue;
+            };
+            let Some(table) = self.table.as_ref() else {
+                return Err(Error::new(ErrorKind::InvalidConfig, "no buffers"));
+            };
+            let tensor = table.tensor(slot).clone();
+            self.fill(&tensor)?;
+            let clock = if cfg!(unix) {
+                CaptureClock::Monotonic
+            } else {
+                CaptureClock::Realtime
+            };
+            let ts = Timestamp {
+                clock,
+                source: TimestampSource::EndOfFrame,
+                nanos: timestamp::now(clock)?,
+            };
+            let mut meta = FrameMeta::new(slot, self.seq, ts);
+            meta.driver_sequence = Some(self.seq as u32);
+            meta.realtime = self.clock.to_realtime(ts).ok();
+            meta.planes = self.planes(&tensor);
+            meta.bytes_used = meta.planes.iter().map(|p| p.used).sum();
+            self.seq += 1;
+            self.stats.frames += 1;
+            let Some(table) = self.table.as_ref() else {
+                return Err(Error::new(ErrorKind::InvalidConfig, "no buffers"));
+            };
+            return Ok(table.frame(meta));
         }
     }
 
     fn stats(&self) -> CaptureStats {
-        let free = self.slots.free.lock().map(|f| f.len()).unwrap_or(0);
+        let (queued, held) = self
+            .table
+            .as_ref()
+            .map(|t| (t.queued(), t.held()))
+            .unwrap_or((0, 0));
         CaptureStats {
-            queued: free,
-            held: self.pool.len().saturating_sub(free),
+            queued,
+            held,
             ..self.stats
         }
     }

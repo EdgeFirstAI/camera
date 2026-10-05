@@ -61,6 +61,7 @@ mod control;
 mod enumerate;
 mod error;
 mod frame;
+mod pool;
 mod timestamp;
 
 pub use builder::CameraBuilder;
@@ -75,6 +76,7 @@ pub use control::{
 pub use enumerate::{modes, Backend, CameraDescriptor, FormatInfo, Mode, Rates, SizeRates, Sizes};
 pub use error::{Error, ErrorKind, Rejection, Result};
 pub use frame::{Frame, FrameMeta, PlaneLayout, SlotRelease};
+pub use pool::SlotTable;
 pub use timestamp::{CaptureClock, RealtimeClock, Timestamp, TimestampSource};
 
 /// Lists the cameras every compiled backend can see.
