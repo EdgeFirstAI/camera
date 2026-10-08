@@ -53,6 +53,8 @@
 //! - `static` (default): forwards to `edgefirst-tensor/static`.
 //! - `v4l2` (default): the V4L2 capture backend on Linux (`/dev/videoN`).
 //! - `mock`: the synthetic frame source (`mock[:WxH@fps]`).
+//! - `schemas`: [`schema`], the `Frame` → `edgefirst_msgs/CameraFrame`
+//!   mapping.
 
 mod backend;
 mod builder;
@@ -63,6 +65,8 @@ mod enumerate;
 mod error;
 mod frame;
 mod pool;
+#[cfg(feature = "schemas")]
+pub mod schema;
 mod timestamp;
 
 pub use builder::CameraBuilder;

@@ -47,13 +47,13 @@ jobs:
           cache-on-failure: true
           cache-bin: false
       - name: Clippy
-        run: cargo clippy -p edgefirst-camera --all-targets --features mock --locked -- -D warnings
+        run: cargo clippy -p edgefirst-camera --all-targets --features mock,schemas --locked -- -D warnings
       - name: Rustdoc
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc -p edgefirst-camera --no-deps --features mock --locked
+        run: cargo doc -p edgefirst-camera --no-deps --features mock,schemas --locked
       - name: Tests
-        run: cargo test -p edgefirst-camera --features mock --locked
+        run: cargo test -p edgefirst-camera --features mock,schemas --locked
 
   test-windows:
     name: Build & Test (Windows, SDK)
@@ -72,10 +72,10 @@ jobs:
           cache-on-failure: true
           cache-bin: false
       - name: Clippy
-        run: cargo clippy -p edgefirst-camera --all-targets --features mock --locked -- -D warnings
+        run: cargo clippy -p edgefirst-camera --all-targets --features mock,schemas --locked -- -D warnings
       - name: Rustdoc
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc -p edgefirst-camera --no-deps --features mock --locked
+        run: cargo doc -p edgefirst-camera --no-deps --features mock,schemas --locked
       - name: Tests
-        run: cargo test -p edgefirst-camera --features mock --locked
+        run: cargo test -p edgefirst-camera --features mock,schemas --locked

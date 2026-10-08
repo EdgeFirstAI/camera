@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Mirror, exposure, gain, white balance, frame rate and any V4L2 control by ID; the i.MX 8M Plus ISP flip quirk.
   - The `probe` example reports what a camera negotiates and delivers on a platform.
 - Caller-pool validation rejects memory the tensor crate reports as non-contiguous while contiguity is required (EDGEAI-1520).
+- `schemas` feature: `schema::FrameTensor` maps a `Frame` to an `edgefirst_msgs/CameraFrame` tensor (addressing-grid shape, byte strides at the real pitch, tensor-ABI storage kind and dtype, one plane per buffer plane, colorimetry), with `schema::stamp` and `schema::ntp64` giving the header stamp and the Zenoh sample timestamp of the same instant (EDGEAI-1521).
 - V4L2 ioctl ABI check: every pull request runs the SDK's vivid tests under `strace` and fails on an unexpected `ENOTTY`, the symptom of an ioctl argument laid out differently from the kernel's (`make abi-check`) (EDGEAI-1530).
 - SDK capture benchmarks for frame interval, delivery latency, DMA-BUF import and CPU reads of capture memory (`make bench-capture`), and the on-demand `Camera benchmarks` workflow that runs them across board runners (EDGEAI-1530).
 

@@ -579,3 +579,80 @@ fn unplug_is_disconnected() {
         "held frames keep their memory"
     );
 }
+
+/// Real DMA-BUF frames map to `CameraFrame` planes by reference: luma and
+/// chroma in one buffer, or one buffer each when the driver delivers NV12M.
+#[cfg(feature = "schemas")]
+#[test]
+fn frames_map_to_camera_frame_planes_by_reference() {
+    use edgefirst_camera::schema::FrameTensor;
+    use edgefirst_schemas::edgefirst_msgs::CameraFrame;
+
+    for (n, memory) in [
+        (SINGLE, MemoryStrategy::Export),
+        (SINGLE, MemoryStrategy::Import),
+        (MULTI, MemoryStrategy::Export),
+        (MULTI, MemoryStrategy::Import),
+    ] {
+        let Some(v) = vivid(n) else { return };
+        let what = format!("vivid {n} {memory:?}");
+        let mut camera = builder(&v)
+            .format(PixelFormat::Nv12)
+            .memory(memory)
+            .open()
+            .unwrap();
+        camera.start().unwrap();
+        let frame = next(&mut camera);
+        assert_eq!(frame.memory(), TensorMemory::DmaBuf, "{what}");
+        let tensor = FrameTensor::new(&frame, camera.config().colorimetry.as_ref()).unwrap();
+        let mut cdr = Vec::new();
+        tensor
+            .with_fields(|f| {
+                f.validate()?;
+                CameraFrame::builder()
+                    .frame_id("camera")
+                    .seq(frame.seq())
+                    .tensor(f)
+                    .encode_into_vec(&mut cdr)
+            })
+            .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        let msg = CameraFrame::from_cdr(cdr.as_slice()).unwrap();
+        let t = msg.tensor();
+        assert_eq!(t.storage_kind(), 2, "{what}: DMA-BUF storage kind");
+        assert_eq!(t.dtype(), 0, "{what}: U8");
+        assert_eq!(t.format(), "NV12", "{what}");
+        let c = camera.config();
+        assert_eq!(
+            t.shape().collect::<Vec<_>>(),
+            [u64::from(c.height), u64::from(c.width)],
+            "{what}"
+        );
+        assert_eq!(
+            t.strides().collect::<Vec<_>>(),
+            [c.row_stride as i64, 1],
+            "{what}"
+        );
+        let planes = t.planes_vec();
+        assert_eq!(planes.len(), 2, "{what}: luma and chroma");
+        assert!(
+            planes.iter().all(|p| p.handle >= 0 && p.data.is_empty()),
+            "{what}"
+        );
+        assert_eq!(
+            planes[0].size,
+            (c.row_stride * c.height as usize) as u64,
+            "{what}"
+        );
+        if planes[1].handle == planes[0].handle {
+            assert_eq!(
+                planes[1].offset, planes[0].size,
+                "{what}: chroma follows luma"
+            );
+        } else {
+            assert_eq!(
+                planes[1].offset, 0,
+                "{what}: NV12M chroma has its own buffer"
+            );
+        }
+    }
+}

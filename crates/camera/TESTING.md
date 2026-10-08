@@ -2,12 +2,12 @@
 
 ## Host tests
 
-Unit tests live beside the code. Public-API tests against the mock backend are in `tests/mock.rs` and need the `mock` feature.
+Unit tests live beside the code. Public-API tests against the mock backend are in `tests/mock.rs` and need the `mock` feature; `tests/schema.rs` also needs `schemas`.
 
 ```bash
-cargo test -p edgefirst-camera --features mock
-cargo clippy -p edgefirst-camera --all-targets --features mock -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc -p edgefirst-camera --no-deps --features mock
+cargo test -p edgefirst-camera --features mock,schemas
+cargo clippy -p edgefirst-camera --all-targets --features mock,schemas -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc -p edgefirst-camera --no-deps --features mock,schemas
 ```
 
 These run in every CI lane:
@@ -27,6 +27,7 @@ These run in every CI lane:
 | Frame lifetime | `frame.rs` and `tests/mock.rs`: release on drop; starvation counted as drops; pool depths 2 to 8; a frame held across `stop()`/`start()` stays valid and requeues on drop; frames outliving a pool change and the camera |
 | Buffers | `pool.rs`: each rejection reason (including a PBO tensor as `NotNativeHandle`) with its slot, count limits, contiguity and pitch rules. `tests/mock.rs`: caller pools, rejection and recovery through `take_buffers` and `set_buffers` |
 | Controls | `tests/mock.rs`: applied, clamped and unsupported outcomes |
+| `CameraFrame` mapping (`schemas`) | `schema.rs`: byte-for-byte against the schemas `CameraFrame_split_fd` golden (NV12M), field by field against `CameraFrame` (single-buffer NV12), unspecified colorimetry, unformatted tensors, epoch clamp and Y2038 saturation, the Zenoh NTP64 timestamp within 2 ns of the header stamp. `tests/schema.rs`: every mock format at nine sizes passes `TensorFields::validate` and decodes to the frame's bytes. `tests/v4l2_vivid.rs`: real DMA-BUF frames map to planes by reference |
 
 ## V4L2 backend on vivid
 

@@ -48,6 +48,35 @@ println!(
 | `static` | yes | forwards to `edgefirst-tensor/static` |
 | `v4l2` | yes | the V4L2 capture backend (Linux) |
 | `mock` | no | the synthetic frame source |
+| `schemas` | no | `schema`: the `Frame` → `edgefirst_msgs/CameraFrame` mapping |
+
+## Publishing frames
+
+With the `schemas` feature, `schema::FrameTensor` maps a frame to the tensor of an `edgefirst_msgs/CameraFrame`, the same mapping the EdgeFirst camera service publishes with:
+
+```rust
+use edgefirst_camera::schema::{self, FrameTensor};
+use edgefirst_schemas::edgefirst_msgs::CameraFrame;
+
+let frame = camera.next_frame(None)?;
+let tensor = FrameTensor::new(&frame, camera.config().colorimetry.as_ref())?;
+let stamp = schema::stamp(&frame).unwrap_or_else(schema::now);
+let mut cdr = Vec::new();
+tensor.with_fields(|fields| {
+    CameraFrame::builder()
+        .stamp(stamp)
+        .frame_id("camera")
+        .seq(frame.seq())
+        .tensor(fields)
+        .encode_into_vec(&mut cdr)
+})?;
+// Publish `cdr` on Zenoh with the sample timestamp `schema::ntp64(stamp)`.
+```
+
+- `header.stamp` is the frame's acquisition time; give the Zenoh sample the timestamp `schema::ntp64(stamp)` so both denote the same instant. Times before the Unix epoch clamp to it and times past 2038 saturate, identically for both.
+- `shape` is the format's addressing grid (NV12 is `[h, w]`, YUYV `[h, w, 2]`), `strides` are byte strides at the frame's real pitch, and `storage_kind` and `dtype` are `edgefirst-tensor-abi` codes.
+- DMA-BUF planes travel by reference: subscribers on the same machine open the producer's fds through `pidfd_getfd` using `pid` and `handle`, and the frame stays valid only while the producer holds it. Frames in process memory (`mock`) have no shareable handle, so their planes are copied into the message.
+- Colorimetry the driver leaves unspecified is sent as empty strings.
 
 ## Platforms
 
