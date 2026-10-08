@@ -28,6 +28,8 @@ help:
 	@echo "  make lint           - Run cargo clippy"
 	@echo "  make test           - Run lib/bin unit tests (not G2D image tests)"
 	@echo "  make sbom           - Generate SBOM and check license policy"
+	@echo "  make abi-check      - Trace the vivid tests for V4L2 ioctl ABI mismatches"
+	@echo "  make bench-capture  - Run the SDK capture benchmarks on a V4L2 camera"
 	@echo "  make verify-version - Verify version consistency across files"
 	@echo "  make pre-release    - Run all pre-release checks"
 	@echo "  make clean          - Clean build artifacts"
@@ -131,6 +133,18 @@ bench:
 	@echo "Running benchmarks..."
 	@cargo bench
 	@echo "✓ Benchmarks complete"
+
+.PHONY: bench-capture
+bench-capture:
+	@echo "Running the SDK capture benchmarks..."
+	@cargo bench -p edgefirst-camera --bench capture
+	@echo "✓ Capture benchmarks complete"
+
+.PHONY: abi-check
+abi-check:
+	@echo "Checking V4L2 ioctls against the kernel ABI (needs vivid and strace)..."
+	@bash .github/scripts/ioctl-abi-check.sh
+	@echo "✓ ioctl ABI check passed"
 
 .PHONY: coverage
 coverage:

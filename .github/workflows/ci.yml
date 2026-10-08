@@ -120,6 +120,32 @@ jobs:
       - name: Resolve dependency graph and check NOTICE
         run: bash .github/scripts/ci-notice.sh
 
+  ioctl-abi:
+    name: V4L2 ioctl ABI
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    # Pinned, not ubuntu-latest: vivid comes from this image's
+    # linux-modules-extra package.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install strace and load vivid
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y strace
+          bash .github/scripts/vivid-setup.sh
+      # rust-toolchain.toml pins the compiler; rustup installs it on first use.
+      - name: Trace the vivid tests
+        run: |
+          if [[ "${EDGEFIRST_CAMERA_REQUIRE_VIVID:-}" != 1 ]]; then
+            echo "::warning::vivid is unavailable on this runner; ioctl ABI check skipped"
+            exit 0
+          fi
+          bash .github/scripts/ioctl-abi-check.sh "$RUNNER_TEMP/ioctl-abi"
+
   full:
     needs: changes
     if: needs.changes.outputs.full == 'true' || needs.changes.outputs.hardware == 'true'
@@ -164,7 +190,7 @@ jobs:
 
   ci-gate:
     if: always()
-    needs: [changes, quick, notice, full, camera-full, sonar]
+    needs: [changes, quick, notice, ioctl-abi, full, camera-full, sonar]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     permissions: {}

@@ -9,7 +9,7 @@ rust-version = "1.94"
 readme = "README.md"
 keywords = ["camera", "v4l2", "libcamera", "zero-copy", "edge"]
 categories = ["multimedia::video", "hardware-support"]
-include = ["src/**", "tests/**", "README.md", "ARCHITECTURE.md", "TESTING.md"]
+include = ["src/**", "tests/**", "benches/**", "README.md", "ARCHITECTURE.md", "TESTING.md"]
 
 [features]
 default = ["static", "v4l2"]
@@ -32,9 +32,16 @@ libc = "0.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 edgefirst-v4l2 = { version = "0.2.1", optional = true }
 
+[dev-dependencies]
+criterion = "0.8.2"
+
 [[test]]
 name = "mock"
 required-features = ["mock"]
+
+[[bench]]
+name = "capture"
+harness = false
 
 [lints.rust]
 missing_docs = "warn"

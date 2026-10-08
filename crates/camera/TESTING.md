@@ -57,3 +57,37 @@ In CI, `.github/scripts/vivid-setup.sh` (run from `ci-setup.sh` on GitHub-hosted
 | Drops, wait handle, exclusivity | `drops_are_counted_from_timestamp_gaps`, `the_wait_handle_polls_ready`, `an_exclusive_device_is_busy_for_a_second_user` |
 
 vivid has neither a CMA-backed import path nor the i.MX quirks, so contiguous Import, the vvcam flip and `NotReady` after an ISP restart are validated on the boards (T1.21–T1.24). vivid stamps a frame with its simulated end-of-frame time, about one period ahead of delivery, so the `probe` example reports a negative latency on it.
+
+## ioctl ABI check
+
+A V4L2 ioctl number encodes the size of its argument, so a struct whose layout differs from the kernel's produces a request the kernel does not know, and the call fails with `ENOTTY`. A fallback in the backend can hide that from the tests, so `.github/scripts/ioctl-abi-check.sh` runs `tests/v4l2_vivid.rs` under `strace -ff -e trace=ioctl` and fails when:
+
+- any ioctl other than a terminal one returns `ENOTTY`, unless its name is listed in `ABI_ALLOW_ENOTTY` (space-separated), or
+- no `VIDIOC_STREAMON` succeeded, so a run that captured nothing cannot pass.
+
+V4L2 requests strace cannot decode are reported as warnings. The step summary lists every failed ioctl with its errno; on vivid the expected ones are the `EINVAL` that end each enumeration and the `ENODEV` from the unplug test. Locally, with vivid loaded:
+
+```sh
+make abi-check
+```
+
+CI runs it on every pull request in the `V4L2 ioctl ABI` job on `ubuntu-24.04`; when the runner's kernel has no `linux-modules-extra` package the job warns and skips.
+
+## Benchmarks
+
+`benches/capture.rs` measures a live V4L2 camera with criterion:
+
+| Benchmark | What it measures |
+|---|---|
+| `capture/<config>/frame_interval` | One `next_frame` call: the wait for the next frame, so the frame period and its jitter |
+| `capture/<config>/delivery_latency` | Capture timestamp to `next_frame` returning, on fresh frames. Skipped unless the timestamps are `CLOCK_MONOTONIC` and precede delivery (vivid's lead it) |
+| `frame/<config>/import` | `dup` of a frame's DMA-BUF and `TensorDyn::from_fd`, the import a consumer repeats per frame |
+| `frame/<config>/cpu_read` | Mapping a frame and reading every byte, which shows whether capture memory is CPU-cached |
+
+`<config>` names what was applied, for example `Nv12-1920x1080-import-cma`. The source is `EDGEFIRST_CAMERA_BENCH_SOURCE` or the first V4L2 capture node; `EDGEFIRST_CAMERA_BENCH_SIZE` (`WxH`) and `EDGEFIRST_CAMERA_BENCH_FORMAT` are requests. Buffers are contiguous where the platform has a CMA heap. Without a camera the benchmark prints `SKIPPED`.
+
+```sh
+EDGEFIRST_CAMERA_BENCH_SOURCE=/dev/video3 cargo bench -p edgefirst-camera --bench capture
+```
+
+On the board fleet, run the `Camera benchmarks` workflow (`camera-bench.yml`) by hand with the board runner labels and, optionally, the source, size and format. It builds the benchmark once for aarch64, runs it on each board, and summarises the bencher-format results; each board's artifact also records the kernel, governors, clocks and temperatures. Conversion and encoding benchmarks over SDK frames follow once the application converts and encodes through the HAL; until then the application's `benches/convert.rs` and `benches/encode.rs` cover them.
