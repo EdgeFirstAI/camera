@@ -281,7 +281,13 @@ echo
 # Step 6: Validate NOTICE file
 echo "[6/6] Validating NOTICE file..."
 if [ -f "NOTICE" ] && [ -f ".github/scripts/validate_notice.py" ]; then
-    python3 .github/scripts/validate_notice.py NOTICE sbom.json
+    # NOTICE covers every workspace package, as ci-notice.sh checks it: the
+    # application's merged SBOM plus the SDK crate's dependency SBOM.
+    notice_sboms=(sbom.json)
+    if [ -f "crates/camera/edgefirst-camera.cdx.json" ]; then
+        notice_sboms+=(crates/camera/edgefirst-camera.cdx.json)
+    fi
+    python3 .github/scripts/validate_notice.py NOTICE "${notice_sboms[@]}"
     NOTICE_EXIT=$?
     if [ $NOTICE_EXIT -ne 0 ]; then
         echo "⚠️  NOTICE file validation failed - please update NOTICE manually"
