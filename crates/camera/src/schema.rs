@@ -39,7 +39,7 @@
 //! | `pid` | this process |
 //! | `shape` | the format's addressing grid (`PixelFormat::addressing_shape`), or the tensor shape for an unformatted tensor |
 //! | `strides` | `edgefirst_tensor::protocol::c_byte_strides` at the frame's row stride |
-//! | `format` | the format's FourCC, empty for an unformatted tensor |
+//! | `format` | `PixelFormat::as_str()`, HAL's wire name (`NV12`, `YUYV`, `rgba8`, `mono8`), empty for an unformatted tensor |
 //! | `color_*` | the stream colorimetry; empty when unspecified |
 //! | `planes` | one plane per [`Frame::planes`] entry |
 //! | `fence_fd`, `modifier` | `-1` and `0` |
@@ -212,7 +212,7 @@ impl FrameTensor {
                     Some(format.layout()),
                     *row_stride,
                 );
-                (shape, strides, fourcc(*format))
+                (shape, strides, format.as_str().to_owned())
             }
             Geometry::Raw(shape) => {
                 let shape: Vec<u64> = shape.iter().map(|&d| d as u64).collect();
@@ -302,12 +302,6 @@ pub(crate) enum Geometry {
         row_stride: Option<usize>,
     },
     Raw(Vec<usize>),
-}
-
-/// The FourCC of `format` as text, or the format's name for one without a
-/// FourCC (planar RGB).
-fn fourcc(format: PixelFormat) -> String {
-    format.to_string()
 }
 
 #[cfg(test)]
@@ -489,6 +483,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(none.color, [""; 4]);
+    }
+
+    /// `format` is HAL's wire name, which `Tensor.msg` uses ("rgb8"), not
+    /// the `Display` text ("RGB") or a V4L2 FourCC ("RGB3").
+    #[test]
+    fn format_is_the_hal_wire_name() {
+        for (format, name) in [
+            (PixelFormat::Rgb, "rgb8"),
+            (PixelFormat::Rgba, "rgba8"),
+            (PixelFormat::Bgra, "bgra8"),
+            (PixelFormat::Grey, "mono8"),
+            (PixelFormat::Yuyv, "YUYV"),
+            (PixelFormat::Nv12, "NV12"),
+            (PixelFormat::PlanarRgb, "rgb8_planar"),
+        ] {
+            let t = FrameTensor::from_parts(
+                TensorMemory::DmaBuf,
+                DType::U8,
+                &Geometry::Image {
+                    format,
+                    width: 64,
+                    height: 48,
+                    row_stride: None,
+                },
+                vec![plane(3, 0, 64, 64 * 48)],
+                None,
+            )
+            .unwrap();
+            assert_eq!(t.format, name);
+            assert_eq!(PixelFormat::from_str_code(&t.format), Some(format));
+        }
     }
 
     #[test]

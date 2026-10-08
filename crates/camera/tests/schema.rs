@@ -73,7 +73,7 @@ fn every_mock_frame_maps_to_a_valid_camera_frame() {
             assert_eq!(msg.seq(), frame.seq(), "{what}");
             assert_eq!(msg.stamp(), stamp, "{what}");
             let t = msg.tensor();
-            assert_eq!(t.format(), format.to_string(), "{what}");
+            assert_eq!(t.format(), format.as_str(), "{what}");
             assert_eq!(t.pid(), std::process::id(), "{what}");
             let shape: Vec<u64> = t.shape().collect();
             let expected: Vec<u64> = format
