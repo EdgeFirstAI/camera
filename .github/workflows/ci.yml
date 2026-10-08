@@ -95,7 +95,7 @@ jobs:
     uses: EdgeFirstAI/.github/.github/workflows/rust-quick.yml@b65fec89d297d73f193892996373659c4eaeb93a
     with:
       pre-command: bash .github/scripts/ci-setup.sh
-      nextest-args: --workspace --locked --features edgefirst-camera/mock --lib --bin edgefirst-camera --test env_scrub --test on_target --test mock
+      nextest-args: --workspace --locked --features edgefirst-camera/mock --lib --bin edgefirst-camera --test env_scrub --test on_target --test mock --test v4l2_vivid
       clippy-args: --workspace --all-targets --all-features --locked -- -D warnings
       clippy-report: true
       cross-targets: aarch64-unknown-linux-gnu
@@ -143,7 +143,7 @@ jobs:
       pre-command: bash .github/scripts/ci-setup.sh
       board-pre-command: bash .github/scripts/ci-board-setup.sh
       board-extra-args: -j 1 --no-fail-fast -- --include-ignored
-      nextest-args: --workspace --locked --features edgefirst-camera/mock --lib --bin edgefirst-camera --test env_scrub --test on_target --test mock
+      nextest-args: --workspace --locked --features edgefirst-camera/mock --lib --bin edgefirst-camera --test env_scrub --test on_target --test mock --test v4l2_vivid
       archive-args: --locked --bin edgefirst-camera --test test_image --test on_target
     secrets: inherit
 

@@ -2,7 +2,7 @@
 
 `edgefirst-camera` is a portable camera capture API for the EdgeFirst stack. Cameras deliver frames as [`edgefirst-tensor`](https://crates.io/crates/edgefirst-tensor) tensors, so they go straight to `edgefirst-image` for conversion, to `edgefirst-codec` for encoding, and onto the wire as `edgefirst-schemas` `CameraFrame` messages without a copy.
 
-> **Status:** in development on the 3.0 integration branch. This release provides the full public API and the `mock` backend; the V4L2, file and libcamera backends follow.
+> **Status:** in development on the 3.0 integration branch. The public API, the `mock` backend and the V4L2 backend are in place; the file and libcamera backends follow.
 
 ## Quick start
 
@@ -37,7 +37,7 @@ println!(
 | Source string | Backend | Status |
 |---|---|---|
 | `mock[:WxH@fps]` | Synthetic frames (feature `mock`) | available |
-| `/dev/videoN` | V4L2 | planned |
+| `/dev/videoN` | V4L2 capture (feature `v4l2`, Linux) | available |
 | `file:<path>` | Recorded Annex-B H.264 with JSON sidecar | planned |
 | `libcamera:<id>` | libcamera through a runtime-loaded shim | planned |
 
@@ -46,11 +46,14 @@ println!(
 | Feature | Default | Enables |
 |---|---|---|
 | `static` | yes | forwards to `edgefirst-tensor/static` |
+| `v4l2` | yes | the V4L2 capture backend (Linux) |
 | `mock` | no | the synthetic frame source |
 
 ## Platforms
 
 Linux (x86_64, aarch64), macOS and Windows build and run against `mock`. Native backends are Linux-first.
+
+`cargo run -p edgefirst-camera --example probe -- --source /dev/video3 --frames 300 --close-test --json` reports what a camera negotiates and delivers on a platform: driver and BSP identity, format and pitch, the memory strategy `Auto` resolved to, contiguity, frame rate, drops, latency, the timestamp clock, and whether a frame held across close stays intact.
 
 ## License
 

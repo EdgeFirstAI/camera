@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `edgefirst-camera` SDK crate (`crates/camera`): a camera capture API that delivers frames as `edgefirst-tensor` tensors with capture metadata and wall-clock acquisition time, plus the `mock` backend (EDGEAI-1518). The V4L2, file and libcamera backends follow.
 - `SlotTable`: slot ownership shared by every backend. A buffer is never handed back to the driver while a frame references it, frames keep their memory across `stop()` and closing the camera, and caller-provided pools are validated at `start()` with a reason and slot for any refusal (EDGEAI-1519).
+- V4L2 capture backend for the SDK (`/dev/videoN`, feature `v4l2`, default on Linux) over `edgefirst-v4l2` (EDGEAI-1520).
+  - Exclusive device lock, format and frame-rate negotiation reported in `config()`, enumeration of formats, sizes and rates for `enumerate()`, `probe()` and `modes()`.
+  - Import into SDK-allocated contiguous (CMA) buffers or caller-provided tensors, Export over `EXPBUF` (including two-buffer `NV12M`), and `Auto`, which probes Import at `start()` and falls back to Export only for SDK buffers. Caller pools are never replaced: a refusal is `BuffersRejected`; contiguous memory that cannot be allocated is `ContiguousUnavailable`.
+  - Frames carry the capture clock and source from the buffer flags and their acquisition time; drops are counted from timestamp gaps. Frames held across `stop()` or close keep their memory, and the device reopens at once.
+  - Mirror, exposure, gain, white balance, frame rate and any V4L2 control by ID; the i.MX 8M Plus ISP flip quirk.
+  - The `probe` example reports what a camera negotiates and delivers on a platform.
+- Caller-pool validation rejects memory the tensor crate reports as non-contiguous while contiguity is required (EDGEAI-1520).
 
 ### Changed
 - The repository is a Cargo workspace. The application package is renamed `edgefirst-camera-app`; its binary is still `edgefirst-camera`. The application and the SDK share version 3.0.0 (EDGEAI-1518).

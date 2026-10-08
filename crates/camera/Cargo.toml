@@ -12,18 +12,25 @@ categories = ["multimedia::video", "hardware-support"]
 include = ["src/**", "tests/**", "README.md", "ARCHITECTURE.md", "TESTING.md"]
 
 [features]
-default = ["static"]
+default = ["static", "v4l2"]
 # Forwarding alias to edgefirst-tensor; never a pin.
 static = ["edgefirst-tensor/static"]
 # Synthetic frame source for tests, CI and as the worked example for backends.
 mock = []
+# V4L2 capture backend (Linux).
+v4l2 = ["dep:edgefirst-v4l2"]
 
 [dependencies]
-edgefirst-tensor = { version = "0.33", default-features = false }
+# HAL main until a release carries the contiguity request and query
+# (EDGEAI-2017); switch back to a crates.io version before releasing.
+edgefirst-tensor = { git = "https://github.com/EdgeFirstAI/hal", rev = "03e58128", default-features = false }
 tracing = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+edgefirst-v4l2 = { version = "0.2.1", optional = true }
 
 [[test]]
 name = "mock"

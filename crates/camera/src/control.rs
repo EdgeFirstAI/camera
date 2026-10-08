@@ -94,20 +94,25 @@ impl Control {
 }
 
 /// Identity of a control.
+///
+/// The variant documentation gives the [`ControlValue`] that
+/// [`Camera::get_control`](crate::Camera::get_control) returns and that
+/// [`ControlInfo`] ranges use for it.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ControlId {
-    /// Mirroring.
+    /// Mirroring: `Int` 0 none, 1 horizontal, 2 vertical, 3 both.
     Mirror,
-    /// Frame rate.
+    /// Frame rate: `Float` frames per second.
     FrameRate,
-    /// Exposure.
+    /// Exposure time: `Int` microseconds.
     Exposure,
-    /// Analogue gain.
+    /// Analogue gain: `Int` in the driver's units.
     Gain,
-    /// White balance.
+    /// White balance: `Int` colour temperature in kelvin.
     WhiteBalance,
-    /// A backend-specific control.
+    /// A backend-specific control: the backend's raw value (a V4L2 CID's
+    /// integer value).
     Custom {
         /// Backend the id belongs to.
         backend: Backend,

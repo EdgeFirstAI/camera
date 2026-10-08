@@ -105,6 +105,7 @@ pub struct CameraBuilder {
     pub(crate) provided: Option<Vec<TensorDyn>>,
     pub(crate) exclusive: bool,
     pub(crate) controls: Vec<Control>,
+    pub(crate) faults: Vec<String>,
 }
 
 impl CameraBuilder {
@@ -140,6 +141,7 @@ impl CameraBuilder {
             provided: None,
             exclusive: true,
             controls: Vec::new(),
+            faults: Vec::new(),
         }
     }
 
@@ -205,6 +207,16 @@ impl CameraBuilder {
     /// not fatal.
     pub fn control(mut self, control: Control) -> Self {
         self.controls.push(control);
+        self
+    }
+
+    /// Injects a backend fault for testing. Honoured only in debug builds;
+    /// release builds ignore it. Not part of the stable API.
+    #[doc(hidden)]
+    pub fn fault(mut self, fault: &str) -> Self {
+        if cfg!(debug_assertions) {
+            self.faults.push(fault.to_owned());
+        }
         self
     }
 

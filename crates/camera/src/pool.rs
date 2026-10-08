@@ -41,9 +41,18 @@ struct State {
     released: VecDeque<usize>,
 }
 
-#[derive(Debug)]
 struct Shared {
     state: Mutex<State>,
+    /// Kept until the table and every frame from it have dropped.
+    keep_alive: Mutex<Vec<Box<dyn std::any::Any + Send + Sync>>>,
+}
+
+impl fmt::Debug for Shared {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Shared")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Shared {
@@ -120,6 +129,7 @@ impl SlotTable {
                 slots: vec![SlotState::Queued; len],
                 released: VecDeque::new(),
             }),
+            keep_alive: Mutex::new(Vec::new()),
         });
         let guard = Arc::new(Guard {
             shared: shared.clone(),
@@ -206,6 +216,17 @@ impl SlotTable {
         state.released.clear();
     }
 
+    /// Keeps `owner` alive until this table and every frame it handed out
+    /// have dropped. Backends use it to keep a device open while frames
+    /// still reference its buffers, when the driver cannot orphan them.
+    pub fn keep_alive(&self, owner: Box<dyn std::any::Any + Send + Sync>) {
+        self.shared
+            .keep_alive
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(owner);
+    }
+
     /// Whether [`detach`](Self::detach) was called.
     pub fn is_detached(&self) -> bool {
         self.shared.lock().detached
@@ -242,13 +263,13 @@ impl fmt::Debug for SlotTable {
     }
 }
 
-#[cfg(any(feature = "mock", test))]
+#[cfg(any(feature = "mock", feature = "v4l2", test))]
 pub(crate) use validation::{validate, BufferInfo, PoolRequirements};
 
 /// Caller-pool validation shared by backends.
-#[cfg(any(feature = "mock", test))]
+#[cfg(any(feature = "mock", feature = "v4l2", test))]
 mod validation {
-    use edgefirst_tensor::{PixelFormat, TensorDyn, TensorMemory};
+    use edgefirst_tensor::{Contiguity as Heap, PixelFormat, TensorDyn, TensorMemory};
 
     use crate::{Contiguity, Rejection};
 
@@ -287,9 +308,11 @@ mod validation {
                 width: tensor.width(),
                 height: tensor.height(),
                 row_stride: tensor.effective_row_stride(),
-                // edgefirst-tensor 0.33 cannot report whether memory is
-                // physically contiguous, so it is unknown here.
-                contiguous: None,
+                contiguous: match tensor.contiguity() {
+                    Heap::Contiguous => Some(true),
+                    Heap::NonContiguous => Some(false),
+                    _ => None,
+                },
             }
         }
     }

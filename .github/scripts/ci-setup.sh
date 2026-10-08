@@ -15,3 +15,8 @@ sudo apt-get install -y \
   nasm \
   gcc-aarch64-linux-gnu \
   g++-aarch64-linux-gnu
+
+# vivid for the V4L2 backend tests; a no-op off GitHub-hosted Linux runners
+# and never fatal.
+bash "$(dirname "${BASH_SOURCE[0]}")/vivid-setup.sh" \
+  || echo "::warning::vivid-setup.sh failed; V4L2 tests may skip"

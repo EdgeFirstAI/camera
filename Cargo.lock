@@ -926,6 +926,7 @@ name = "edgefirst-camera"
 version = "3.0.0-dev"
 dependencies = [
  "edgefirst-tensor",
+ "edgefirst-v4l2",
  "libc",
  "tracing",
 ]
@@ -972,9 +973,8 @@ dependencies = [
 
 [[package]]
 name = "edgefirst-tensor"
-version = "0.33.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c92a228d59725d2e19adbe79a756af87bd234f41fec8f8168c32c556e19d8ee8"
+version = "0.34.1"
+source = "git+https://github.com/EdgeFirstAI/hal?rev=03e58128#03e581285e0f9d85688cbcdc0b2164e24660f659"
 dependencies = [
  "dma-heap",
  "edgefirst-tensor-abi",
@@ -992,9 +992,18 @@ dependencies = [
 
 [[package]]
 name = "edgefirst-tensor-abi"
-version = "0.33.0"
+version = "0.34.1"
+source = "git+https://github.com/EdgeFirstAI/hal?rev=03e58128#03e581285e0f9d85688cbcdc0b2164e24660f659"
+
+[[package]]
+name = "edgefirst-v4l2"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f647611e8be5f1602c374442abfeaa2fb7bbad92f0590943604377baf248530"
+checksum = "b3cbfafbad776ecf3df5357ceb945d7f39bb67cf65a3aa92d3b48db722ded028"
+dependencies = [
+ "libc",
+ "nix 0.31.3",
+]
 
 [[package]]
 name = "either"

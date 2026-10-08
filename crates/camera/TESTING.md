@@ -28,4 +28,32 @@ These run in every CI lane:
 | Buffers | `pool.rs`: each rejection reason (including a PBO tensor as `NotNativeHandle`) with its slot, count limits, contiguity and pitch rules. `tests/mock.rs`: caller pools, rejection and recovery through `take_buffers` and `set_buffers` |
 | Controls | `tests/mock.rs`: applied, clamped and unsupported outcomes |
 
-Device-backed tests arrive with the V4L2 backend. They run on the `vivid` virtual driver in CI and on the board lane, selected per the Testing and Validation page of the design.
+## V4L2 backend on vivid
+
+`tests/v4l2_vivid.rs` runs the V4L2 backend against the kernel's virtual capture driver. Load three instances: a single-planar one, a multi-planar one and a single-planar one that the unplug test disconnects (it stays disconnected until the module reloads):
+
+```bash
+sudo modprobe vivid n_devs=3 node_types=0x1,0x1,0x1 multiplanar=1,2,1
+cargo test -p edgefirst-camera --test v4l2_vivid
+```
+
+The user needs read-write access to `/dev/video*` and `/dev/dma_heap/system` (usually the `video` group). Tests that share a vivid instance serialise on a lock file, so they are safe under `cargo test` threads and `cargo nextest` processes. Without vivid every test prints `SKIPPED` and passes; `EDGEFIRST_CAMERA_REQUIRE_VIVID=1` makes that a failure. The fault-injection tests need a debug build.
+
+In CI, `.github/scripts/vivid-setup.sh` (run from `ci-setup.sh` on GitHub-hosted Linux runners) installs `linux-modules-extra` for the runner's kernel, loads vivid, opens the vivid nodes and the system DMA heap, and sets `EDGEFIRST_CAMERA_REQUIRE_VIVID=1` only when the nodes appear.
+
+| Acceptance criterion | Test |
+|---|---|
+| Negotiation | `negotiation_reports_what_the_driver_applied`, `an_unsupported_format_is_reported`, `enumerate_and_probe_list_vivid` |
+| Both memory strategies | `import_captures_*`, `export_captures_*`, `auto_imports_when_the_driver_accepts` (single- and multi-planar) |
+| Controls | `controls_are_applied_and_read_back` (mirror, a clamped custom control) |
+| Timeout | `a_timeout_is_reported_when_every_buffer_is_held` |
+| EINTR | `a_signal_during_the_wait_does_not_fail_it` |
+| Unplug | `unplug_is_disconnected` (vivid's Disconnect control) |
+| Timestamp flags | `timestamps_map_to_clock_and_source` |
+| Auto falls back on a refused `QBUF` | `auto_falls_back_to_export_when_import_is_refused`, `explicit_import_does_not_fall_back` |
+| `BuffersRejected` | `a_caller_pool_the_driver_refuses_is_rejected`, `a_mismatched_caller_pool_is_rejected_and_recoverable` |
+| `ContiguousUnavailable` | `contiguous_memory_unavailable_is_reported` (hosts without a CMA heap) |
+| Close with frames held | `exported_frames_held_across_close_stay_readable_and_the_device_reopens`, `close_is_deferred_when_the_driver_cannot_orphan_buffers` |
+| Drops, wait handle, exclusivity | `drops_are_counted_from_timestamp_gaps`, `the_wait_handle_polls_ready`, `an_exclusive_device_is_busy_for_a_second_user` |
+
+vivid has neither a CMA-backed import path nor the i.MX quirks, so contiguous Import, the vvcam flip and `NotReady` after an ISP restart are validated on the boards (T1.21–T1.24). vivid stamps a frame with its simulated end-of-frame time, about one period ahead of delivery, so the `probe` example reports a negative latency on it.

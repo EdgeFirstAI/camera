@@ -51,6 +51,7 @@
 //! ## Features
 //!
 //! - `static` (default): forwards to `edgefirst-tensor/static`.
+//! - `v4l2` (default): the V4L2 capture backend on Linux (`/dev/videoN`).
 //! - `mock`: the synthetic frame source (`mock[:WxH@fps]`).
 
 mod backend;
