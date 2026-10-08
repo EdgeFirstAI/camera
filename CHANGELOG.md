@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Documented that `MIRROR` exists to publish the image in its natural
+  orientation, and that downstream consumers such as fusion assume a natural
+  image whose TF and calibration do not encode the mount rotation
+  (EDGEAI-2021).
+
 ## [2.12.0] - 2026-10-01
 
 Configurable capture buffer count. Wire format is unchanged from 2.11.0.

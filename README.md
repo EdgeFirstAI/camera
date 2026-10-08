@@ -313,7 +313,7 @@ edgefirst-camera --help
 - `--camera-mode <MODE>` - Capture mode: `SIZExFPS` (`1080p30`) or FPS-only (`30FPS`). Unset probes the live device.
 - `--camera-size <WIDTH> <HEIGHT>` - Capture resolution when `--camera-mode` is unset or FPS-only. Unset probes the live device.
 - `--stream-size <WIDTH> <HEIGHT>` - Output resolution for JPEG/H264 (default: `1920 1080`)
-- `--mirror <none|horizontal|vertical|both>` - Mirror camera image (default: `both`)
+- `--mirror <none|horizontal|vertical|both>` - Flip the image into its natural orientation (default: `both`). See [Camera Orientation](#camera-orientation).
 
 **Output Formats:**
 
@@ -354,6 +354,15 @@ edgefirst-camera --help
 - `--tokio-console` - Enable Tokio console for async debugging
 
 **See full options:** `edgefirst-camera --help`
+
+### Camera Orientation
+
+`MIRROR` exists only to publish the image in its natural orientation, upright as a person would view the scene. It undoes how the sensor is mounted: Maivin and Raivin mount the camera upside down, so the default `both` (a horizontal plus vertical flip, which is a 180° rotation) makes the output upright.
+
+Downstream applications, including fusion, assume the published image is in its natural orientation:
+
+- `CAM_TF_VEC` / `CAM_TF_QUAT` and the calibration from `CAM_INFO_PATH` describe the natural image. They are for calibration and must not encode the mount rotation that `MIRROR` already removes.
+- Mirroring for presentation or demos is a view option in the WebUI, not a camera setting.
 
 ### Environment Variables
 
