@@ -20,13 +20,12 @@ mock = []
 # V4L2 capture backend (Linux).
 v4l2 = ["dep:edgefirst-v4l2"]
 # `Frame` → `edgefirst_msgs/CameraFrame` mapping.
-schemas = ["dep:edgefirst-schemas", "dep:edgefirst-tensor-abi"]
+schemas = ["dep:edgefirst-schemas"]
 
 [dependencies]
 # HAL main until a release carries the contiguity request and query
 # (EDGEAI-2017); switch back to a crates.io version before releasing.
 edgefirst-tensor = { git = "https://github.com/EdgeFirstAI/hal", rev = "03e58128", default-features = false }
-edgefirst-tensor-abi = { git = "https://github.com/EdgeFirstAI/hal", rev = "03e58128", optional = true }
 edgefirst-schemas = { version = "4.0.0", optional = true }
 tracing = "0.1"
 

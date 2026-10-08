@@ -18,6 +18,7 @@ use edgefirst_schemas::{
     geometry_msgs::{Quaternion, Transform, TransformStamped, Vector3},
     sensor_msgs::{CameraInfo, CompressedImage, RegionOfInterest},
 };
+use edgefirst_tensor::{DType, TensorMemory};
 use kanal::{Receiver, Sender};
 use sidecar::Sidecar;
 use std::{
@@ -1530,12 +1531,10 @@ impl Colorimetry {
     }
 }
 
-/// HAL Modular Tensor ABI codes carried (not interpreted) by schemas 4.0.
-/// `storage_kind = 2` is `EfStorageKind::DmaBuf`; `dtype = 0` is
-/// `EfDtype::U8` (`I8` is 1). See `edgefirst-tensor-abi` — schemas must
-/// not grow a parallel enum.
-const TENSOR_STORAGE_KIND_DMA_BUF: u32 = 2;
-const TENSOR_DTYPE_U8: u32 = 0;
+/// HAL tensor-ABI codes carried (not interpreted) by schemas 4.0, taken
+/// from the HAL vocabulary rather than written out.
+const TENSOR_STORAGE_KIND_DMA_BUF: u32 = TensorMemory::DmaBuf.code();
+const TENSOR_DTYPE_U8: u32 = DType::U8.code();
 
 /// Bytes per addressing-grid sample along the width axis.
 ///
@@ -2509,10 +2508,7 @@ mod tests {
 
         let t = cf.tensor();
         assert_eq!(t.storage_kind(), TENSOR_STORAGE_KIND_DMA_BUF);
-        // Literal HAL ABI value: EfDtype::U8 = 0 (I8 = 1). Do not
-        // assert against TENSOR_DTYPE_U8 or a mistyped constant would
-        // hide the same class of error this test exists to catch.
-        assert_eq!(t.dtype(), 0);
+        assert_eq!(t.dtype(), DType::U8.code());
         assert_eq!(t.pid(), 1000);
         assert_eq!(t.fence_fd(), -1);
         assert_eq!(t.format(), "YUYV");

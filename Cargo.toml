@@ -59,6 +59,8 @@ console-subscriber = "0.5.0"
 dma-buf = "0.5.0"
 dma-heap = "0.4.1"
 edgefirst-schemas = "4.0.0"
+# Same HAL revision as the SDK; switch with it to a crates.io release.
+edgefirst-tensor = { git = "https://github.com/EdgeFirstAI/hal", rev = "03e58128", default-features = false, features = ["static"] }
 g2d-sys = "1.3.1"
 kanal = { git = "https://github.com/fereidani/kanal", rev = "b6aeab2" }
 libc = "0.2.189"

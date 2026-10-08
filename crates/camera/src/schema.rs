@@ -35,7 +35,7 @@
 //! | `header.stamp` | [`stamp`]: [`Frame::realtime`], before-epoch times clamped to the epoch and times past the ROS 2 `Time` range saturated |
 //! | Zenoh sample timestamp | [`ntp64`] of the same `Time` |
 //! | `seq` | [`Frame::seq`] |
-//! | `storage_kind`, `dtype` | the tensor's memory and element type as `edgefirst-tensor-abi` codes |
+//! | `storage_kind`, `dtype` | `TensorMemory::code()` and `DType::code()`, the HAL tensor-ABI codes (`EfStorageKind`, `EfDtype`) |
 //! | `pid` | this process |
 //! | `shape` | the format's addressing grid (`PixelFormat::addressing_shape`), or the tensor shape for an unformatted tensor |
 //! | `strides` | `edgefirst_tensor::protocol::c_byte_strides` at the frame's row stride |
@@ -54,7 +54,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use edgefirst_schemas::builtin_interfaces::Time;
 use edgefirst_schemas::tensor::{TensorFields, TensorPlaneView};
 use edgefirst_tensor::{Colorimetry, CpuAccess, DType, PixelFormat, TensorMemory};
-use edgefirst_tensor_abi::{EfDtype, EfStorageKind};
 
 use crate::{Error, ErrorKind, Frame, PlaneLayout, Result};
 
@@ -136,8 +135,8 @@ impl FrameTensor {
     ///
     /// # Errors
     ///
-    /// [`ErrorKind::Tensor`] when the tensor's element type or memory has no
-    /// tensor-ABI code, or an inline frame cannot be mapped for reading.
+    /// [`ErrorKind::Tensor`] when the format cannot address the frame's size,
+    /// or a frame in process memory cannot be mapped for reading.
     pub fn new(frame: &Frame, colorimetry: Option<&Colorimetry>) -> Result<Self> {
         let tensor = frame.tensor();
         let geometry = match (tensor.format(), tensor.width(), tensor.height()) {
@@ -237,10 +236,10 @@ impl FrameTensor {
             _ => [""; 4],
         };
         Ok(Self {
-            storage_kind: storage_kind(memory)?,
+            storage_kind: memory.code(),
             pid: std::process::id(),
             fence_fd: -1,
-            dtype: dtype_code(dtype)?,
+            dtype: dtype.code(),
             shape,
             strides,
             format,
@@ -309,47 +308,6 @@ pub(crate) enum Geometry {
 /// FourCC (planar RGB).
 fn fourcc(format: PixelFormat) -> String {
     format.to_string()
-}
-
-fn storage_kind(memory: TensorMemory) -> Result<u32> {
-    let kind = match memory {
-        TensorMemory::Mem => EfStorageKind::Mem,
-        TensorMemory::Shm => EfStorageKind::Shm,
-        TensorMemory::DmaBuf => EfStorageKind::DmaBuf,
-        TensorMemory::IoSurface => EfStorageKind::IoSurface,
-        TensorMemory::Pbo => EfStorageKind::Pbo,
-        TensorMemory::Cuda => EfStorageKind::Cuda,
-        other => {
-            return Err(Error::new(
-                ErrorKind::Tensor,
-                format!("tensor memory {other:?} has no tensor-ABI storage kind"),
-            ))
-        }
-    };
-    Ok(kind as u32)
-}
-
-fn dtype_code(dtype: DType) -> Result<u32> {
-    let code = match dtype {
-        DType::U8 => EfDtype::U8,
-        DType::I8 => EfDtype::I8,
-        DType::U16 => EfDtype::U16,
-        DType::I16 => EfDtype::I16,
-        DType::U32 => EfDtype::U32,
-        DType::I32 => EfDtype::I32,
-        DType::U64 => EfDtype::U64,
-        DType::I64 => EfDtype::I64,
-        DType::F16 => EfDtype::F16,
-        DType::F32 => EfDtype::F32,
-        DType::F64 => EfDtype::F64,
-        other => {
-            return Err(Error::new(
-                ErrorKind::Tensor,
-                format!("element type {other:?} has no tensor-ABI code"),
-            ))
-        }
-    };
-    Ok(code as u32)
 }
 
 #[cfg(test)]
@@ -425,7 +383,7 @@ mod tests {
             Some(&bt709_limited()),
         )
         .unwrap();
-        assert_eq!(t.dtype, EfDtype::U8 as u32);
+        assert_eq!(t.dtype, DType::U8.code());
         assert_eq!(t.fence_fd, -1);
         // The golden's producer-specific values: its pid, its dtype code and
         // a GPU fence the SDK does not produce.
@@ -545,8 +503,8 @@ mod tests {
         .unwrap();
         assert_eq!(t.format, "");
         assert_eq!(t.color, [""; 4]);
-        assert_eq!(t.dtype, EfDtype::F32 as u32);
-        assert_eq!(t.storage_kind, EfStorageKind::Mem as u32);
+        assert_eq!(t.dtype, DType::F32.code());
+        assert_eq!(t.storage_kind, TensorMemory::Mem.code());
         assert_eq!(t.strides, [12, 4]);
         t.with_fields(|f| f.validate()).unwrap();
     }
