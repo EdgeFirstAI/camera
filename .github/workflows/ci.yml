@@ -90,7 +90,7 @@ jobs:
   quick:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    uses: EdgeFirstAI/.github/.github/workflows/rust-quick.yml@b65fec89d297d73f193892996373659c4eaeb93a
+    uses: EdgeFirstAI/.github/.github/workflows/rust-quick.yml@733e07a6a1aba8e7202d5a589836618c485aa035
     with:
       pre-command: bash .github/scripts/ci-setup.sh
       nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub --test on_target
@@ -112,7 +112,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7  # stable
-      - uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a  # v2.87.25
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8  # v2.87.28
         with:
           tool: cargo-cyclonedx
       - name: Resolve dependency graph and check NOTICE
@@ -121,7 +121,7 @@ jobs:
   full:
     needs: changes
     if: needs.changes.outputs.full == 'true' || needs.changes.outputs.hardware == 'true'
-    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@b65fec89d297d73f193892996373659c4eaeb93a
+    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@733e07a6a1aba8e7202d5a589836618c485aa035
     with:
       lanes: ${{ needs.changes.outputs.full == 'true' && 'all' || 'hardware' }}
       # Any board with a working V4L2 capture path; libcamera-only boards
