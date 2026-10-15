@@ -120,14 +120,14 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Download build artifacts from commit
-        uses: dawidd6/action-download-artifact@27e4ae67c24b67d3b54bc6d6a45475be1e28031b  # v26
+        uses: dawidd6/action-download-artifact@eab87c9830c39eff17e5a6eadb20bfb4bc880477  # v27
         with:
           workflow: build.yml
           commit: ${{ github.sha }}
           path: artifacts
 
       - name: Download SBOM artifact from commit
-        uses: dawidd6/action-download-artifact@27e4ae67c24b67d3b54bc6d6a45475be1e28031b  # v26
+        uses: dawidd6/action-download-artifact@eab87c9830c39eff17e5a6eadb20bfb4bc880477  # v27
         with:
           workflow: sbom.yml
           commit: ${{ github.sha }}
