@@ -90,7 +90,7 @@ jobs:
   quick:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    uses: EdgeFirstAI/.github/.github/workflows/rust-quick.yml@b65fec89d297d73f193892996373659c4eaeb93a
+    uses: EdgeFirstAI/.github/.github/workflows/rust-quick.yml@9e296f92996b38683c684b9091ed59cb27562770
     with:
       pre-command: bash .github/scripts/ci-setup.sh
       nextest-args: --workspace --locked --bin edgefirst-camera --test env_scrub --test on_target
@@ -121,7 +121,7 @@ jobs:
   full:
     needs: changes
     if: needs.changes.outputs.full == 'true' || needs.changes.outputs.hardware == 'true'
-    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@b65fec89d297d73f193892996373659c4eaeb93a
+    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@9e296f92996b38683c684b9091ed59cb27562770
     with:
       lanes: ${{ needs.changes.outputs.full == 'true' && 'all' || 'hardware' }}
       # Any board with a working V4L2 capture path; libcamera-only boards
