@@ -33,6 +33,7 @@ edgefirst-v4l2 = { version = "0.2.2", optional = true }
 
 [dev-dependencies]
 criterion = "0.8.2"
+proptest = "1.11.0"
 uhlc = "0.8.2"
 
 [[test]]

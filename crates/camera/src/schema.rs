@@ -309,7 +309,8 @@ mod tests {
     use std::time::Duration;
 
     use edgefirst_schemas::edgefirst_msgs::CameraFrame;
-    use edgefirst_tensor::{ColorEncoding, ColorRange, ColorSpace, ColorTransfer};
+    use edgefirst_tensor::{ColorEncoding, ColorRange, ColorSpace, ColorTransfer, PixelLayout};
+    use proptest::prelude::*;
 
     use super::*;
 
@@ -554,6 +555,157 @@ mod tests {
             }),
             0
         );
+    }
+
+    /// Where a frame's planes live.
+    #[derive(Debug, Clone, Copy)]
+    enum Buffers {
+        /// Every plane in one DMA-BUF, as single-buffer V4L2 formats deliver.
+        Shared,
+        /// One DMA-BUF per plane, each at offset 0, as the `M` formats
+        /// deliver; semi-planar formats only.
+        Split,
+        /// Process memory, which travels inline.
+        Inline,
+    }
+
+    const BUFFERS: &[Buffers] = &[Buffers::Shared, Buffers::Split, Buffers::Inline];
+
+    fn colorimetry() -> impl Strategy<Value = Option<Colorimetry>> {
+        prop::option::of(
+            (
+                prop::option::of(prop::sample::select(ColorSpace::all())),
+                prop::option::of(prop::sample::select(ColorTransfer::all())),
+                prop::option::of(prop::sample::select(ColorEncoding::all())),
+                prop::option::of(prop::sample::select(ColorRange::all())),
+            )
+                .prop_map(|(space, transfer, encoding, range)| Colorimetry {
+                    space,
+                    transfer,
+                    encoding,
+                    range,
+                }),
+        )
+    }
+
+    proptest! {
+        /// `TensorFields::validate` accepts every frame a backend can hand
+        /// over: any pixel format at any size it can address, at the minimum
+        /// pitch or any padding of it, in one buffer, a buffer per plane or
+        /// process memory, with any number of bytes in use. Planes are laid
+        /// out from `PixelFormat::plane_table`, as the backends do.
+        #[test]
+        fn every_producible_frame_validates(
+            format in prop::sample::select(PixelFormat::all()),
+            width in 1usize..=4096,
+            height in 1usize..=4096,
+            pad in 0usize..=256,
+            buffers in prop::sample::select(BUFFERS),
+            filled in 0.0f64..=1.0,
+            colorimetry in colorimetry(),
+        ) {
+            let semi_planar = format.layout() == PixelLayout::SemiPlanar;
+            let buffers = match buffers {
+                Buffers::Split if !semi_planar => Buffers::Shared,
+                b => b,
+            };
+            // Inline planes are copied; keep them small.
+            let (width, height) = match buffers {
+                Buffers::Inline => (width.min(320), height.min(240)),
+                _ => (width, height),
+            };
+            prop_assume!(format.allocation_shape(width, height).is_some());
+            let min_pitch = match format.layout() {
+                PixelLayout::Packed => width * format.channels(),
+                PixelLayout::Planar => width,
+                PixelLayout::SemiPlanar => width.next_multiple_of(2),
+                layout => return Err(TestCaseError::reject(format!("{layout:?}"))),
+            };
+            let pitch = min_pitch + pad;
+            let table = format.plane_table(width, height, pitch).unwrap();
+            let total: usize = table.iter().map(|p| p.size as usize).sum();
+            let in_use = |n: usize| (n as f64 * filled) as usize;
+            let planes: Vec<Plane> = table
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let (offset, stride, size) =
+                        (p.offset as usize, p.stride as usize, p.size as usize);
+                    match buffers {
+                        Buffers::Shared => {
+                            let mut l = PlaneLayout::new(3, offset, stride, size);
+                            l.used = in_use(total).saturating_sub(offset).min(size);
+                            Plane { layout: l, data: None }
+                        }
+                        Buffers::Split => {
+                            let mut l = PlaneLayout::new(3 + i as i64, 0, stride, size);
+                            l.used = in_use(size);
+                            Plane { layout: l, data: None }
+                        }
+                        Buffers::Inline => Plane {
+                            layout: PlaneLayout::new(-1, offset, stride, size),
+                            data: Some(vec![0; size]),
+                        },
+                    }
+                })
+                .collect();
+            let memory = match buffers {
+                Buffers::Inline => TensorMemory::Mem,
+                _ => TensorMemory::DmaBuf,
+            };
+            let geometry = Geometry::Image {
+                format,
+                width,
+                height,
+                row_stride: Some(pitch),
+            };
+            let t = FrameTensor::from_parts(
+                memory,
+                DType::U8,
+                &geometry,
+                planes,
+                colorimetry.as_ref(),
+            )
+            .unwrap();
+            t.with_fields(|f| f.validate()).unwrap();
+
+            let msg = encode(&t, GOLDEN_STAMP, 1);
+            let msg = CameraFrame::from_cdr(msg.as_slice()).unwrap();
+            let decoded = msg.tensor();
+            prop_assert_eq!(
+                decoded.shape().collect::<Vec<_>>(),
+                format
+                    .addressing_shape(width, height)
+                    .unwrap()
+                    .into_iter()
+                    .map(|d| d as u64)
+                    .collect::<Vec<_>>()
+            );
+            prop_assert_eq!(decoded.num_planes() as usize, table.len());
+            prop_assert_eq!(decoded.format(), format.as_str());
+
+            // What a consumer relies on beyond `validate`: the row stride is
+            // the planes' pitch, the bytes `shape` and `strides` address lie
+            // within the planes, and each plane's fill fits its size.
+            let strides: Vec<i64> = decoded.strides().collect();
+            prop_assert!(strides.contains(&(pitch as i64)), "{:?}", strides);
+            let extent = decoded
+                .shape()
+                .zip(&strides)
+                .map(|(n, &s)| (n.saturating_sub(1)) * s as u64)
+                .sum::<u64>()
+                + 1;
+            let mut held = 0;
+            for p in decoded.planes() {
+                prop_assert_eq!(p.stride, pitch as u64);
+                prop_assert!(p.used <= p.size);
+                if p.handle < 0 {
+                    prop_assert_eq!(p.data.len() as u64, p.size);
+                }
+                held += p.size;
+            }
+            prop_assert!(extent <= held, "addresses {} of {} bytes", extent, held);
+        }
     }
 
     /// The header stamp and the Zenoh timestamp decoded from [`ntp64`] agree
