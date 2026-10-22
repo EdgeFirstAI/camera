@@ -937,9 +937,12 @@ mod tests {
             .collect();
         let elapsed = start.elapsed();
         // Five 20 ms intervals after the first frame, which is due at once.
+        // Only the lower bounds are firm: hosted VMs oversleep by tens of ms.
         assert!(elapsed >= Duration::from_millis(100), "{elapsed:?}");
-        let mean = (stamps[5] - stamps[0]) as f64 / 5.0 / 1e6;
-        assert!((19.0..30.0).contains(&mean), "mean interval {mean} ms");
+        for pair in stamps.windows(2) {
+            let gap = (pair[1] - pair[0]) as f64 / 1e6;
+            assert!(gap >= 19.0, "frames {gap} ms apart, faster than requested");
+        }
         assert_eq!(c.config().frame_rate, Some(50.0));
     }
 

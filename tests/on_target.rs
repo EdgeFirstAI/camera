@@ -70,6 +70,13 @@ fn scratch_dir(name: &str) -> Result<PathBuf, Box<dyn Error>> {
     Ok(dir)
 }
 
+/// `args` with a 1080p capture size requested. Unset, the app keeps the
+/// sensor's current size, which after a reboot can be smaller than the
+/// default 1080p stream (the OV5640 comes up at 640x480).
+fn capture(args: &[&'static str]) -> Vec<&'static str> {
+    [&["--camera-size", "1920", "1080"][..], args].concat()
+}
+
 fn sidecar(recording: &Path) -> PathBuf {
     recording.with_extension("json")
 }
@@ -88,14 +95,14 @@ fn help_exits_cleanly() -> Result<(), Box<dyn Error>> {
 #[serial]
 #[ignore = "requires a V4L2 camera (run with --include-ignored on a board)"]
 fn jpeg_capture() -> Result<(), Box<dyn Error>> {
-    run_for(&["--jpeg"], Duration::from_secs(15))
+    run_for(&capture(&["--jpeg"]), Duration::from_secs(15))
 }
 
 #[test]
 #[serial]
 #[ignore = "requires a V4L2 camera (run with --include-ignored on a board)"]
 fn h264_capture() -> Result<(), Box<dyn Error>> {
-    run_for(&["--h264"], Duration::from_secs(15))
+    run_for(&capture(&["--h264"]), Duration::from_secs(15))
 }
 
 #[test]
@@ -106,7 +113,8 @@ fn record_then_replay() -> Result<(), Box<dyn Error>> {
     let recording = dir.join("record.h264");
     let result = (|| -> Result<(), Box<dyn Error>> {
         let path = recording.to_str().ok_or("non-UTF-8 temp path")?;
-        run_for(&["--h264", "--record", path], Duration::from_secs(10))?;
+        let record = [&capture(&["--h264", "--record"])[..], &[path]].concat();
+        run_for(&record, Duration::from_secs(10))?;
 
         let size = std::fs::metadata(&recording)?.len();
         assert!(size > 0, "recording {} is empty", recording.display());
