@@ -32,7 +32,6 @@ use std::time::{Duration, Instant};
 
 use edgefirst_tensor::{
     Contiguity as Heap, CpuAccess, DType, ImageDesc, PixelFormat, Tensor, TensorDyn, TensorMemory,
-    TensorTrait,
 };
 use edgefirst_v4l2::device::Device;
 use edgefirst_v4l2::queue::{self as vq, BufType, Dequeued, Memory, Plane, Queue};

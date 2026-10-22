@@ -977,11 +977,13 @@ dependencies = [
 
 [[package]]
 name = "edgefirst-tensor"
-version = "0.34.1"
-source = "git+https://github.com/EdgeFirstAI/hal?rev=03e58128#03e581285e0f9d85688cbcdc0b2164e24660f659"
+version = "0.36.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "830d1d46cd53bf3f96ae3cb636288b307f126b30ce546152ecc249a23cec3ece"
 dependencies = [
  "dma-heap",
  "edgefirst-tensor-abi",
+ "edgefirst-tensor-ffi",
  "half",
  "libc",
  "libloading 0.9.0",
@@ -996,14 +998,24 @@ dependencies = [
 
 [[package]]
 name = "edgefirst-tensor-abi"
-version = "0.34.1"
-source = "git+https://github.com/EdgeFirstAI/hal?rev=03e58128#03e581285e0f9d85688cbcdc0b2164e24660f659"
+version = "0.36.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f668e09f2d2b017d5b39e41a645e4fca9fe42568919666d0a8391955fedab35d"
+
+[[package]]
+name = "edgefirst-tensor-ffi"
+version = "0.36.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6021267f303754545eab832e997f4ad0e7dc9b1e23088cd432db5d79572ebbce"
+dependencies = [
+ "edgefirst-tensor-abi",
+]
 
 [[package]]
 name = "edgefirst-v4l2"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3cbfafbad776ecf3df5357ceb945d7f39bb67cf65a3aa92d3b48db722ded028"
+checksum = "ec730dcf678b52005889adae2de18b0acd898eb1b729b1b2cd357535057123ef"
 dependencies = [
  "libc",
  "nix 0.31.3",

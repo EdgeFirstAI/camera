@@ -190,7 +190,7 @@ pub(crate) fn negotiate(
         ));
     }
     let (width, height) = size_of(&mut fmt, multiplanar);
-    let (strides, sizes, colorimetry) = layout(&mut fmt, multiplanar);
+    let (strides, sizes, colorimetry) = layout(&mut fmt, multiplanar, mapping.format);
     if strides.len() != mapping.mem_planes {
         return Err(Error::new(
             ErrorKind::Backend,
@@ -243,6 +243,7 @@ fn size_of(fmt: &mut uapi::v4l2_format, multiplanar: bool) -> (u32, u32) {
 fn layout(
     fmt: &mut uapi::v4l2_format,
     multiplanar: bool,
+    format: PixelFormat,
 ) -> (Vec<usize>, Vec<usize>, Option<Colorimetry>) {
     // SAFETY: the buffer type selects the payload that is read.
     let (strides, sizes, cs, xfer, enc, quant) = unsafe {
@@ -275,7 +276,7 @@ fn layout(
             )
         }
     };
-    let c = Colorimetry::from_v4l2(cs, xfer, enc, quant);
+    let c = Colorimetry::from_v4l2(cs, xfer, enc, quant, format.is_rgb_or_hsv());
     let specified =
         c.space.is_some() || c.transfer.is_some() || c.encoding.is_some() || c.range.is_some();
     (strides, sizes, specified.then_some(c))
