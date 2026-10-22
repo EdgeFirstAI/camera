@@ -39,7 +39,7 @@ pub(crate) fn enumerate() -> Result<Vec<CameraDescriptor>> {
     #[cfg(all(target_os = "linux", feature = "v4l2"))]
     cameras.extend(v4l2::enumerate()?);
     #[cfg(feature = "mock")]
-    cameras.push(mock::descriptor("mock"));
+    cameras.extend([mock::descriptor("mock")]);
     Ok(cameras)
 }
 

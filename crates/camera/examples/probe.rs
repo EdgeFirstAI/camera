@@ -134,15 +134,22 @@ fn builder(a: &Args) -> Result<CameraBuilder> {
     Ok(b)
 }
 
-/// `CLOCK_MONOTONIC` now, in nanoseconds.
-fn monotonic_nanos() -> i64 {
+/// `CLOCK_MONOTONIC` now, in nanoseconds; `None` where there is no such
+/// clock.
+#[cfg(unix)]
+fn monotonic_nanos() -> Option<i64> {
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
     // SAFETY: a valid timespec for the call.
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-    ts.tv_sec * 1_000_000_000 + ts.tv_nsec
+    Some(ts.tv_sec * 1_000_000_000 + ts.tv_nsec)
+}
+
+#[cfg(not(unix))]
+fn monotonic_nanos() -> Option<i64> {
+    None
 }
 
 fn os_release() -> String {
@@ -251,8 +258,8 @@ fn main() -> Result<()> {
         let f = camera.next_frame(Some(Duration::from_secs(5)))?;
         let ts = f.timestamp();
         (clock, source) = (ts.clock, ts.source);
-        if ts.clock == CaptureClock::Monotonic {
-            latencies.push((monotonic_nanos() - ts.nanos) as f64 / 1e6);
+        if let (CaptureClock::Monotonic, Some(now)) = (ts.clock, monotonic_nanos()) {
+            latencies.push((now - ts.nanos) as f64 / 1e6);
         }
         first.get_or_insert((ts.nanos, Instant::now()));
         last_ts = ts.nanos;
