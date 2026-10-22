@@ -64,14 +64,32 @@ jobs:
   build:
     name: Build (aarch64)
     needs: plan
-    # Native arm64: the same image, and so the same glibc, as the Full
-    # tier's aarch64 lane whose test archive the boards already run.
-    runs-on: ubuntu-24.04-arm
+    # Native arm64 on Ubuntu 22.04, as the Full tier builds its board
+    # archive: the oldest boards run glibc 2.35 and cannot load a binary
+    # linked against anything newer.
+    runs-on: ubuntu-22.04-arm
     timeout-minutes: 30
     steps:
+      - name: Check the glibc floor
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          built="$(ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+$')"
+          echo "build host: $PRETTY_NAME, glibc $built; boards need <= 2.35"
+          if [[ "$(printf '%s\n%s\n' 2.35 "$built" | sort -V | head -1)" != "$built" ]]; then
+            echo "::error::the benchmark would need glibc $built, newer than the boards' 2.35"
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      # rust-toolchain.toml pins the compiler; rustup installs it on first use.
+      - run: bash .github/scripts/ci-setup.sh
+
+      - uses: EdgeFirstAI/.github/.github/actions/setup-rust@9e296f92996b38683c684b9091ed59cb27562770
+        with:
+          components: ""
+          cache-key: camera-bench-aarch64
+
       - name: Build the capture benchmark
         run: |
           set -euo pipefail
