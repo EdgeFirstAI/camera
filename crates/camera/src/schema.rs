@@ -322,10 +322,6 @@ mod tests {
         nanosec: 123_456_789,
     };
     const GOLDEN_FRAME_ID: &str = "test_frame";
-    /// The goldens carry `dtype = 1` for 8-bit image samples. Under the
-    /// tensor ABI, which `Tensor.msg` defers to, 1 is `I8`; a camera frame
-    /// is `U8` (0).
-    const GOLDEN_DTYPE: u32 = 1;
 
     fn bt709_limited() -> Colorimetry {
         Colorimetry {
@@ -379,10 +375,9 @@ mod tests {
         .unwrap();
         assert_eq!(t.dtype, DType::U8.code());
         assert_eq!(t.fence_fd, -1);
-        // The golden's producer-specific values: its pid, its dtype code and
-        // a GPU fence the SDK does not produce.
+        // The golden's producer-specific values: its pid and a GPU fence the
+        // SDK does not produce.
         t.pid = 1234;
-        t.dtype = GOLDEN_DTYPE;
         t.fence_fd = 77;
         assert_eq!(encode(&t, GOLDEN_STAMP, 5), GOLDEN_SPLIT_FD);
     }
