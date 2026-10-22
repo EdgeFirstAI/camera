@@ -1,0 +1,208 @@
+# On-demand SDK capture benchmarks on the self-hosted board fleet.
+#
+# Builds crates/camera/benches/capture.rs once for aarch64 and runs it on
+# every board named, one job per entry, then rolls each board's results into
+# one summary. Each board's artifact keeps criterion's bencher-format output,
+# the full log and system.txt with the governors, clocks and temperatures
+# the numbers depend on. Governors are read, never changed: a benchmark
+# measures a board as it ships.
+#
+# Board entries are runner labels. A label no online runner carries queues
+# until one comes online, so name only boards known to be up.
+#
+# Action versions (hash-pinned):
+# - actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 (v7.0.1)
+# - actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a (v7.0.1)
+# - actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c (v8.0.1)
+
+name: Camera benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      boards:
+        description: Board runner labels, comma-separated
+        type: string
+        default: camera-v4l2
+      source:
+        description: Capture node (empty picks the first V4L2 capture node)
+        type: string
+        default: ""
+      size:
+        description: Requested size, WxH (empty keeps the device default)
+        type: string
+        default: ""
+      format:
+        description: Requested format, e.g. NV12 or YUYV (empty keeps the device default)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      boards: ${{ steps.boards.outputs.boards }}
+    steps:
+      - id: boards
+        env:
+          BOARDS: ${{ inputs.boards }}
+        run: |
+          set -euo pipefail
+          json=$(jq -cn --arg b "$BOARDS" \
+            '$b | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)) | unique')
+          if [[ "$json" == "[]" ]]; then
+            echo "::error::no boards named"
+            exit 1
+          fi
+          echo "boards=$json" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (aarch64)
+    needs: plan
+    # Native arm64: the same image, and so the same glibc, as the Full
+    # tier's aarch64 lane whose test archive the boards already run.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # rust-toolchain.toml pins the compiler; rustup installs it on first use.
+      - name: Build the capture benchmark
+        run: |
+          set -euo pipefail
+          bin=$(cargo bench --locked -p edgefirst-camera --bench capture --no-run \
+                  --message-format=json |
+                jq -r 'select(.reason == "compiler-artifact" and .executable != null
+                              and .target.name == "capture") | .executable' | tail -n 1)
+          mkdir -p bundle
+          cp "$bin" bundle/capture
+          git rev-parse HEAD > bundle/COMMIT
+
+      # A tarball, not the directory: an artifact loses file modes.
+      - run: tar -C bundle -cf camera-bench.tar .
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: camera-bench-aarch64
+          path: camera-bench.tar
+          retention-days: 3
+          if-no-files-found: error
+
+  board:
+    name: Board ${{ matrix.board }}
+    needs: [plan, build]
+    runs-on: ${{ matrix.board }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        board: ${{ fromJSON(needs.plan.outputs.boards) }}
+    steps:
+      - name: Reclaim disk from an earlier run
+        run: rm -rf camera-bench camera-bench.tar bench-results
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: camera-bench-aarch64
+
+      - name: Unpack
+        run: |
+          mkdir camera-bench
+          tar -xf camera-bench.tar -C camera-bench
+          rm camera-bench.tar
+
+      - name: Record the system
+        env:
+          BOARD: ${{ matrix.board }}
+        run: |
+          mkdir -p bench-results
+          {
+            echo "board entry: ${BOARD}"
+            echo "runner: ${RUNNER_NAME}"
+            echo "commit: $(cat camera-bench/COMMIT)"
+            echo "kernel: $(uname -r)"
+            grep PRETTY_NAME /etc/os-release || true
+            for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+              [[ -r "$f" ]] && echo "$f: $(cat "$f")"
+            done
+            for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq; do
+              [[ -r "$f" ]] && echo "$f: $(cat "$f")"
+            done
+            for z in /sys/class/thermal/thermal_zone*; do
+              [[ -r "$z/temp" ]] && echo "$(cat "$z/type" 2>/dev/null): $(cat "$z/temp")"
+            done
+            ls -l /dev/video* /dev/dma_heap/* 2>/dev/null || true
+          } > bench-results/system.txt
+          cat bench-results/system.txt
+
+      - name: Run the benchmarks
+        env:
+          EDGEFIRST_CAMERA_BENCH_SOURCE: ${{ inputs.source }}
+          EDGEFIRST_CAMERA_BENCH_SIZE: ${{ inputs.size }}
+          EDGEFIRST_CAMERA_BENCH_FORMAT: ${{ inputs.format }}
+          BOARD: ${{ matrix.board }}
+        run: |
+          set -euo pipefail
+          # An empty input means unset, not an empty request.
+          for v in EDGEFIRST_CAMERA_BENCH_SOURCE EDGEFIRST_CAMERA_BENCH_SIZE EDGEFIRST_CAMERA_BENCH_FORMAT; do
+            [[ -z "${!v}" ]] && unset "$v"
+          done
+          camera-bench/capture --bench --output-format bencher 2>&1 | tee bench-results/log.txt
+          grep '^test ' bench-results/log.txt > bench-results/bencher.txt || true
+          if ! [[ -s bench-results/bencher.txt ]]; then
+            echo "::error::no benchmark results on ${BOARD} (see log.txt)"
+            exit 1
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: camera-bench-${{ matrix.board }}
+          path: bench-results/
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Clean up
+        if: always()
+        run: rm -rf camera-bench camera-bench.tar bench-results
+
+  summary:
+    name: Summary
+    needs: [plan, build, board]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: camera-bench-*
+          path: results
+
+      - name: Summarize
+        env:
+          BOARD_RESULT: ${{ needs.board.result }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Camera capture benchmarks"
+            echo
+            for dir in results/camera-bench-*/; do
+              [[ "$dir" == results/camera-bench-aarch64/ ]] && continue
+              board=$(basename "$dir"); board=${board#camera-bench-}
+              echo "### ${board}"
+              echo
+              grep -E '^(runner|kernel|PRETTY_NAME)' "$dir/system.txt" 2>/dev/null | sed 's/^/    /' || true
+              echo
+              echo '```text'
+              cat "$dir/bencher.txt" 2>/dev/null || echo "no results"
+              echo '```'
+              echo
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          [[ "$BOARD_RESULT" == success ]]
