@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - The repository is a Cargo workspace. The application package is renamed `edgefirst-camera-app`; its binary is still `edgefirst-camera`. The application and the SDK share version 3.0.0 (EDGEAI-1518).
 - The Rust toolchain is pinned to 1.94.0 by `rust-toolchain.toml`, matching the HAL (EDGEAI-1518).
+- Documented that `MIRROR` exists to publish the image in its natural
+  orientation, and that downstream consumers such as fusion assume a natural
+  image whose TF and calibration do not encode the mount rotation
+  (EDGEAI-2021).
 
 ## [2.12.0] - 2026-10-01
 

@@ -117,8 +117,10 @@ fn parse_camera_mode(raw: &str) -> Result<CameraMode, String> {
 
 /// Camera image mirroring options.
 ///
-/// Determines how the camera image should be flipped before processing.
-/// Useful for correcting camera orientation.
+/// Flips the image so it is published in its natural orientation, undoing
+/// how the sensor is mounted. Downstream consumers such as fusion assume the
+/// published image is natural; the camera TF and calibration describe that
+/// natural image and must not encode the mount rotation.
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
 pub enum MirrorSetting {
     /// No mirroring
@@ -205,7 +207,8 @@ pub struct Args {
     )]
     pub camera_buffers: Option<u32>,
 
-    /// Camera image mirroring setting
+    /// Flip the camera image into its natural orientation to undo the sensor
+    /// mount (Maivin and Raivin mount it upside down, hence `both`).
     #[arg(long, env = "MIRROR", default_value = "both", value_enum)]
     pub mirror: MirrorSetting,
 

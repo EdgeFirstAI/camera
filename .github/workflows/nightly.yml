@@ -21,17 +21,17 @@ permissions:
 
 jobs:
   changed:
-    uses: EdgeFirstAI/.github/.github/workflows/nightly-gate.yml@b65fec89d297d73f193892996373659c4eaeb93a
+    uses: EdgeFirstAI/.github/.github/workflows/nightly-gate.yml@9e296f92996b38683c684b9091ed59cb27562770
     with:
       force: ${{ inputs.force || false }}
 
   advisories:
-    uses: EdgeFirstAI/.github/.github/workflows/advisories.yml@b65fec89d297d73f193892996373659c4eaeb93a
+    uses: EdgeFirstAI/.github/.github/workflows/advisories.yml@9e296f92996b38683c684b9091ed59cb27562770
 
   nightly:
     needs: changed
     if: needs.changed.outputs.run == 'true'
-    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@b65fec89d297d73f193892996373659c4eaeb93a
+    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@9e296f92996b38683c684b9091ed59cb27562770
     with:
       lanes: all
       nightly: true

@@ -63,9 +63,17 @@ STREAM_SIZE="1920 1080"
 # ---------------------------------------------------------------------------
 # Mirror Setting
 # ---------------------------------------------------------------------------
-# Flip the camera image to correct for physical camera orientation.
+# Flip the camera image so it is published in its natural orientation
+# (upright, as a person would view the scene). This setting exists only to
+# undo how the sensor is mounted; it is not a display effect.
+#
 # Maivin and Raivin mount the sensor upside down, so both axes (vflip+hflip,
-# a 180-degree rotation) must be enabled by default.
+# a 180-degree rotation) are enabled by default.
+#
+# Fusion and other downstream consumers assume the published image is in its
+# natural orientation. The camera transform (CAM_TF_VEC, CAM_TF_QUAT) and
+# calibration (CAM_INFO_PATH) describe the natural image and must not encode
+# this mount rotation. Mirroring for display belongs in the WebUI view.
 # Accepted values: none, horizontal, vertical, both
 MIRROR="both"
 
@@ -167,7 +175,10 @@ CAM_INFO_PATH=""
 # ---------------------------------------------------------------------------
 # Static transform from the robot base_link frame to the camera optical
 # frame, published as a TF message. These values define the physical
-# mounting position and orientation of the camera on the robot.
+# mounting position and orientation of the camera on the robot, as
+# calibrated for the natural-orientation image produced after MIRROR. Do
+# not use them to describe an upside-down or flipped mount; MIRROR handles
+# that.
 
 # Translation vector (x y z) in meters from base_link to camera_optical.
 CAM_TF_VEC="0 0 0"
