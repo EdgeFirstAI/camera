@@ -62,10 +62,10 @@ vivid has neither a CMA-backed import path nor the i.MX quirks, so contiguous Im
 
 ## File source on a board
 
-`tests/file.rs` plays a real recording when `EDGEFIRST_CAMERA_RECORDING` names a camera 2.x `.h264` file with its `.json` sidecar beside it, on a target with a V4L2 H.264 decoder (i.MX 8M Plus, i.MX 95). It checks one frame per access unit, a rate within 2% of the sidecar's, `extras()`, `EndOfStream` at the end, and `seq` across two loops. Without the variable those tests print a note and pass.
+`tests/file.rs` plays a real recording when `EDGEFIRST_CAMERA_RECORDING` names a camera 2.x `.h264` file with its `.json` sidecar beside it, on a target with a V4L2 H.264 decoder (i.MX 8M Plus, i.MX 95). It checks one frame per access unit, a rate within 2% of the sidecar's, `extras()`, `EndOfStream` at the end, and `seq` across two loops. Without the variable those tests print a note and pass. Build it optimised: a debug build splits a high-bitrate recording (the 2.x app records 1080p at about 64 Mbit/s) too slowly to keep 30 fps.
 
 ```bash
-EDGEFIRST_CAMERA_RECORDING=/home/root/run01.h264 cargo test -p edgefirst-camera --features file --test file
+EDGEFIRST_CAMERA_RECORDING=/home/root/run01.h264 cargo test --release -p edgefirst-camera --features file --test file
 ```
 
 ## ioctl ABI check

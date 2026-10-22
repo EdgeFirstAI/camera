@@ -87,13 +87,19 @@ pub(crate) fn open(builder: CameraBuilder) -> Result<Box<dyn Camera>> {
     .map(|c| Box::new(c) as Box<dyn Camera>)
 }
 
-/// When each frame is due: one interval after the previous one, so pacing
-/// does not drift with decode time. A delivery more than an interval late
-/// re-anchors at the present, so a stall is not followed by a burst.
+/// When each frame is due: one interval after the previous one was due, so
+/// pacing does not drift with decode time or late wake-ups. A frame running
+/// more than an interval behind re-anchors the schedule at the present
+/// instead of catching up. Either way a frame never follows the previous
+/// delivery by less than half an interval, so lateness is never followed by
+/// a burst.
 #[derive(Debug)]
 struct Pacer {
     interval: Duration,
+    /// When the next frame is due on the schedule.
     next: Option<Instant>,
+    /// When the previous frame actually went out.
+    last: Option<Instant>,
 }
 
 impl Pacer {
@@ -101,6 +107,7 @@ impl Pacer {
         Self {
             interval: Duration::from_secs_f64(1.0 / fps),
             next: None,
+            last: None,
         }
     }
 
@@ -111,17 +118,24 @@ impl Pacer {
 
     fn restart(&mut self) {
         self.next = None;
+        self.last = None;
     }
 
     fn due(&self, now: Instant) -> Instant {
-        match self.next {
+        let scheduled = match self.next {
             Some(next) if now <= next + self.interval => next,
             _ => now,
+        };
+        match self.last {
+            Some(last) => scheduled.max(last + self.interval / 2),
+            None => scheduled,
         }
     }
 
-    fn delivered(&mut self, due: Instant) {
+    /// Records a frame due at `due` that went out at `at`.
+    fn delivered(&mut self, due: Instant, at: Instant) {
         self.next = Some(due + self.interval);
+        self.last = Some(at);
     }
 }
 
@@ -444,7 +458,7 @@ impl FileCamera {
             ));
         }
         std::thread::sleep(due.saturating_duration_since(now));
-        self.pacer.delivered(due);
+        self.pacer.delivered(due, Instant::now());
 
         let clock = if cfg!(unix) {
             CaptureClock::Monotonic
@@ -937,12 +951,18 @@ mod tests {
             .collect();
         let elapsed = start.elapsed();
         // Five 20 ms intervals after the first frame, which is due at once.
-        // Only the lower bounds are firm: hosted VMs oversleep by tens of ms.
+        // Only lower bounds are firm: hosted VMs oversleep by tens of ms, and
+        // a late frame may be followed by one half an interval later.
         assert!(elapsed >= Duration::from_millis(100), "{elapsed:?}");
         for pair in stamps.windows(2) {
             let gap = (pair[1] - pair[0]) as f64 / 1e6;
-            assert!(gap >= 19.0, "frames {gap} ms apart, faster than requested");
+            assert!(gap >= 9.5, "frames {gap} ms apart: a burst");
         }
+        let mean = (stamps[5] - stamps[0]) as f64 / 5.0 / 1e6;
+        assert!(
+            mean >= 19.5,
+            "mean interval {mean} ms, faster than requested"
+        );
         assert_eq!(c.config().frame_rate, Some(50.0));
     }
 
@@ -1010,25 +1030,44 @@ mod tests {
     }
 
     #[test]
-    fn pacer_spaces_frames_and_reanchors_after_a_stall() {
+    fn pacer_keeps_the_schedule_through_small_delays() {
         let t0 = Instant::now();
         let ms = Duration::from_millis;
         let mut p = Pacer::new(100.0);
         assert_eq!(p.due(t0), t0, "the first frame is due at once");
-        p.delivered(t0);
+        p.delivered(t0, t0);
         assert_eq!(p.due(t0), t0 + ms(10));
+        // Due at 10, out at 12: the next stays due at 20, not 22.
+        p.delivered(t0 + ms(10), t0 + ms(12));
+        assert_eq!(p.due(t0 + ms(13)), t0 + ms(20), "no drift");
+        // Due at 20, out at 27: the next is due at 30 but not before 32.
+        p.delivered(t0 + ms(20), t0 + ms(27));
         assert_eq!(
-            p.due(t0 + ms(15)),
-            t0 + ms(10),
-            "slightly late keeps the cadence"
+            p.due(t0 + ms(28)),
+            t0 + ms(32),
+            "no burst after a late frame"
         );
-        p.delivered(t0 + ms(10));
+    }
+
+    #[test]
+    fn pacer_reanchors_after_a_stall_without_a_burst() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut p = Pacer::new(100.0);
+        // Due at 0, but the sleep overran to 45: four intervals behind.
+        p.delivered(t0, t0 + ms(45));
         assert_eq!(
-            p.due(t0 + ms(31)),
-            t0 + ms(31),
-            "a stall re-anchors, no burst"
+            p.due(t0 + ms(45)),
+            t0 + ms(50),
+            "re-anchored at the present, half an interval after the late frame"
         );
+        p.delivered(t0 + ms(50), t0 + ms(50));
+        assert_eq!(p.due(t0 + ms(51)), t0 + ms(60), "then on the new schedule");
         p.set_rate(50.0);
-        assert_eq!(p.due(t0 + ms(40)), t0 + ms(40));
+        assert_eq!(
+            p.due(t0 + ms(52)),
+            t0 + ms(60),
+            "a rate change re-anchors too"
+        );
     }
 }
