@@ -16,12 +16,12 @@ The design lives in Confluence, under [EdgeFirst Camera SDK](https://au-zone.atl
 | `timestamp.rs` | `Timestamp`, `CaptureClock`, `TimestampSource`, `RealtimeClock` |
 | `enumerate.rs` | `CameraDescriptor`, `FormatInfo`, `Sizes`, `Rates`, `Mode`, `modes()` |
 | `error.rs` | `Error`, `ErrorKind`, `Rejection` |
-| `backend/` | Backend dispatch; `mock.rs`, and `v4l2/` on Linux |
+| `backend/` | Backend dispatch; `mock.rs`, `v4l2/` on Linux, and `file/` |
 
 ## Rules every backend follows
 
 1. **Requests are reported, never enforced.** A backend applies what the device accepts, records the result in `StreamConfig`, and reports controls as `Applied`. It never drops frames, rescales or otherwise alters the stream to meet a request.
-2. **A buffer is never handed back while a frame references it.** Backends keep their buffers in a `SlotTable`. A frame holds an `Arc<TensorDyn>` for its slot; the slot stays held until the frame drops, then the backend hands it back to the driver with `SlotTable::pop_released`. Frames keep their memory through that `Arc`, never through a backend object, so they outlive `stop()` and the camera.
+2. **A buffer is never handed back while a frame references it.** Backends keep their buffers in a `SlotTable`. A frame owns what keeps its tensor alive: the slot's `Arc<TensorDyn>`, or for the file source the decoded picture itself. The slot stays held until the frame drops, then the backend hands it back to the driver with `SlotTable::pop_released`. The tensor is reachable only through the frame (`Frame::tensor()` borrows it), so nothing keeps reading a buffer after it has gone back. Frames keep their memory through what they own, never through a backend object, so they outlive `stop()` and the camera.
 3. **One acquisition time per frame.** Backends convert the capture timestamp with `RealtimeClock` at dequeue and store it in `FrameMeta::realtime`; consumers never convert again.
 4. **No silent fallback for caller buffers or contiguity.** Only SDK-allocated pools may fall back from Import to Export. Everything else is a dedicated error, and the camera stays open and stopped for recovery.
 
@@ -81,3 +81,25 @@ It behaves like an Import backend:
 
 **Testing hooks.** `CameraBuilder::fault` injects `import-qbuf` (the first Import `QBUF` is refused) and `no-orphan` (the driver is treated as unable to orphan buffers). It is honoured only in debug builds and is not part of the stable API.
 
+## The file backend
+
+`backend/file/` (feature `file`) plays a recording made by camera 2.x: `<name>.h264`, a raw Annex B stream, and its `<name>.json` sidecar.
+
+| File | Contents |
+|---|---|
+| `sidecar.rs` | Sidecar v1: `fps`, `width`, `height` and colorimetry (tensor-crate labels) configure the stream; every other field (`camera_info`, `tf_static`) is kept verbatim for `Camera::extras()` |
+| `annexb.rs` | Reads the file in chunks and splits it with `edgefirst_codec::video::access_units`; an access unit is complete once the next one starts or the file ends. Bytes outside any access unit are skipped with a warning |
+| `decode.rs` | The `Decode` seam the source drives, implemented over `edgefirst_codec::video::VideoDecoder`; unit tests drive a mock instead |
+| `mod.rs` | The `Camera`: pacing, looping, stamps, `encoded()` |
+
+**Decoding.** One access unit per `decode` call, as the decoder requires. Pictures land in the decoder's own NV12 pool (`--camera-buffers` frames may be held); a frame owns its `DecodedFrame`, and dropping the frame gives the buffer back to the decoder, which is the slot rule with the decoder as the driver. Caller pools are refused with `BuffersRejected`: decoders write at the coded size (1088 rows for 1080p) and their own pitch. When every picture is held, `next_frame` waits for one to drop, up to its timeout, as a capture driver whose buffers are all dequeued does.
+
+**Pacing and stamps.** Frames are due one interval apart at the sidecar's rate or the requested one (`frame_rate`, `Control::FrameRate`), counted from the previous due time so decode time does not add drift; a delivery more than an interval late re-anchors rather than bursting. Each frame is stamped at its paced delivery in the clock the mock uses, and converted with `RealtimeClock` like a live frame.
+
+**Looping and the end.** At the end of the file the decoder is drained. With `CameraBuilder::looping(true)` the file restarts and `seq` keeps counting; otherwise `next_frame` returns `ErrorKind::EndOfStream`. A file with no decodable pictures ends rather than looping forever.
+
+**`encoded()`.** Each frame carries every access unit read since the previous picture came out of the decoder, in file order. Forwarding them reproduces the recording byte for byte even when the decoder holds pictures back.
+
+**Damage.** A unit the decoder rejects is skipped with a warning and counted in `stats().errors`; a picture the decoder reports as damaged is counted and not delivered, its units going out with the next frame. After 30 rejected units in a row the decoder is taken to have failed (`ErrorKind::Backend`).
+
+**Platforms.** Decoding is V4L2 memory-to-memory only in phase 1, so playback runs on i.MX targets; elsewhere `open()` fails with `NotFound` naming the decoder.

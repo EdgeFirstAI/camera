@@ -19,10 +19,15 @@ mock = []
 v4l2 = ["dep:edgefirst-v4l2"]
 # `Frame` → `edgefirst_msgs/CameraFrame` mapping.
 schemas = ["dep:edgefirst-schemas"]
+# Recorded H.264 playback (`file:<path>.h264` with its JSON sidecar). Decodes
+# with the V4L2 memory-to-memory decoder, so frames come only on Linux.
+file = ["dep:edgefirst-codec", "dep:serde_json"]
 
 [dependencies]
 edgefirst-tensor = { version = "0.36.0", default-features = false }
 edgefirst-schemas = { version = "4.0.0", optional = true }
+edgefirst-codec = { version = "0.36.0", default-features = false, features = ["v4l2"], optional = true }
+serde_json = { version = "1.0.151", optional = true }
 tracing = "0.1"
 
 [target.'cfg(unix)'.dependencies]
@@ -44,6 +49,10 @@ required-features = ["mock"]
 name = "schema"
 required-features = ["mock", "schemas"]
 
+[[test]]
+name = "file"
+required-features = ["file"]
+
 [[bench]]
 name = "capture"
 harness = false
@@ -54,4 +63,4 @@ missing_debug_implementations = "warn"
 unsafe_op_in_unsafe_fn = "deny"
 
 [package.metadata.docs.rs]
-features = ["mock", "schemas"]
+features = ["mock", "schemas", "file"]

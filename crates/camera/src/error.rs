@@ -26,6 +26,8 @@ pub enum ErrorKind {
     Timeout,
     /// The device went away, for example on USB unplug.
     Disconnected,
+    /// A file source played to its end and is not looping.
+    EndOfStream,
     /// The requested pixel format is not available from this camera.
     UnsupportedFormat,
     /// The request or the call order is invalid.
@@ -52,6 +54,7 @@ impl ErrorKind {
             Self::Interrupted => "interrupted",
             Self::Timeout => "timeout",
             Self::Disconnected => "disconnected",
+            Self::EndOfStream => "end_of_stream",
             Self::UnsupportedFormat => "unsupported_format",
             Self::InvalidConfig => "invalid_config",
             Self::BuffersRejected => "buffers_rejected",

@@ -2,12 +2,12 @@
 
 ## Host tests
 
-Unit tests live beside the code. Public-API tests against the mock backend are in `tests/mock.rs` and need the `mock` feature; `tests/schema.rs` also needs `schemas`.
+Unit tests live beside the code. Public-API tests against the mock backend are in `tests/mock.rs` and need the `mock` feature; `tests/schema.rs` also needs `schemas`, and `tests/file.rs` needs `file`.
 
 ```bash
-cargo test -p edgefirst-camera --features mock,schemas
-cargo clippy -p edgefirst-camera --all-targets --features mock,schemas -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc -p edgefirst-camera --no-deps --features mock,schemas
+cargo test -p edgefirst-camera --features mock,schemas,file
+cargo clippy -p edgefirst-camera --all-targets --features mock,schemas,file -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc -p edgefirst-camera --no-deps --features mock,schemas,file
 ```
 
 These run in every CI lane:
@@ -27,6 +27,7 @@ These run in every CI lane:
 | Frame lifetime | `frame.rs` and `tests/mock.rs`: release on drop; starvation counted as drops; pool depths 2 to 8; a frame held across `stop()`/`start()` stays valid and requeues on drop; frames outliving a pool change and the camera |
 | Buffers | `pool.rs`: each rejection reason (including a PBO tensor as `NotNativeHandle`) with its slot, count limits, contiguity and pitch rules. `tests/mock.rs`: caller pools, rejection and recovery through `take_buffers` and `set_buffers` |
 | Controls | `tests/mock.rs`: applied, clamped and unsupported outcomes |
+| File source (`file`) | `backend/file/`, with the decoder mocked: the sidecar (a 2.x sidecar, extras, colorimetry labels, version, codec and field errors); the Annex B reader (units across read boundaries, a start code split by a read, leading garbage, a long stretch without start codes, rewind); pacing (spacing, re-anchoring after a stall, requested rate); every picture then `EndOfStream`; `seq` across loops; `encoded()` reproducing the file byte for byte with a reordering decoder; a rejected unit skipped; a damaged picture counted; held pictures blocking until one drops; caller pools refused and handed back. `tests/file.rs`: missing recording and sidecar, an unsupported codec, no decoder off Linux |
 | `CameraFrame` mapping (`schemas`) | `schema.rs`: byte-for-byte against the schemas `CameraFrame_split_fd` golden (NV12M), field by field against `CameraFrame` (single-buffer NV12), unspecified colorimetry, unformatted tensors, epoch clamp and Y2038 saturation, the Zenoh NTP64 timestamp within 2 ns of the header stamp. `tests/schema.rs`: every mock format at nine sizes passes `TensorFields::validate` and decodes to the frame's bytes. `tests/v4l2_vivid.rs`: real DMA-BUF frames map to planes by reference |
 
 ## V4L2 backend on vivid
@@ -58,6 +59,14 @@ In CI, `.github/scripts/vivid-setup.sh` (run from `ci-setup.sh` on GitHub-hosted
 | Drops, wait handle, exclusivity | `drops_are_counted_from_timestamp_gaps`, `the_wait_handle_polls_ready`, `an_exclusive_device_is_busy_for_a_second_user` |
 
 vivid has neither a CMA-backed import path nor the i.MX quirks, so contiguous Import, the vvcam flip and `NotReady` after an ISP restart are validated on the boards (T1.21–T1.24). vivid stamps a frame with its simulated end-of-frame time, about one period ahead of delivery, so the `probe` example reports a negative latency on it.
+
+## File source on a board
+
+`tests/file.rs` plays a real recording when `EDGEFIRST_CAMERA_RECORDING` names a camera 2.x `.h264` file with its `.json` sidecar beside it, on a target with a V4L2 H.264 decoder (i.MX 8M Plus, i.MX 95). It checks one frame per access unit, a rate within 2% of the sidecar's, `extras()`, `EndOfStream` at the end, and `seq` across two loops. Without the variable those tests print a note and pass.
+
+```bash
+EDGEFIRST_CAMERA_RECORDING=/home/root/run01.h264 cargo test -p edgefirst-camera --features file --test file
+```
 
 ## ioctl ABI check
 

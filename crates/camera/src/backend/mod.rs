@@ -3,6 +3,8 @@
 
 //! Backend dispatch.
 
+#[cfg(feature = "file")]
+mod file;
 #[cfg(feature = "mock")]
 pub(crate) mod mock;
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
@@ -29,6 +31,9 @@ pub(crate) fn open(builder: CameraBuilder) -> Result<Box<dyn Camera>> {
         #[cfg(not(all(target_os = "linux", feature = "v4l2")))]
         Source::Device(_) => Err(not_compiled("V4L2")),
         Source::Libcamera(_) => Err(not_compiled("libcamera")),
+        #[cfg(feature = "file")]
+        Source::File(_) => file::open(builder),
+        #[cfg(not(feature = "file"))]
         Source::File(_) => Err(not_compiled("file")),
     }
 }
@@ -47,6 +52,8 @@ pub(crate) fn probe(d: &CameraDescriptor) -> Result<Vec<FormatInfo>> {
     match d.backend {
         #[cfg(feature = "mock")]
         crate::Backend::Mock => Ok(d.formats.clone()),
+        #[cfg(feature = "file")]
+        crate::Backend::File => Ok(d.formats.clone()),
         #[cfg(all(target_os = "linux", feature = "v4l2"))]
         crate::Backend::V4l2 => v4l2::probe(d),
         _ => Err(not_compiled(&format!("{:?}", d.backend))),

@@ -3,9 +3,12 @@
 
 //! Captured frames and their lifetime.
 //!
-//! A [`Frame`] holds a shared reference to its slot's tensor. Dropping the
-//! frame hands the slot back to its backend through [`SlotRelease`]; a
-//! buffer is never returned to the driver while a frame references it.
+//! A [`Frame`] owns whatever keeps its tensor alive: a shared reference to
+//! its slot's tensor, or a decoded picture lent by a decoder. Dropping the
+//! frame hands the slot back to its backend through [`SlotRelease`] (and a
+//! decoded picture back to its decoder); a buffer is never returned to the
+//! driver while a frame references it. The tensor is only reachable through
+//! the frame, so nothing reads a buffer after it has gone back.
 
 use std::fmt;
 use std::ops::Deref;
@@ -58,6 +61,17 @@ impl PlaneLayout {
     }
 }
 
+/// Keeps a frame's tensor alive for as long as the frame.
+pub(crate) trait TensorHolder: Send + Sync {
+    fn tensor(&self) -> &TensorDyn;
+}
+
+impl TensorHolder for Arc<TensorDyn> {
+    fn tensor(&self) -> &TensorDyn {
+        self
+    }
+}
+
 /// Per-frame capture metadata.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
@@ -104,7 +118,7 @@ impl FrameMeta {
 /// `Sync`, so it can be handed to encoder threads; the slot returns to the
 /// backend when the frame drops.
 pub struct Frame {
-    tensor: Arc<TensorDyn>,
+    holder: Box<dyn TensorHolder>,
     meta: FrameMeta,
     release: Option<Arc<dyn SlotRelease>>,
 }
@@ -118,16 +132,25 @@ impl Frame {
         meta: FrameMeta,
         release: Option<Arc<dyn SlotRelease>>,
     ) -> Self {
+        Self::held(Box::new(tensor), meta, release)
+    }
+
+    /// Builds a frame over a tensor that `holder` keeps alive.
+    pub(crate) fn held(
+        holder: Box<dyn TensorHolder>,
+        meta: FrameMeta,
+        release: Option<Arc<dyn SlotRelease>>,
+    ) -> Self {
         Self {
-            tensor,
+            holder,
             meta,
             release,
         }
     }
 
-    /// The frame's tensor.
-    pub fn tensor(&self) -> &Arc<TensorDyn> {
-        &self.tensor
+    /// The frame's tensor, valid for as long as the frame.
+    pub fn tensor(&self) -> &TensorDyn {
+        self.holder.tensor()
     }
 
     /// The full metadata.
@@ -180,7 +203,7 @@ impl Deref for Frame {
     type Target = TensorDyn;
 
     fn deref(&self) -> &TensorDyn {
-        &self.tensor
+        self.tensor()
     }
 }
 
@@ -196,7 +219,7 @@ impl fmt::Debug for Frame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Frame")
             .field("meta", &self.meta)
-            .field("tensor", &self.tensor)
+            .field("tensor", self.tensor())
             .finish_non_exhaustive()
     }
 }

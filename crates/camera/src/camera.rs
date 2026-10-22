@@ -144,4 +144,12 @@ pub trait Camera: Send + std::fmt::Debug {
 
     /// A pollable handle, where the backend has one.
     fn wait_handle(&self) -> Option<WaitHandle>;
+
+    /// Source metadata the SDK carries but does not interpret, as a JSON
+    /// object: for a file source, the recording's sidecar fields other than
+    /// the stream's own (`camera_info`, `tf_static`). `None` for live
+    /// cameras.
+    fn extras(&self) -> Option<&str> {
+        None
+    }
 }

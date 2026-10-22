@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `schemas` feature: `schema::FrameTensor` maps a `Frame` to an `edgefirst_msgs/CameraFrame` tensor (addressing-grid shape, byte strides at the real pitch, tensor-ABI storage kind and dtype, one plane per buffer plane, colorimetry), with `schema::stamp` and `schema::ntp64` giving the header stamp and the Zenoh sample timestamp of the same instant (EDGEAI-1521).
 - V4L2 ioctl ABI check: every pull request runs the SDK's vivid tests under `strace` and fails on an unexpected `ENOTTY`, the symptom of an ioctl argument laid out differently from the kernel's (`make abi-check`) (EDGEAI-1530).
 - SDK capture benchmarks for frame interval, delivery latency, DMA-BUF import and CPU reads of capture memory (`make bench-capture`), and the on-demand `Camera benchmarks` workflow that runs them across board runners (EDGEAI-1530).
+- File source for the SDK (`file:<name>.h264` with its `<name>.json` sidecar, feature `file`): plays a camera 2.x recording through the platform's V4L2 H.264 decoder (EDGEAI-1524).
+  - Frames are paced at the sidecar's rate or a requested one and stamped at delivery like live frames; `config()` reports the size, rate and colorimetry.
+  - `Frame::encoded()` carries the access units behind each frame, so forwarding them reproduces the recording byte for byte.
+  - `CameraBuilder::looping` restarts the file with `seq` continuous; without it the end is `ErrorKind::EndOfStream`. `Camera::extras()` returns the sidecar's other fields (`camera_info`, `tf_static`) as JSON.
+  - Units the decoder rejects and bytes outside any access unit are skipped with a warning.
+  - Frames own their decoded pictures, and `Frame::tensor()` borrows the tensor, so no caller keeps reading a buffer after it goes back to the driver or decoder.
 
 ### Changed
 - The repository is a Cargo workspace. The application package is renamed `edgefirst-camera-app`; its binary is still `edgefirst-camera`. The application and the SDK share version 3.0.0 (EDGEAI-1518).

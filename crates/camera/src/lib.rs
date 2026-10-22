@@ -50,9 +50,10 @@
 //!
 //! ## Features
 //!
-//! - `static` (default): forwards to `edgefirst-tensor/static`.
 //! - `v4l2` (default): the V4L2 capture backend on Linux (`/dev/videoN`).
 //! - `mock`: the synthetic frame source (`mock[:WxH@fps]`).
+//! - `file`: recorded H.264 playback (`file:<name>.h264` with its
+//!   `<name>.json` sidecar), decoded by the platform's V4L2 decoder.
 //! - `schemas`: [`schema`], the `Frame` → `edgefirst_msgs/CameraFrame`
 //!   mapping.
 

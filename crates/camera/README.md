@@ -2,7 +2,7 @@
 
 `edgefirst-camera` is a portable camera capture API for the EdgeFirst stack. Cameras deliver frames as [`edgefirst-tensor`](https://crates.io/crates/edgefirst-tensor) tensors, so they go straight to `edgefirst-image` for conversion, to `edgefirst-codec` for encoding, and onto the wire as `edgefirst-schemas` `CameraFrame` messages without a copy.
 
-> **Status:** in development on the 3.0 integration branch. The public API, the `mock` backend and the V4L2 backend are in place; the file and libcamera backends follow.
+> **Status:** in development on the 3.0 integration branch. The public API and the `mock`, V4L2 and file backends are in place; the libcamera backend follows.
 
 ## Quick start
 
@@ -38,17 +38,17 @@ println!(
 |---|---|---|
 | `mock[:WxH@fps]` | Synthetic frames (feature `mock`) | available |
 | `/dev/videoN` | V4L2 capture (feature `v4l2`, Linux) | available |
-| `file:<path>` | Recorded Annex-B H.264 with JSON sidecar | planned |
+| `file:<path>` | Recorded Annex-B H.264 with JSON sidecar (feature `file`; decoding needs a V4L2 decoder, so Linux) | available |
 | `libcamera:<id>` | libcamera through a runtime-loaded shim | planned |
 
 ## Features
 
 | Feature | Default | Enables |
 |---|---|---|
-| `static` | yes | forwards to `edgefirst-tensor/static` |
 | `v4l2` | yes | the V4L2 capture backend (Linux) |
 | `mock` | no | the synthetic frame source |
 | `schemas` | no | `schema`: the `Frame` → `edgefirst_msgs/CameraFrame` mapping |
+| `file` | no | the file source: recorded H.264 played through `edgefirst-codec`'s decoder |
 
 ## Publishing frames
 

@@ -941,11 +941,13 @@ name = "edgefirst-camera"
 version = "3.0.0-dev"
 dependencies = [
  "criterion",
+ "edgefirst-codec",
  "edgefirst-schemas",
  "edgefirst-tensor",
  "edgefirst-v4l2",
  "libc",
  "proptest",
+ "serde_json",
  "tracing",
  "uhlc",
 ]
@@ -979,6 +981,20 @@ dependencies = [
  "unix-ts",
  "videostream",
  "zenoh",
+]
+
+[[package]]
+name = "edgefirst-codec"
+version = "0.36.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eebd35f1ae16fd6a775bf5c29357800ddd3ecf617fe453c00468db24be23e2d5"
+dependencies = [
+ "edgefirst-tensor",
+ "edgefirst-v4l2",
+ "kamadak-exif",
+ "log",
+ "num-traits",
+ "tracing",
 ]
 
 [[package]]
@@ -1933,6 +1949,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kamadak-exif"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1130d80c7374efad55a117d715a3af9368f0fa7a2c54573afc15a188cd984837"
+dependencies = [
+ "mutate_once",
+]
+
+[[package]]
 name = "kanal"
 version = "0.1.0-pre8"
 source = "git+https://github.com/fereidani/kanal?rev=b6aeab2#b6aeab28802b87c42063b29eb40b51dde560967c"
@@ -2142,6 +2167,12 @@ dependencies = [
  "num-traits",
  "pxfm",
 ]
+
+[[package]]
+name = "mutate_once"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13d2233c9842d08cfe13f9eac96e207ca6a2ea10b80259ebe8ad0268be27d2af"
 
 [[package]]
 name = "nanorand"

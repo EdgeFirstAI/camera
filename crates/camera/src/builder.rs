@@ -104,6 +104,7 @@ pub struct CameraBuilder {
     pub(crate) request: StreamRequest,
     pub(crate) provided: Option<Vec<TensorDyn>>,
     pub(crate) exclusive: bool,
+    pub(crate) looping: bool,
     pub(crate) controls: Vec<Control>,
     pub(crate) faults: Vec<String>,
 }
@@ -140,6 +141,7 @@ impl CameraBuilder {
             request: StreamRequest::default(),
             provided: None,
             exclusive: true,
+            looping: false,
             controls: Vec::new(),
             faults: Vec::new(),
         }
@@ -200,6 +202,14 @@ impl CameraBuilder {
     /// Takes an advisory exclusive lock on the device (default `true`).
     pub fn exclusive(mut self, exclusive: bool) -> Self {
         self.exclusive = exclusive;
+        self
+    }
+
+    /// Restarts a file source at its first frame when it reaches the end,
+    /// instead of ending with [`ErrorKind::EndOfStream`] (default `false`).
+    /// `seq` keeps counting across loops. Live cameras ignore it.
+    pub fn looping(mut self, looping: bool) -> Self {
+        self.looping = looping;
         self
     }
 
