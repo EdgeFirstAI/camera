@@ -530,6 +530,8 @@ mod tests {
         t.with_fields(|f| f.validate()).unwrap();
     }
 
+    /// Sub-second parts are multiples of 100 ns, the resolution of Windows'
+    /// `SystemTime`.
     #[test]
     fn stamps_clamp_before_the_epoch_and_saturate_past_2038() {
         assert_eq!(
@@ -537,12 +539,18 @@ mod tests {
             Time { sec: 0, nanosec: 0 }
         );
         assert_eq!(
-            time(UNIX_EPOCH + Duration::new(1_234_567_890, 123_456_789)),
-            GOLDEN_STAMP
+            time(UNIX_EPOCH + Duration::new(1_234_567_890, 123_456_700)),
+            Time {
+                sec: 1_234_567_890,
+                nanosec: 123_456_700
+            }
         );
         assert_eq!(
-            time(UNIX_EPOCH + Duration::new(i32::MAX as u64, 999_999_999)),
-            SATURATED_TIME
+            time(UNIX_EPOCH + Duration::new(i32::MAX as u64, 999_999_900)),
+            Time {
+                sec: i32::MAX,
+                nanosec: 999_999_900
+            }
         );
         assert_eq!(
             time(UNIX_EPOCH + Duration::from_secs(i32::MAX as u64 + 1)),
