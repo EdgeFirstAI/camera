@@ -517,6 +517,19 @@ cargo test --test on_target -- --include-ignored
 cargo test --test board -- --include-ignored --test-threads 1
 ```
 
+**Parity with the installed release (Maivin, from a host):**
+
+```bash
+# Cross-build the service, the parity probe and the SDK's probe, then
+# compare them with the board's installed edgefirst-camera under its own
+# camera.service. Results and Markdown tables land in the output directory.
+cargo zigbuild --target aarch64-unknown-linux-gnu.2.35 --release --locked \
+    --bin edgefirst-camera --example parity
+cargo zigbuild --target aarch64-unknown-linux-gnu.2.35 --release --locked \
+    -p edgefirst-camera --example probe
+scripts/parity.sh torizon@<maivin> parity-results
+```
+
 **With Coverage:**
 
 ```bash

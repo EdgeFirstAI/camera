@@ -18,7 +18,9 @@ use std::{
 
 use edgefirst_camera::{Frame, Mirror, StreamConfig};
 use edgefirst_codec::{
-    video::{Bitrate, EncodedFrame, EncoderConfig, FrameOptions, VideoEncoder},
+    video::{
+        Bitrate, EncodedFrame, EncoderConfig, FrameOptions, H264Level, H264Profile, VideoEncoder,
+    },
     CodecError,
 };
 use edgefirst_image::{ConvertOptions, Flip, ImageProcessor, ImageProcessorTrait, Rotation};
@@ -65,6 +67,46 @@ pub(crate) fn open_hardware(config: EncoderConfig) -> Result<Box<dyn Encode>, Co
 /// The startup error for `plan` when its encoder does not open.
 fn open_error(plan: &Plan, e: &CodecError) -> Box<dyn Error> {
     Box::new(Failure::of(e, format!("{}: {e}", plan.label)))
+}
+
+/// Bits per pixel for `--h264-bitrate auto`: about 10 Mbps at 1080p30.
+const AUTO_BITS_PER_PIXEL: f64 = 0.16;
+
+/// H.264 Table A-1 limits from Level 3.1 to 5.1, the highest the i.MX 8M
+/// Plus encoder takes: frame size in macroblocks, macroblocks per second
+/// and High profile bitrate (1.25 times the table's) in kbps.
+const H264_LEVELS: [(H264Level, u64, u64, u32); 7] = [
+    (H264Level::L3_1, 3600, 108_000, 17_500),
+    (H264Level::L3_2, 5120, 216_000, 25_000),
+    (H264Level::L4_0, 8192, 245_760, 25_000),
+    (H264Level::L4_1, 8192, 245_760, 62_500),
+    (H264Level::L4_2, 8704, 522_240, 62_500),
+    (H264Level::L5_0, 22_080, 589_824, 168_750),
+    (H264Level::L5_1, 36_864, 983_040, 300_000),
+];
+
+/// The bitrate `auto` stands for at `size` and `fps`, within 1 to 100 Mbps.
+fn auto_bitrate(size: (u32, u32), fps: f64) -> u32 {
+    let bps = f64::from(size.0) * f64::from(size.1) * fps * AUTO_BITS_PER_PIXEL;
+    bps.clamp(1e6, 1e8) as u32
+}
+
+/// The lowest level whose limits cover the stream, and the bitrate clamped
+/// to the highest level's; `None` when the frame size or rate exceed it.
+fn h264_level(size: (u32, u32), fps: f64, bps: u32) -> Option<(H264Level, u32)> {
+    let mbs = u64::from(size.0.div_ceil(16)) * u64::from(size.1.div_ceil(16));
+    let rate = (mbs as f64 * fps).ceil() as u64;
+    let fits =
+        |&&(_, frame, mb_rate, _): &&(H264Level, u64, u64, u32)| mbs <= frame && rate <= mb_rate;
+    if let Some((level, ..)) = H264_LEVELS
+        .iter()
+        .filter(fits)
+        .find(|(.., kbps)| bps / 1000 <= *kbps)
+    {
+        return Some((*level, bps));
+    }
+    let (level, frame, mb_rate, kbps) = H264_LEVELS[H264_LEVELS.len() - 1];
+    (mbs <= frame && rate <= mb_rate).then_some((level, bps.min(kbps * 1000)))
 }
 
 /// The encoder bitrate for a preset.
@@ -278,7 +320,7 @@ impl Stage {
             (r.width as u32, r.height as u32)
         });
         if plan.mirror.is_none() && source == plan.size {
-            match open(Self::config(&plan, capture.format)) {
+            match Self::open_encoder(&plan, capture.format, open) {
                 Ok(encoder) => {
                     let feed = Feed::Direct { crop: plan.region };
                     return Ok(Self::with(plan, capture, open, encoder, feed));
@@ -322,10 +364,45 @@ impl Stage {
         }
     }
 
+    /// The stream 2.x produced: constant bitrate, a key frame every second,
+    /// High profile at the lowest level that fits.
     fn config(plan: &Plan, format: PixelFormat) -> EncoderConfig {
         let mut c = EncoderConfig::h264(plan.size.0, plan.size.1, format, plan.frame_rate);
-        c.bitrate = plan.bitrate;
+        let bps = match plan.bitrate {
+            Bitrate::Bps(bps) => bps,
+            Bitrate::Auto => auto_bitrate(plan.size, plan.frame_rate),
+        };
+        c.bitrate = Bitrate::Bps(bps);
+        c.gop = Some((plan.frame_rate.round() as u32).max(1));
+        if let Some((level, bps)) = h264_level(plan.size, plan.frame_rate, bps) {
+            c.bitrate = Bitrate::Bps(bps);
+            c.profile = Some(H264Profile::High);
+            c.level = Some(level);
+        }
         c
+    }
+
+    /// Opens an encoder with [`Self::config`], or with the device's own
+    /// profile and level when it lacks or rejects those.
+    fn open_encoder(
+        plan: &Plan,
+        format: PixelFormat,
+        open: OpenEncoder,
+    ) -> Result<Box<dyn Encode>, CodecError> {
+        let config = Self::config(plan, format);
+        match open(config.clone()) {
+            Err(CodecError::InvalidConfig(why)) if config.profile.is_some() => {
+                warn!(
+                    "{}: {why}; using the encoder's default profile and level",
+                    plan.label
+                );
+                let mut config = config;
+                config.profile = None;
+                config.level = None;
+                open(config)
+            }
+            opened => opened,
+        }
     }
 
     /// An encoder on a converted feed.
@@ -336,7 +413,7 @@ impl Stage {
     ) -> Result<(Box<dyn Encode>, Feed), Box<dyn Error>> {
         let mut last = None;
         for format in CONVERT_FORMATS {
-            match open(Self::config(plan, format)) {
+            match Self::open_encoder(plan, format, open) {
                 Ok(encoder) => {
                     let mut processor = ImageProcessor::new()?;
                     let mut dst = processor.create_image(
@@ -677,6 +754,54 @@ pub(crate) mod tests {
         assert_eq!(tile_frame_interval(0), Duration::ZERO);
         assert_eq!(tile_frame_interval(10), Duration::from_millis(100));
         assert_eq!(tile_frame_interval(15), Duration::from_nanos(66_666_666));
+    }
+
+    #[test]
+    fn auto_asks_for_what_2x_encoded() {
+        let c = Stage::config(&plan((1920, 1080), None, None), PixelFormat::Yuyv);
+        assert_eq!(c.bitrate, Bitrate::Bps(9_953_280));
+        assert_eq!(c.gop, Some(30));
+        assert_eq!(c.profile, Some(H264Profile::High));
+        assert_eq!(c.level, Some(H264Level::L4_0));
+    }
+
+    #[test]
+    fn levels_cover_size_rate_and_bitrate() {
+        assert_eq!(
+            h264_level((1920, 1080), 30.0, 25_000_000),
+            Some((H264Level::L4_0, 25_000_000))
+        );
+        assert_eq!(
+            h264_level((1920, 1080), 30.0, 50_000_000),
+            Some((H264Level::L4_1, 50_000_000))
+        );
+        assert_eq!(
+            h264_level((1920, 1080), 60.0, 10_000_000),
+            Some((H264Level::L4_2, 10_000_000))
+        );
+        assert_eq!(
+            h264_level((3840, 2160), 30.0, 100_000_000),
+            Some((H264Level::L5_1, 100_000_000))
+        );
+        assert_eq!(
+            h264_level((1920, 1080), 30.0, 400_000_000),
+            Some((H264Level::L5_1, 300_000_000))
+        );
+        assert_eq!(h264_level((7680, 4320), 30.0, 10_000_000), None);
+        assert_eq!(auto_bitrate((320, 240), 30.0), 1_000_000);
+    }
+
+    #[test]
+    fn an_encoder_without_profile_controls_gets_its_defaults() {
+        fn refuses_profiles(config: EncoderConfig) -> Result<Box<dyn Encode>, CodecError> {
+            if config.profile.is_some() {
+                return Err(CodecError::InvalidConfig("cannot set the profile".into()));
+            }
+            open_fake(config)
+        }
+        let p = plan((640, 480), None, None);
+        assert!(Stage::open_encoder(&p, PixelFormat::Yuyv, refuses_profiles).is_ok());
+        assert!(Stage::open_encoder(&p, PixelFormat::Yuyv, open_none).is_err());
     }
 
     #[test]

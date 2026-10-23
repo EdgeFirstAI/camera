@@ -120,7 +120,8 @@ H264="true"
 # H.264 encoding bitrate preset. Higher bitrates improve quality but
 # increase bandwidth and storage requirements.
 # Accepted values: auto, mbps5, mbps25, mbps50, mbps100
-# "auto" selects a bitrate based on the stream resolution.
+# "auto" selects 0.16 bits per pixel from the stream size and rate, about
+# 10 Mbps at 1080p30.
 H264_BITRATE="auto"
 
 # ---------------------------------------------------------------------------

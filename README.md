@@ -264,7 +264,7 @@ subscriber.on_message(|payload| {
 **H.264 Hardware Encoder (EdgeFirst HAL `edgefirst-codec`):**
 
 - V4L2 memory-to-memory encoder (vsi_v4l2 on i.MX 8M Plus), up to 1920×1080 per stream
-- Configurable bitrate (5/25/50/100 Mbps)
+- Configurable bitrate (5/25/50/100 Mbps); `auto` is about 10 Mbps at 1080p30, High profile
 - Automatic tiling for resolutions > 1080p
 - Tile-specific FPS control to reduce artifacts
 

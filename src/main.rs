@@ -102,15 +102,19 @@ fn serve(args: Args) -> Result<(), Box<dyn Error>> {
         .build()?;
 
     args.tracy.then(tracy_client::Client::start);
-    let stdout_log = tracing_subscriber::fmt::layer()
-        .pretty()
-        .with_filter(get_env_filter());
     #[cfg(target_os = "linux")]
     let journald = tracing_journald::layer()
         .ok()
         .map(|j| j.with_filter(get_env_filter()));
     #[cfg(not(target_os = "linux"))]
     let journald: Option<tracing_subscriber::layer::Identity> = None;
+    // Under systemd stdout is the journal too, so writing to both would log
+    // every line twice.
+    let stdout_log = (journald.is_none() || !stdout_is_journal()).then(|| {
+        tracing_subscriber::fmt::layer()
+            .pretty()
+            .with_filter(get_env_filter())
+    });
     let (console, console_server) = if args.tokio_console {
         let (console, server) = runtime.block_on(async {
             console_subscriber::ConsoleLayer::builder()
@@ -240,6 +244,25 @@ pub(crate) fn peerless_session() -> Result<Session, Box<dyn Error>> {
     Ok(zenoh::open(config)
         .wait()
         .map_err(|e| Failure::new(Status::Socket, format!("cannot open a Zenoh session: {e}")))?)
+}
+
+/// Whether stdout is the journal stream systemd connected it to, which it
+/// names in `JOURNAL_STREAM` as `<device>:<inode>`.
+#[cfg(target_os = "linux")]
+fn stdout_is_journal() -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let (Some(stream), Ok(stdout)) = (
+        std::env::var_os("JOURNAL_STREAM"),
+        std::fs::metadata("/proc/self/fd/1"),
+    ) else {
+        return false;
+    };
+    stream.to_str() == Some(&format!("{}:{}", stdout.dev(), stdout.ino()))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn stdout_is_journal() -> bool {
+    false
 }
 
 /// Logs to stderr at `default` unless `RUST_LOG` says otherwise, keeping

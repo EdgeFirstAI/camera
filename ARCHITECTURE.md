@@ -126,6 +126,8 @@ At startup, the frames the camera captured while the encoders opened are discard
 
 A stage encodes the captured tensor directly when the encoder takes the capture format at the stream size and no software mirroring is needed. Otherwise it converts each frame first, scaling to the stream size and mirroring, into YUYV (half the bytes of RGBA, and written by the i.MX 8M Plus G2D) or, if the encoder does not take YUYV, RGBA. A direct stage that fails on its first frame switches to converting.
 
+Each encoder is asked for the stream 2.x produced: constant bitrate, a key frame every second with the SPS and PPS in band, and High profile at the lowest level whose frame size, macroblock rate and bitrate limits cover the stream (H.264 Table A-1, up to Level 5.1, the highest the i.MX 8M Plus encoder takes). `--h264-bitrate auto` stands for 0.16 bits per pixel, about 10 Mbps at 1080p30, within 1 to 100 Mbps; a preset above Level 5.1's limit is clamped to it. An encoder that lacks or rejects the profile or level controls opens with its own defaults and a warning.
+
 The encoder may return an access unit for an earlier frame, so each stage keeps the stamps of frames whose access unit has not come back, keyed by the frame's `seq` as the encoder's presentation timestamp, and publishes each access unit with its own frame's stamp. The recording is written from the same access units, flushed at every key frame.
 
 ### Tiles
@@ -272,7 +274,7 @@ Explicit service options before a subcommand are a usage error; values from the 
 
 ## Instrumentation and Profiling
 
-Logging uses `tracing` with layers for stdout (pretty), journald (Linux), the tokio console (`--tokio-console`) and Tracy (`--tracy`); `RUST_LOG` sets the filter (default INFO). The HAL's `log` output is bridged into the same subscriber.
+Logging uses `tracing` with layers for stdout (pretty, left out when systemd has connected stdout to the journal, as `JOURNAL_STREAM` says, so lines are not logged twice), journald (Linux), the tokio console (`--tokio-console`) and Tracy (`--tracy`); `RUST_LOG` sets the filter (default INFO). The HAL's `log` output is bridged into the same subscriber.
 
 Spans mark the work Tracy shows as zones: `camera_read` and `camera_publish` on the capture thread, `h264` (with the stage name) and `jpeg` on the encoder threads. With `--tracy`, the capture loop marks each frame and plots `fps`; the encoders mark secondary frames and plot `h264_kb` and `jpeg_kb`. The `profiling` feature adds Tracy's allocation tracking, sampling and system tracing.
 
