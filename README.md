@@ -3,24 +3,25 @@
 **Production-ready ROS2-compatible camera publisher with zero-copy DMA, hardware-accelerated encoding, and EdgeFirst Perception integration**
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.90.0%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20ARM64%20%7C%20x86__64-lightgrey.svg)]()
 
 ---
 
 ## Overview
 
-The EdgeFirst Camera Node is a high-performance camera service designed for edge AI perception systems. It interfaces directly with camera hardware through V4L2, provides zero-copy DMA buffer access for ultra-low latency pipelines, and publishes ROS2-compatible messages over Zenoh for seamless integration with robotics and vision ecosystems.
+The EdgeFirst Camera Node is a high-performance camera service designed for edge AI perception systems. It captures through the EdgeFirst Camera SDK (`crates/camera`, V4L2 on Linux), provides zero-copy DMA buffer access for ultra-low latency pipelines, and publishes ROS2-compatible messages over Zenoh for seamless integration with robotics and vision ecosystems.
 
 **Key Features:**
 
 - 🎥 **ROS2 Compatibility** - Standard `sensor_msgs` interfaces for drop-in integration
 - ⚡ **Zero-Copy DMA** - Direct memory access for latency-critical vision pipelines
-- 🚀 **Hardware Acceleration** - NXP G2D format conversion and H.264 encoding
+- 🚀 **Hardware Acceleration** - Image conversion and scaling through the EdgeFirst HAL, and V4L2 hardware H.264 encoding
 - 📦 **Multi-Format Output** - Raw DMA, JPEG, and H.264 streams from single capture
 - 🔧 **Flexible Transport** - Native Zenoh with optional ROS2 bridge compatibility
 - 📊 **Production Ready** - Tracy profiling, journald logging, comprehensive error handling
 - 🎬 **4K Support** - Automatic tiling for high-resolution cameras
+- 💾 **Record and Replay** - Record the H.264 stream with a JSON sidecar and replay it through the same pipeline
 
 ---
 
@@ -65,7 +66,7 @@ graph LR
 
 **What the Camera Node Does:**
 
-- **Captures** frames from hardware cameras (MIPI CSI-2, USB UVC)
+- **Captures** frames from hardware cameras (MIPI CSI-2, USB UVC), or replays a recording
 - **Processes** frames with hardware-accelerated format conversion and scaling
 - **Encodes** video streams (JPEG for visualization, H.264 for recording)
 - **Publishes** to Zenoh topics using ROS2 message formats
@@ -75,7 +76,7 @@ graph LR
 
 - **Vision Models**: Consume raw DMA buffers for real-time object detection, classification, segmentation
 - **Fusion Models**: Combine camera data with radar/LiDAR for multi-modal perception
-- **Recording**: MCAP format recording for dataset collection and replay
+- **Recording**: The node records its own H.264 stream as raw Annex-B with a JSON sidecar, and replays it (see [Recording and Replay](#recording-and-replay))
 - **Web UI**: Live JPEG/H.264 streaming for monitoring and debugging
 - **Custom Applications**: ROS2-compatible message access via zenoh-bridge-dds
 
@@ -96,7 +97,7 @@ graph LR
 **Software:**
 
 - Linux kernel 5.10+ with V4L2 support
-- Rust 1.90.0 or later (for building from source)
+- Rust 1.94 or later (for building from source)
 - OR: Pre-built binaries from [GitHub Releases](https://github.com/EdgeFirstAI/camera/releases)
 
 ### Installation
@@ -206,7 +207,7 @@ The camera node publishes standard ROS2 message types using CDR serialization, e
 | `camera/h264/br` | `foxglove_msgs/CompressedVideo` | 4K tile: bottom-right (1080p) |
 | `tf_static` | `geometry_msgs/TransformStamped` | Camera frame transform |
 
-In live capture, every frame-tied topic (`camera/frame`, `camera/info`, `camera/jpeg`, `camera/h264` and the tiles) is stamped with the frame's acquisition time: the V4L2 capture timestamp converted to `CLOCK_REALTIME`. The Zenoh sample timestamp carries the same instant. Stamps follow wall-clock steps (for example NTP or GNSS sync after boot) without a service restart. `tf_static` is stamped at each 1 Hz republish. In replay mode (`--replay`) there is no acquisition time: frames are stamped with `CLOCK_REALTIME` at the publish instant, so the original recording times are not preserved. See [ARCHITECTURE.md](ARCHITECTURE.md#timestamps).
+In live capture, every frame-tied topic (`camera/frame`, `camera/info`, `camera/jpeg`, `camera/h264` and the tiles) is stamped with the frame's acquisition time: the V4L2 capture timestamp converted to `CLOCK_REALTIME`. The Zenoh sample timestamp carries the same instant. Stamps follow wall-clock steps (for example NTP or GNSS sync after boot) without a service restart. `tf_static` is stamped at each 1 Hz republish. When replaying a `file:` source there is no acquisition time: each frame is stamped with `CLOCK_REALTIME` when it is delivered for playback, so the original recording times are not preserved. See [ARCHITECTURE.md](ARCHITECTURE.md#timestamps).
 
 **ROS2 Bridge Integration:**
 
@@ -234,7 +235,8 @@ subscriber.on_message(|payload| {
     let t = cf.tensor();
     let plane = t.plane_at(0)?;
     // t.pid() + plane.handle: dma-buf fd in the producer
-    // t.shape(): [height, width]; t.format(): "YUYV" / "NV12" / ...
+    // t.shape(): [h, w] for NV12, [h, w, 2] for YUYV; t.format(): HAL name, "YUYV" / "NV12" / ...
+    // NV12 frames carry two planes: Y, then interleaved UV
     // plane.offset / stride / size / used: memory layout
 
     let local_fd = pidfd_getfd(t.pid(), plane.handle as RawFd)?;
@@ -252,19 +254,21 @@ subscriber.on_message(|payload| {
 
 ### Hardware Acceleration
 
-**NXP i.MX8 G2D Engine:**
+**Image Conversion (EdgeFirst HAL `edgefirst-image`):**
 
-- Format conversion: YUYV → NV12, RGB, RGBA (hardware accelerated)
-- Scaling: 4K → 1080p, arbitrary resolutions
-- Rotation: 90°, 180°, 270° hardware rotation
-- Mirroring: Horizontal, vertical, both
+- The HAL's `ImageProcessor` picks OpenGL, then G2D, then CPU, whichever the platform offers
+- Format conversion: to RGBA for JPEG, and to YUYV (or RGBA) for H.264 only when the encoder does not take the capture format at the stream size
+- Scaling from the capture size to `--stream-size`
+- Mirroring, when the camera cannot mirror itself
 
-**H.264 Hardware Encoder:**
+**H.264 Hardware Encoder (EdgeFirst HAL `edgefirst-codec`):**
 
-- Real-time encoding up to 4K @ 30 FPS
+- V4L2 memory-to-memory encoder (vsi_v4l2 on i.MX 8M Plus), up to 1920×1080 per stream
 - Configurable bitrate (5/25/50/100 Mbps)
 - Automatic tiling for resolutions > 1080p
 - Tile-specific FPS control to reduce artifacts
+
+**JPEG:** software encoding with libjpeg-turbo (`turbojpeg`); the i.MX 8M Plus has no hardware JPEG encoder.
 
 ### 4K Tiling for High-Resolution Cameras
 
@@ -295,7 +299,6 @@ graph TB
 - **Hardware Limitation**: NXP H.264 encoder max resolution is 1920×1080
 - **Parallel Processing**: 4 encoder instances for higher throughput
 - **Artifact Reduction**: Lower FPS per tile reduces compression artifacts at 4K
-- **Bandwidth Control**: Disable specific tiles if not needed
 
 ---
 
@@ -309,11 +312,22 @@ edgefirst-camera --help
 
 **Essential Options:**
 
-- `--camera <PATH>` - Camera device path (default: `/dev/video3`)
-- `--camera-mode <MODE>` - Capture mode: `SIZExFPS` (`1080p30`) or FPS-only (`30FPS`). Unset probes the live device.
-- `--camera-size <WIDTH> <HEIGHT>` - Capture resolution when `--camera-mode` is unset or FPS-only. Unset probes the live device.
+- `--source <SOURCE>` - Frame source: a V4L2 device path (`/dev/video3`), `file:<name>.h264` for a recording with its `<name>.json` sidecar, or `mock[:WxH@fps]` for synthetic frames. Unset uses `--camera`.
+- `--camera <PATH>` - Camera device path, used when `--source` is unset (default: `/dev/video3`)
+- `--memory <auto|import|export>` - Capture buffer allocation: `import` this service's contiguous buffers, `export` the driver's own, or `auto` to import and fall back to the driver's buffers when it refuses them (default: `auto`)
+- `--camera-size <WIDTH> <HEIGHT>` - Requested capture resolution. Unset keeps the camera's current size.
+- `--camera-fps <FPS>` - Requested capture rate. Unset keeps the camera's current rate. For a `file:` source, the playback rate (default: the recording's).
+- `--camera-mode <MODE>` - Shorthand for `--camera-size` plus `--camera-fps`: a size name (`VGA`, `WVGA`, `540p`, `720p`, `1080p`, `4K`) followed by the rate, for example `1080p30`. Accepted only when the camera reports that mode; otherwise startup fails and lists the modes the camera offers. Explicit `--camera-size` and `--camera-fps` win over it with a warning. The rate-only form (`30FPS`) is no longer accepted; use `--camera-fps`. Not accepted for `file:` or `mock` sources.
 - `--stream-size <WIDTH> <HEIGHT>` - Output resolution for JPEG/H264 (default: `1920 1080`)
 - `--mirror <none|horizontal|vertical|both>` - Flip the image into its natural orientation (default: `both`). See [Camera Orientation](#camera-orientation).
+
+**Camera Controls:**
+
+- `--exposure <auto|MICROSECONDS>` - Exposure: `auto`, or a fixed exposure time in microseconds
+- `--gain <auto|MULTIPLIER>` - Analogue gain: `auto`, or a fixed gain multiplier
+- `--white-balance <auto|KELVIN>` - White balance: `auto`, or a fixed colour temperature in kelvin
+
+Unset controls keep the camera's setting. A camera that does not offer a control logs a warning.
 
 **Output Formats:**
 
@@ -332,21 +346,21 @@ edgefirst-camera --help
 
 - `--h264-bitrate <auto|mbps5|mbps25|mbps50|mbps100>` - H264 bitrate (default: `auto`)
 - `--h264-tiles-fps <FPS>` - FPS limit for 4K tiles (default: `15`)
-- `--camera-buffers <N>` - V4L2 capture buffers to request, 2–32 (default: unset, which uses 4). Subscribers of `--frame-topic` must read each frame within about `N - 1` frame periods before the driver overwrites its DMA buffer: 100 ms with 4 buffers at 30 FPS, 50 ms at 60 FPS. Each extra buffer costs one capture frame of CMA memory.
+- `--camera-buffers <N>` - Capture buffers, 2–32 (default: `4`). Subscribers of `--frame-topic` must read each frame within about `N - 1` frame periods before the camera overwrites its DMA buffer: 100 ms with 4 buffers at 30 FPS, 50 ms at 60 FPS. Each buffer costs one capture frame of CMA memory. The service adds two buffers of its own while H.264, tiles or JPEG is on, for frames waiting for its encoders.
 
 **Recording and Replay:**
 
-- `--record <PATH>` - Record the live H.264 stream to `<PATH>` as raw Annex-B. Writes a `<PATH>.json` sidecar alongside. Requires `--h264`.
-- `--replay <PATH>` - Replay a previously recorded file instead of opening a camera. Requires the matching `.json` sidecar.
-- `--replay-loop` - Loop replay back to the start on EOF. `CameraFrame.seq` keeps incrementing across loops.
-- `--replay-fps <N>` - Override playback rate (defaults to the sidecar's recorded fps).
+- `--record <PATH>` - Record the live H.264 stream to `<PATH>` as raw Annex-B. Writes a `<name>.json` sidecar alongside. Requires `--h264` and a camera source.
+- `--source file:<PATH>` - Replay a recording instead of opening a camera. Requires the matching `.json` sidecar. `--replay <PATH>` is a deprecated alias that logs a warning.
+- `--replay-loop` - Loop a `file:` source back to the start at its end. `CameraFrame.seq` keeps incrementing across loops.
+- `--replay-fps <N>` - Playback rate of a `file:` source; an alias of `--camera-fps`, which wins when both are set (default: the sidecar's recorded rate).
 
 **Zenoh Configuration:**
 
-- `--zenoh-config <FILE>` - Zenoh config file (JSON or JSON5)
+- `--mode <peer|client|router>` - Zenoh participant mode (default: `peer`)
 - `--connect <ENDPOINT>` - Connect to Zenoh router
 - `--listen <ENDPOINT>` - Listen for Zenoh connections
-- `--mode <peer|client|router>` - Zenoh participant mode (default: `peer`)
+- `--no-multicast-scouting` - Disable Zenoh multicast peer discovery
 
 **Debugging:**
 
@@ -358,6 +372,8 @@ edgefirst-camera --help
 ### Camera Orientation
 
 `MIRROR` exists only to publish the image in its natural orientation, upright as a person would view the scene. It undoes how the sensor is mounted: Maivin and Raivin mount the camera upside down, so the default `both` (a horizontal plus vertical flip, which is a 180° rotation) makes the output upright.
+
+Mirroring is requested from the camera. When the camera cannot mirror (the control is unsupported or fails), the service logs a warning, mirrors the JPEG and H.264 outputs in its encoders, and publishes `camera/frame` unmirrored.
 
 Downstream applications, including fusion, assume the published image is in its natural orientation:
 
@@ -379,26 +395,12 @@ export H264=true
 edgefirst-camera  # Uses environment configuration
 ```
 
-### Zenoh Configuration File
+### Zenoh Networking
 
-For complex deployments, use a Zenoh configuration file:
-
-```json5
-{
-  mode: "client",
-  connect: {
-    endpoints: ["tcp/192.168.1.100:7447"]
-  },
-  scouting: {
-    multicast: {
-      enabled: false
-    }
-  }
-}
-```
+The Zenoh session is configured with `MODE`, `CONNECT`, `LISTEN` and `NO_MULTICAST_SCOUTING`; there is no Zenoh configuration file option. For example, to connect to a router without multicast discovery:
 
 ```bash
-edgefirst-camera --zenoh-config /etc/edgefirst/zenoh.json5
+edgefirst-camera --mode client --connect tcp/192.168.1.100:7447 --no-multicast-scouting
 ```
 
 ---
@@ -410,7 +412,7 @@ The camera node ships built-in recording and replay of the H.264 stream, intende
 ### Recording
 
 ```bash
-# Record 30 seconds of H.264 to a file (requires --h264).
+# Record H.264 to a file (requires --h264 and a camera source).
 edgefirst-camera --camera /dev/video0 --h264 --record capture.h264
 ```
 
@@ -425,20 +427,27 @@ The tap is inside the h264 encode thread and runs **before** the Zenoh publish, 
 
 ```bash
 # Replay the recorded pair — camera device is not opened.
-edgefirst-camera --replay capture.h264
+edgefirst-camera --source file:capture.h264
 
 # Loop indefinitely; seq keeps incrementing across loop boundaries.
-edgefirst-camera --replay capture.h264 --replay-loop
+edgefirst-camera --source file:capture.h264 --replay-loop
 
 # Override playback rate.
-edgefirst-camera --replay capture.h264 --replay-fps 15
+edgefirst-camera --source file:capture.h264 --camera-fps 15
+
+# JPEG works on replay too.
+edgefirst-camera --source file:capture.h264 --jpeg
 ```
 
-Replay publishes on the same topics and schemas as live capture — subscribers see identical on-wire data. `/camera/info`, `/tf_static`, and the CameraFrame tensor colorimetry fields come from the sidecar, not from CLI flags (any `--cam-info-path`, `--cam-tf-*`, or `--base-frame-id` flags supplied at replay time are ignored with a warning).
+The recording is decoded with the platform's V4L2 H.264 decoder, so replay needs Linux with a hardware decoder (for example the i.MX 8M Plus). `--replay <PATH>` still works as a deprecated alias for `--source file:<PATH>` and logs a warning.
 
-The `camera/h264` topic forwards the recorded Annex-B bytes **verbatim** — no re-encode. `camera/frame` is built from the decoded NV12 frame.
+Replay publishes on the same topics and schemas as live capture — subscribers see identical on-wire data. `/camera/info`, `/tf_static`, and the CameraFrame tensor colorimetry fields come from the sidecar; the recording's values win over `--cam-info-path`, `--cam-tf-vec`, `--cam-tf-quat` and `--base-frame-id`.
 
-**Not supported with `--replay`:** `--jpeg`, `--h264-tiles` (recorded files carry only the main H.264 stream). Use the live path if you need JPEG or tile output.
+The `camera/h264` topic forwards the recorded Annex-B bytes **verbatim** — no re-encode. `camera/frame` publishes the decoded NV12 frames, and `--jpeg` compresses them.
+
+`--mirror` and `--stream-size` do not apply to a `file:` source: the recording was mirrored when it was made, and every output keeps the recording's size. H.264 tiles are encoded from the decoded frames, so, as with live capture, they apply only to recordings larger than 1080p.
+
+The sidecar format (version 1) is unchanged from 2.x, so 2.x recordings replay.
 
 ### Playback outside the camera service
 
@@ -479,8 +488,9 @@ edgefirst-camera --tracy --camera /dev/video0 --jpeg --h264
 |----------|--------------|--------|-------|
 | Maivin + Raivin | ARM64 (i.MX8M Plus) | ✅ Fully Supported | Primary target, all features |
 | NXP i.MX8M Plus EVK | ARM64 | ✅ Supported | Hardware acceleration available |
-| Generic ARM64 Linux | ARM64 | ⚠️ Partial | Software fallback (no G2D/HW H.264) |
-| x86_64 Linux | x86_64 | ⚠️ Development Only | Software encoding only, slower |
+| Generic ARM64 Linux | ARM64 | ⚠️ Partial | Conversion falls back to OpenGL or CPU; H.264 and replay need a V4L2 hardware encoder and decoder |
+| x86_64 Linux | x86_64 | ⚠️ Development Only | Usually no V4L2 H.264 encoder; use `--h264 false` or the `mock` source |
+| macOS, Windows | — | ❌ Not supported | Only the SDK crate (`crates/camera`) builds there |
 
 ### Camera Compatibility
 
@@ -515,11 +525,11 @@ cd camera
 # Build with all features
 cargo build --release
 
-# Run tests
-cargo test
+# Run tests (application and SDK)
+cargo test --workspace
 
-# Run benchmarks (requires hardware)
-cargo bench
+# Run the SDK capture benchmarks (requires a V4L2 camera)
+cargo bench -p edgefirst-camera --bench capture
 
 # Generate documentation
 cargo doc --no-deps --open
@@ -527,17 +537,20 @@ cargo doc --no-deps --open
 
 ### Project Structure
 
-```
+```text
 camera/
-├── src/
-│   ├── main.rs          # Main loop, Zenoh publishers, thread coordination
-│   ├── image.rs         # DMA allocation, G2D operations, JPEG encoding
-│   ├── video.rs         # H264 encoding, 4K tiling
-│   ├── args.rs          # CLI argument parsing
-│   └── lib.rs           # Public library interface
-├── tests/               # Integration tests
-├── benches/             # Performance benchmarks
-├── Cargo.toml           # Project dependencies
+├── src/                 # edgefirst-camera application (binary only)
+│   ├── main.rs          # Startup, logging, Zenoh session
+│   ├── args.rs          # CLI arguments and environment variables
+│   ├── source.rs        # Opening the source, ISP-not-ready retry, capture pool, mirroring
+│   ├── pipeline.rs      # Capture loop, publishers, encoder threads, drop reports, tf_static
+│   ├── encode.rs        # H.264 main stream and 4K tiles
+│   ├── jpeg.rs          # JPEG compression
+│   └── messages.rs      # camera/info, tf_static, compressed payloads, Zenoh timestamps
+├── crates/camera/       # edgefirst-camera SDK (V4L2, file and mock sources)
+├── tests/               # Application integration tests (env_scrub.rs, on_target.rs)
+├── camera.default       # systemd EnvironmentFile reference
+├── Cargo.toml           # Workspace and application manifest
 └── README.md            # This file
 ```
 
@@ -613,7 +626,7 @@ ros2 topic list | grep camera
 RUST_LOG=debug edgefirst-camera
 
 # Filter specific module
-RUST_LOG=edgefirst_camera::image=trace edgefirst-camera
+RUST_LOG=edgefirst_camera::pipeline=trace edgefirst-camera
 
 # View systemd journal logs
 journalctl -u edgefirst-camera -f

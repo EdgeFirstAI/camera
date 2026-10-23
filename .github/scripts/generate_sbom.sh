@@ -31,7 +31,7 @@ PROJECT_TYPE="application"  # Options: library, application, framework
 VERSION_FILE="Cargo.toml"  # Single source of truth for version
 
 # Source directories to scan (space-separated)
-SOURCE_DIRS="src tests benches crates"
+SOURCE_DIRS="src tests crates"
 
 # Package manifest files (for dependency parsing)
 MANIFEST_FILES="Cargo.toml Cargo.lock"

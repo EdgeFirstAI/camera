@@ -12,52 +12,84 @@
 #   - No spaces around the '=' sign.
 
 # ---------------------------------------------------------------------------
-# Camera Device
+# Frame Source
 # ---------------------------------------------------------------------------
-# V4L2 device path for the camera. Use `v4l2-ctl --list-devices` to find
-# available cameras. On Maivin boards video3 is typically the ISP output.
+# Where frames come from. One of:
+#   /dev/videoN            a V4L2 camera device
+#   file:<name>.h264       a recording made with RECORD, with its <name>.json
+#   mock[:WxH@fps]         synthetic frames, for testing without a camera
+# Leave empty to use CAMERA.
+SOURCE=""
+
+# V4L2 device path for the camera, used when SOURCE is empty. On Maivin boards
+# video3 is typically the ISP output.
 CAMERA="/dev/video3"
+
+# How capture buffers are allocated: "import" this service's contiguous
+# buffers, "export" the driver's own, or "auto" to import and fall back to the
+# driver's buffers when it refuses them.
+MEMORY="auto"
+
+# libcamera pipeline selection, i.MX 95 only. Makes libcamera use the nxp/neo
+# ISP pipeline instead of the raw-only imx8-isi one. On other platforms, such
+# as the Raspberry Pi 5, it hides the camera, so leave it commented out there.
+#LIBCAMERA_PIPELINES_MATCH_LIST="nxp/neo"
 
 # ---------------------------------------------------------------------------
 # Camera Capture
 # ---------------------------------------------------------------------------
-# Native capture resolution requested from the camera driver (width height).
-# Leave empty to use CAMERA_MODE when that is a combined SIZExFPS value,
-# otherwise the live device size from VIDIOC_G_FMT. Set this for sensors
-# whose resolution is not one of the named CAMERA_MODE sizes.
+# Size and rate are requests: the camera applies what it can, and the service
+# logs what was applied.
+
+# Capture resolution requested from the camera (width height). Leave empty to
+# keep the camera's current size.
 CAMERA_SIZE=""
 
-# Capture mode. Two forms, case-insensitive:
-#   SIZExFPS  e.g. VGA30, WVGA15, 540p24, 720p30, 1080p30, 4K30
-#             Sizes: VGA 640x480, WVGA 800x480, 540p 960x540,
-#             720p 1280x720, 1080p 1920x1080, 4K 3840x2160.
-#             Combined modes override CAMERA_SIZE.
-#   FPS-only  e.g. 30FPS — only the frame rate; resolution comes from
-#             CAMERA_SIZE or the live device.
-# Leave empty (with CAMERA_SIZE empty) to probe the current camera
-# configuration. Product images such as Maivin set CAMERA_MODE=1080p30
-# via a bbappend, not this file.
+# Capture rate requested from the camera, in frames per second. Leave empty to
+# keep the camera's current rate. For a file: source, the playback rate
+# (empty plays at the recorded rate).
+CAMERA_FPS=""
+
+# Capture mode shorthand for CAMERA_SIZE plus CAMERA_FPS, case-insensitive:
+#   VGA, WVGA, 540p, 720p, 1080p or 4K followed by the rate, e.g. 1080p30.
+#   Sizes: VGA 640x480, WVGA 800x480, 540p 960x540, 720p 1280x720,
+#   1080p 1920x1080, 4K 3840x2160.
+# Accepted only when the camera reports that size and rate; otherwise the
+# service fails to start and lists the modes the camera offers. CAMERA_SIZE
+# and CAMERA_FPS win over it when set. The rate-only form (30FPS) is no longer
+# accepted; use CAMERA_FPS. Product images such as Maivin set
+# CAMERA_MODE=1080p30 via a bbappend, not this file.
 CAMERA_MODE=""
 
-# Number of V4L2 capture buffers (2-32). Every frame published on
-# FRAME_TOPIC references one of these DMA buffers, which the driver
-# overwrites once the frames queued ahead of it are captured. Subscribers
-# such as the model and fusion services must read a frame within about
-# (CAMERA_BUFFERS - 1) frame periods: 100 ms with 4 buffers at 30 FPS,
-# but only 50 ms at 60 FPS. More buffers give subscribers more time and
-# add no latency while this service keeps up; each one costs one capture
-# frame of CMA memory (about 4 MB at 1080p YUYV). Use 6 or more when
-# downstream services pair frames with slower sensors such as radar.
-# Leave empty for the default of 4.
+# Number of capture buffers (2-32). Every frame published on FRAME_TOPIC
+# references one of these DMA buffers, which the camera overwrites once the
+# frames queued ahead of it are captured. Subscribers such as the model and
+# fusion services must read a frame within about (CAMERA_BUFFERS - 1) frame
+# periods: 100 ms with 4 buffers at 30 FPS, but only 50 ms at 60 FPS. More
+# buffers give subscribers more time and add no latency while this service
+# keeps up; each one costs one capture frame of CMA memory (about 4 MB at
+# 1080p YUYV). Use 6 or more when downstream services pair frames with slower
+# sensors such as radar. The service adds two buffers of its own while H264,
+# H264_TILES or JPEG is on, for frames waiting for its encoders. Leave empty
+# for the default of 4.
 CAMERA_BUFFERS=""
+
+# Camera controls: "auto", or a fixed value. Leave empty to keep the camera's
+# setting. A camera that does not offer a control logs a warning.
+# Exposure time in microseconds.
+EXPOSURE=""
+# Analogue gain multiplier.
+GAIN=""
+# White balance colour temperature in kelvin.
+WHITE_BALANCE=""
 
 # ---------------------------------------------------------------------------
 # Streaming Resolution
 # ---------------------------------------------------------------------------
-# Resolution used for H.264 and JPEG encoding output (width height). The
-# hardware H.264 encoder supports up to 1920x1080. If the capture size is larger
-# (e.g. 4K), frames are downscaled to STREAM_SIZE before encoding unless
-# H264_TILES is enabled.
+# Resolution used for H.264 and JPEG encoding output (width height), no larger
+# than the capture size. The hardware H.264 encoder supports up to 1920x1080; a
+# larger capture (e.g. 4K) is downscaled to STREAM_SIZE for the main stream,
+# and H264_TILES is turned on to publish it at full resolution.
 STREAM_SIZE="1920 1080"
 
 # ---------------------------------------------------------------------------
@@ -129,11 +161,10 @@ JPEG_QUALITY="85"
 # ---------------------------------------------------------------------------
 # Recording and Replay
 # ---------------------------------------------------------------------------
-# Record the live H.264 stream to a file, as raw Annex-B. Requires H264,
-# and cannot be combined with REPLAY. A matching <path>.json sidecar is
-# written alongside at startup carrying colorimetry, camera/info and
-# tf_static -- the producer state that is not recoverable from the
-# bitstream.
+# Record the H.264 stream to a file, as raw Annex-B. Requires H264 and a
+# camera source. A matching <name>.json sidecar is written alongside at
+# startup carrying colorimetry, camera/info and tf_static -- the producer
+# state that is not recoverable from the bitstream.
 #
 # WARNING: this writes continuously for as long as the service runs, with
 # no size cap and no rotation. Left set in this file it will fill the
@@ -141,19 +172,18 @@ JPEG_QUALITY="85"
 # not intended as a persistent setting.
 RECORD=""
 
-# Replay a previously recorded .h264 file instead of opening the camera.
-# Requires the matching <path>.json sidecar. Cannot be combined with
-# RECORD, JPEG, or H264_TILES -- a recording carries only the main H.264
-# stream.
-REPLAY=""
+# To replay a recording instead of opening the camera, set
+# SOURCE="file:<name>.h264". The recording's H.264 is republished as recorded,
+# its frames are decoded for FRAME_TOPIC and JPEG, and camera/info and
+# tf_static come from its sidecar. MIRROR and STREAM_SIZE do not apply.
 
-# Loop the replay back to the start on EOF instead of exiting. The frame
-# sequence counter keeps incrementing across the loop boundary so
-# consumers see one continuous stream, as they would from a live camera.
+# Loop a file: source back to the start at its end instead of exiting. The
+# frame sequence counter keeps incrementing across loops so consumers see one
+# continuous stream, as they would from a live camera.
 REPLAY_LOOP="false"
 
-# Override the replay frame rate. Empty uses the rate recorded in the
-# sidecar.
+# Playback rate of a file: source; the 2.x name of CAMERA_FPS, which wins when
+# both are set. Empty uses the rate recorded in the sidecar.
 REPLAY_FPS=""
 
 # ---------------------------------------------------------------------------

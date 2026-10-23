@@ -121,8 +121,9 @@ fn record_then_replay() -> Result<(), Box<dyn Error>> {
         let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(sidecar(&recording))?)?;
         assert!(meta.is_object(), "sidecar is not a JSON object: {meta}");
 
+        let source = format!("file:{path}");
         run_for(
-            &["--replay", path, "--replay-loop"],
+            &["--source", &source, "--replay-loop", "--jpeg"],
             Duration::from_secs(10),
         )
     })();

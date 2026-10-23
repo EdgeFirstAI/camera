@@ -31,14 +31,6 @@ debug = true
 members = ["crates/camera"]
 resolver = "2"
 
-[[bench]]
-name = "encode"
-harness = false
-
-[[bench]]
-name = "convert"
-harness = false
-
 [[test]]
 name = "env_scrub"
 harness = false
@@ -56,13 +48,12 @@ profiling = [
 [dependencies]
 clap = { version = "4.6.7", features = ["derive", "env"] }
 console-subscriber = "0.5.0"
-dma-buf = "0.5.0"
-dma-heap = "0.4.1"
+edgefirst-camera = { version = "3.0.0-dev", path = "crates/camera", features = ["mock", "file", "schemas"] }
+edgefirst-codec = { version = "0.36.0", default-features = false, features = ["v4l2"] }
+edgefirst-image = { version = "0.36.0", default-features = false, features = ["opengl"] }
 edgefirst-schemas = "4.0.0"
 edgefirst-tensor = { version = "0.36.0", default-features = false }
-g2d-sys = "1.3.1"
 kanal = { git = "https://github.com/fereidani/kanal", rev = "b6aeab2" }
-libc = "0.2.189"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = [
@@ -89,11 +80,9 @@ tracy-client = { version = "0.19.0", default-features = false, features = [
     "fibers",
 ] }
 turbojpeg = { version = "1.5.1", features = ["image", "require-simd"] }
-unix-ts = "1.0.0"
-videostream = "2.6.0"
 zenoh = "1.10.1"
 gethostname = "1.1.0"
 
 [dev-dependencies]
-criterion = { version = "0.8.2", features = ["html_reports"] }
+libc = "0.2.189"
 serial_test = "4.0.1"

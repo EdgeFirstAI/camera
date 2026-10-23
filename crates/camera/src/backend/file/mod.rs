@@ -19,7 +19,6 @@
 
 mod annexb;
 mod decode;
-mod sidecar;
 
 use std::collections::VecDeque;
 use std::fs::File;
@@ -33,9 +32,9 @@ use edgefirst_tensor::{PixelFormat, TensorDyn};
 
 use self::annexb::AccessUnitReader;
 use self::decode::{Decode, DecodeError, Event, Format, HalDecoder, Picture};
-use self::sidecar::Sidecar;
 use crate::builder::Source;
 use crate::frame::TensorHolder;
+use crate::Sidecar;
 use crate::{
     timestamp, Applied, Backend, BufferPool, Camera, CameraBuilder, CameraDescriptor, CaptureClock,
     CaptureStats, Contiguity, Control, ControlId, ControlInfo, ControlSet, ControlValue, Error,

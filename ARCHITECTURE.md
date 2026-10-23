@@ -2,740 +2,168 @@
 
 **Technical architecture documentation for developers**
 
-This document describes the internal architecture of the EdgeFirst Camera Node, focusing on thread models, data flow patterns, and system design decisions. For user-facing documentation, see [README.md](README.md).
+This document describes how the EdgeFirst Camera Node is built: its threads, how frames and their buffers move between them, and the design decisions behind them. For user-facing documentation, see [README.md](README.md). The capture library it is built on, the `edgefirst-camera` SDK, has its own [architecture document](crates/camera/ARCHITECTURE.md).
 
 ---
 
 ## Table of Contents
 
 1. [System Overview](#system-overview)
-2. [Thread Architecture](#thread-architecture)
-3. [Data Flow](#data-flow)
-4. [Message Formats](#message-formats)
-5. [Hardware Integration](#hardware-integration)
-6. [Record and Replay](#record-and-replay)
-7. [Instrumentation and Profiling](#instrumentation-and-profiling)
-8. [References](#references)
+2. [Startup](#startup)
+3. [Threads](#threads)
+4. [Buffers and Backpressure](#buffers-and-backpressure)
+5. [Encoding](#encoding)
+6. [Messages](#messages)
+7. [Timestamps](#timestamps)
+8. [Record and Replay](#record-and-replay)
+9. [Instrumentation and Profiling](#instrumentation-and-profiling)
+10. [References](#references)
 
 ---
 
 ## System Overview
 
-The EdgeFirst Camera Node is a multi-threaded, asynchronous application built on the Tokio async runtime. It implements a **producer-consumer pattern** where the main thread captures camera frames and distributes them to specialized encoding threads for parallel processing.
-
-### Architecture Diagram
-
-```mermaid
-graph TB
-    subgraph "Main Thread (Tokio Async Runtime)"
-        Camera["V4L2 Camera<br/>/dev/videoX<br/>30 FPS YUYV"]
-        CamRead["1. Camera Read<br/>(V4L2 blocking)"]
-        DMAPub["2. DMA Publish<br/>(Zenoh async)"]
-        InfoPub["3. CameraInfo Publish<br/>(Zenoh async)"]
-        Distribute["4. Frame Distribution"]
-        
-        Camera --> CamRead
-        CamRead --> DMAPub
-        CamRead --> InfoPub
-        CamRead --> Distribute
-    end
-    
-    subgraph "Encoding Threads"
-        JPEGThread["JPEG Thread<br/>1. Receive (DMA)<br/>2. G2D YUYV→RGBA<br/>3. JPEG Encode<br/>4. Publish"]
-        H264Thread["H264 Thread<br/>1. Receive (DMA)<br/>2. G2D YUYV→NV12<br/>3. H264 Encode<br/>4. Publish"]
-        TileThread1["Tile Thread 0<br/>(Top-Left)"]
-        TileThread2["Tile Thread 1<br/>(Top-Right)"]
-        TileThread3["Tile Thread 2<br/>(Bottom-Left)"]
-        TileThread4["Tile Thread 3<br/>(Bottom-Right)"]
-    end
-    
-    subgraph "Zenoh Topics"
-        DMATop["camera/frame<br/>edgefirst_msgs/CameraFrame"]
-        InfoTop["camera/info<br/>sensor_msgs/CameraInfo"]
-        JPEGTop["camera/jpeg<br/>sensor_msgs/CompressedImage"]
-        H264Top["camera/h264<br/>foxglove_msgs/CompressedVideo"]
-        TileTop["camera/h264/tl,tr,bl,br<br/>foxglove_msgs/CompressedVideo"]
-    end
-    
-    Distribute -->|"kanal channel<br/>(size 1)"| JPEGThread
-    Distribute -->|"kanal channel<br/>(size 1)"| H264Thread
-    Distribute -->|"kanal channel<br/>(size 3)"| TileThread1
-    Distribute -->|"kanal channel<br/>(size 3)"| TileThread2
-    Distribute -->|"kanal channel<br/>(size 3)"| TileThread3
-    Distribute -->|"kanal channel<br/>(size 3)"| TileThread4
-    
-    DMAPub --> DMATop
-    InfoPub --> InfoTop
-    JPEGThread --> JPEGTop
-    H264Thread --> H264Top
-    TileThread1 --> TileTop
-    TileThread2 --> TileTop
-    TileThread3 --> TileTop
-    TileThread4 --> TileTop
-    
-    subgraph "Background Task (Tokio)"
-        TFPub["TF Static Publisher<br/>1 Hz loop"]
-        TFTop["tf_static<br/>geometry_msgs/TransformStamped"]
-        TFPub --> TFTop
-    end
-```
-
-### Key Architectural Properties
-
-- **Lock-Free Communication**: Threads communicate via bounded SPSC (Single Producer, Single Consumer) channels using the `kanal` crate
-- **Zero-Copy DMA**: Camera buffers are DMA-backed; only metadata is passed between threads
-- **Backpressure Handling**: Bounded channels with size 1-3; older frames dropped if consumer is slow
-- **Async Main Thread**: Tokio runtime for Zenoh publishing (I/O-bound operations)
-- **Dedicated Encoder Threads**: Synchronous encoding threads with their own Tokio runtimes for publishing
-- **Parallel Processing**: Up to 6 encoding threads running simultaneously (1 JPEG + 1 H264 + 4 tiles)
-
----
-
-## Thread Architecture
-
-### Main Thread (Tokio Multi-Threaded Runtime)
-
-**Responsibilities:**
-
-- Camera frame capture (V4L2 blocking read)
-- CameraFrame publishing (Zenoh async)
-- CameraInfo publishing (Zenoh async)
-- Frame distribution to encoder threads
-- FPS monitoring and warnings
-
-**Execution Model:**
-
-The main thread executes within a Tokio async runtime (`#[tokio::main]`) and performs the following operations:
-
-1. **Initialization:** Open V4L2 camera device with configured resolution and format
-2. **Channel Creation:** Create bounded channels (size 1) for communication with encoder threads
-3. **Thread Spawning:** Start dedicated encoder threads (JPEG, H264, TensorFlow)
-4. **Main Capture Loop:**
-   - **BLOCKING:** Read frame from camera using V4L2 API
-   - **ASYNC:** Publish CameraFrame (embedded Tensor + dma-buf plane) to Zenoh
-   - **ASYNC:** Publish camera calibration info to Zenoh
-   - **NON-BLOCKING:** Send frames to encoder threads via channels
-        jpeg_tx.try_send(Image::from_camera(&camera_buffer));
-        h264_tx.try_send(Image::from_camera(&camera_buffer));
-
-        // If channels full, frames are dropped (backpressure)
-    }
-}
-```
-
-**Why Async Main Thread?**
-
-- **Zenoh is async-first**: Efficient I/O multiplexing for network publishing
-- **Non-blocking publish**: Camera read loop doesn't wait for network I/O
-- **Concurrent publishing**: Multiple Zenoh PUT operations in flight simultaneously
-
-**Thread Count:** 1 main thread (Tokio work-stealing thread pool: 4-8 worker threads for async tasks)
-
----
-
-### JPEG Encoder Thread
-
-**Lifecycle:**
-
-The JPEG encoder thread is spawned using `thread::Builder` with a named thread. Each encoder thread creates its own dedicated single-threaded Tokio runtime to handle async Zenoh publishing independently from the main thread's runtime.
-
-See `src/main.rs` for thread creation and `jpeg_task()` implementation.
-
-**Processing Pipeline:**
-
-```
-[Receive]     Blocking read from kanal channel
-   ↓          (blocks until frame available or shutdown)
-[Convert]     G2D hardware: YUYV → RGBA
-   ↓          DMA-to-DMA conversion
-[Encode]      turbojpeg software encoding
-   ↓          RGBA → JPEG
-[Serialize]   CDR: sensor_msgs/CompressedImage
-   ↓
-[Publish]     Zenoh async PUT
-   ↓          (async, batched with Tokio)
-```
-
-**Why Dedicated Thread?**
-
-- **CPU-bound work**: JPEG encoding is computationally expensive
-- **Isolated from main loop**: Encoding latency doesn't block camera capture
-- **Own Tokio runtime**: Independent async context for Zenoh publishing
-
-**Thread Count:** 1 (when `--jpeg` flag enabled)
-
----
-
-### H264 Encoder Thread
-
-**Processing Pipeline:**
-
-```
-[Receive]     Blocking read from kanal channel
-   ↓
-[Convert]     G2D hardware: YUYV → NV12
-   ↓          DMA-to-DMA conversion
-[Resize]      G2D hardware: Optional scaling
-   ↓          (if stream_size != camera_size)
-[Encode]      H264 hardware encoder (V4L2 M2M)
-   ↓          NV12 → H264 NAL units
-[Serialize]   CDR: foxglove_msgs/CompressedVideo
-   ↓
-[Publish]     Zenoh async PUT
-   ↓
-```
-
-**Thread Count:** 1 (when `--h264` flag enabled)
-
----
-
-### H264 Tile Encoder Threads (4K Mode)
-
-**Tile Distribution:**
+The service captures frames through the `edgefirst-camera` SDK and publishes them on Zenoh: every frame by reference as an `edgefirst_msgs/CameraFrame`, and compressed as JPEG and H.264. The SDK owns the camera: device negotiation, buffer pools, controls, and the acquisition time of each frame. The HAL does the pixel work: `edgefirst-image` converts and scales (OpenGL, G2D or CPU, chosen per conversion), and `edgefirst-codec` encodes H.264 on the platform's V4L2 memory-to-memory encoder. JPEG compression is turbojpeg.
 
 ```mermaid
 graph LR
-    subgraph "4K Frame (3840×2160)"
-        Frame["4K Camera Frame"]
+    subgraph Source["edgefirst-camera SDK"]
+        Cam["Box&lt;dyn Camera&gt;<br/>V4L2 device, file:, mock"]
     end
-    
-    subgraph "Tile Processing"
-        T0["Tile 0<br/>Top-Left<br/>Crop: (0,0)"]
-        T1["Tile 1<br/>Top-Right<br/>Crop: (1920,0)"]
-        T2["Tile 2<br/>Bottom-Left<br/>Crop: (0,1080)"]
-        T3["Tile 3<br/>Bottom-Right<br/>Crop: (1920,1080)"]
+    subgraph Capture["Capture thread"]
+        Loop["next_frame<br/>stamp once<br/>publish camera/frame, camera/info"]
     end
-    
-    Frame --> T0
-    Frame --> T1
-    Frame --> T2
-    Frame --> T3
-    
-    T0 --> E0["H.264 Encoder 0<br/>15 FPS"]
-    T1 --> E1["H.264 Encoder 1<br/>15 FPS"]
-    T2 --> E2["H.264 Encoder 2<br/>15 FPS"]
-    T3 --> E3["H.264 Encoder 3<br/>15 FPS"]
-```
-
-Each thread:
-
-- Independent kanal channel (size 3)
-- Independent Zenoh topic
-- Independent H264 encoder instance
-- FPS-limited (default 15 FPS vs camera 30 FPS)
-
-**Per-Tile Processing Pipeline:**
-
-```mermaid
-graph TD
-    Receive["Receive<br/>Blocking read from channel"] --> Crop["Crop<br/>G2D: Extract tile region<br/>3840×2160 → 1920×1080"]
-    Crop --> Convert["Convert<br/>G2D: YUYV → NV12"]
-    Convert --> Encode["Encode<br/>H.264 HW Encoder<br/>1920×1080"]
-    Encode --> Serialize["Serialize<br/>CDR: CompressedVideo"]
-    Serialize --> Publish["Publish<br/>Zenoh async PUT"]
-```
-
-**FPS Throttling:**
-
-- Tiles encode at lower FPS (default 15) than camera capture (30)
-- **Why?** Reduces H264 compression artifacts at 4K resolution
-- **How?** Frame skipping in receive loop based on timestamp
-
-**Thread Count:** 4 (when `--h264-tiles` flag enabled or camera resolution > 1080p)
-
----
-
-### TF Static Publisher (Background Task)
-
-**Execution:**
-
-The TF static publisher runs as a detached Tokio task spawned from the main async runtime.
-
-**Loop:**
-
-```
-[Sleep] 1 second
-   ↓
-[Publish] TransformStamped to tf_static
-   ↓
-[Repeat]
-```
-
-**Purpose:**
-
-- Publishes static transform from `camera_link` to `camera_optical_frame`
-- ROS2 convention: Camera frame needs transform for visualization (RViz, Foxglove)
-- Published continuously at 1 Hz for late-joining subscribers
-
-**Thread Count:** Runs on Tokio thread pool (not a dedicated thread)
-
----
-
-## Data Flow
-
-### Channel-Based Communication
-
-The camera node uses **bounded SPSC channels** from the `kanal` crate for inter-thread communication with configurable capacity.
-
-**Channel Sizes:**
-
-- **JPEG/H264 channels**: Capacity 1 (drop old frames if encoding is slow)
-- **Tile channels**: Capacity 3 (more tolerance for parallel encoding)
-
-**Send Logic (Main Thread):**
-
-The main thread uses non-blocking `try_send()` on bounded channels:
-- **Success:** Frame sent to encoder thread
-- **Full:** Frame dropped with warning logged (encoder is slow)
-- **Closed:** Error logged (encoder thread exited)
-
-This prevents the camera capture loop from blocking when encoders can't keep up.
-
-**Receive Logic (Encoder Threads):**
-
-Encoder threads use blocking `recv()` on channels, sleeping until frames are available. This approach minimizes CPU usage when the camera is idle.
-
-### Backpressure Strategy
-
-**Problem:** Encoder threads can't keep up with 30 FPS camera rate
-
-**Solution:** **Drop frames** (non-blocking send with bounded channels)
-
-**Alternatives Considered:**
-
-- ❌ **Unbounded channels**: Would lead to unbounded memory growth and latency
-- ❌ **Blocking send**: Would stall camera capture if encoder is slow
-- ✅ **Bounded + try_send**: Camera continues at full FPS, encoders get best-effort
-
-**Monitoring:**
-
-The main thread logs warnings when the measured FPS falls below 90% of the target FPS, indicating performance issues.
-
----
-
-### Zero-Copy DMA Buffer Sharing
-
-**Data Flow:**
-
-```mermaid
-graph TD
-    subgraph "DMA-Backed Memory (CMA)"
-        Buf0["Camera Buffer 0<br/>1920×1080 YUYV"]
-        Buf1["Camera Buffer 1<br/>1920×1080 YUYV"]
-        Buf2["Camera Buffer 2<br/>1920×1080 YUYV"]
+    subgraph Encoders["Encoder threads"]
+        H264["H.264<br/>VideoEncoder"]
+        Tiles["4 tiles (above 1080p)<br/>VideoEncoder + crop"]
+        JPEG["JPEG<br/>ImageProcessor + turbojpeg"]
     end
-    
-    V4L2["V4L2 Driver"] --> Buf0
-    V4L2 --> Buf1
-    V4L2 --> Buf2
-    
-    Buf0 --> CamBuf["CameraBuffer<br/>(DMA pointer wrapper)"]
-    CamBuf --> Img["Image<br/>(DMA fd + metadata)"]
-    Img -->|"Sent via channel<br/>(metadata only)"| Encoder["Encoder Thread<br/>(maps same DMA buffer)"]
-    
-    Encoder --> G2D["G2D Operation<br/>(DMA-to-DMA)"]
-    G2D --> DstBuf["Destination DMA Buffer<br/>(NV12/RGBA)"]
-    DstBuf --> EncOut["Encoded Output<br/>(JPEG/H.264)"]
+    TF["tf_static thread<br/>1 Hz"]
+    Z[("Zenoh")]
+    Cam --> Loop
+    Loop -- "Arc&lt;Frame&gt;, stamp" --> H264
+    Loop -- "Arc&lt;Frame&gt;, stamp" --> Tiles
+    Loop -- "Arc&lt;Frame&gt;, stamp" --> JPEG
+    Loop --> Z
+    H264 --> Z
+    Tiles --> Z
+    JPEG --> Z
+    TF --> Z
 ```
 
-**Key Point:** The actual pixel data never leaves DMA memory. Only metadata (file descriptor, dimensions, format) is passed between threads.
-
----
-
-## Message Formats
-
-All messages are serialized using **ROS2 CDR (Common Data Representation)** for compatibility with ROS2 ecosystems.
-
-### Camera Frame Message
-
-```rust
-// edgefirst_msgs/CameraFrame  (schemas 4.0: Header + seq + embedded Tensor)
-let cf = CameraFrame::from_cdr(&payload)?;
-let t = cf.tensor();
-// t.shape() == [height, width]; t.format() == "YUYV" / "NV12" / ...
-// t.pid() + plane.handle: dma-buf fd in the producer process
-// t.color_space / color_transfer / color_encoding / color_range
-```
-
-**Consumer Workflow:**
-
-Downstream vision models consume camera frames by:
-
-1. Decoding `edgefirst_msgs/CameraFrame` and reading the embedded `Tensor`
-2. Waiting on `tensor.fence_fd` when it is >= 0 (`pidfd_getfd` + `poll`)
-3. Mapping each `TensorPlane` with `handle >= 0` via `pidfd_getfd` / `mmap`
-4. Processing `[0, used)` of each plane (inference, display, recording)
-5. Unmapping buffers and closing imported file descriptors
-
-This zero-copy approach allows multiple consumers to access the same physical memory without data duplication. File descriptor passing uses the producer `pid` plus per-plane handles.
-
-### Camera Info Message
-
-```rust
-// sensor_msgs/CameraInfo
-pub struct CameraInfo {
-    pub header: Header,
-    pub height: u32,
-    pub width: u32,
-    pub distortion_model: String,  // "plumb_bob", "rational_polynomial", etc.
-    pub d: Vec<f64>,               // Distortion coefficients
-    pub k: [f64; 9],               // Intrinsic camera matrix (3x3)
-    pub r: [f64; 9],               // Rectification matrix (3x3)
-    pub p: [f64; 12],              // Projection matrix (3x4)
-    pub binning_x: u32,
-    pub binning_y: u32,
-    pub roi: RegionOfInterest,
-}
-```
-
-**Published Rate:** 30 Hz (same as camera FPS)
-
-**Purpose:**
-
-- Camera calibration for 3D reconstruction
-- Undistortion for vision algorithms
-- ROS2 ecosystem compatibility
-
-### Compressed Image Message (JPEG)
-
-```rust
-// sensor_msgs/CompressedImage
-pub struct CompressedImage {
-    pub header: Header,
-    pub format: String,           // "jpeg", "png", etc.
-    pub data: Vec<u8>,            // Compressed image bytes
-}
-```
-
-**Encoding:**
-
-- Format: JPEG (turbojpeg library with SIMD optimizations)
-- Quality: Configurable via turbojpeg (default: 95%)
-- Color Space: RGB (from YUYV via G2D)
-
-### Compressed Video Message (H264)
-
-```rust
-// foxglove_msgs/CompressedVideo
-pub struct FoxgloveCompressedVideo {
-    pub timestamp: Time,          // Frame capture time
-    pub frame_id: String,         // "camera_optical_frame"
-    pub data: Vec<u8>,            // H264 NAL units
-    pub format: String,           // "h264"
-}
-```
-
-**Encoding:**
-
-- Codec: H.264 (hardware encoder via V4L2 M2M)
-- Profile: High Profile
-- Bitrate: Configurable (auto, 5/25/50/100 Mbps)
-- GOP: 30 frames (1 second at 30 FPS)
-
----
-
-## Hardware Integration
-
-### V4L2 (Video for Linux 2) - Camera Interface
-
-**Initialization:**
-
-The camera is initialized using the `videostream` crate's builder pattern:
-- Device path (typically `/dev/video0`)
-- Resolution (e.g., 1920×1080 or 3840×2160)
-- Pixel format (YUYV for MIPI cameras)
-- Mirror settings (horizontal, vertical, or both)
-- Stream start (V4L2 `VIDIOC_STREAMON` ioctl)
-
-**Frame Capture:**
-
-Frames are captured using blocking reads that dequeue V4L2 buffers (`VIDIOC_DQBUF`). Each buffer provides:
-- DMA-backed memory pointer
-- Hardware timestamp from camera driver
-- Sequential frame number
-
-**Buffer Management:**
-
-- **Type:** V4L2_MEMORY_MMAP (memory-mapped)
-- **Queue Size:** `CAMERA_BUFFERS` (2–32), or 4 when unset (videostream default)
-- **Dequeue/Enqueue:** Handled by `videostream` library
-
-**Frame lifetime for subscribers:** a buffer is re-queued as soon as its frame is published, behind the buffers already queued. The driver starts overwriting it when the frame `N - 1` captures later begins, so a frame published on `FRAME_TOPIC` stays intact for about `(N - 1) × frame period` after its end-of-frame stamp: 100 ms with 4 buffers at 30 FPS, 50 ms at 60 FPS. Subscribers that import the DMA-BUF must copy or convert within that window. Subscribers can infer `N` from the distinct `fd` values in consecutive `CameraFrame` messages.
-
-### NXP G2D - Hardware Accelerator
-
-**Purpose:** Format conversion, scaling, cropping, rotation
-
-**API:**
-
-The G2D hardware accelerator is accessed via `g2d-sys` FFI bindings:
-- Open device at `/dev/galcore`
-- Create surfaces from DMA file descriptors with format specifications
-- Perform blit operations (format conversion, scaling, rotation)
-- Synchronize with `finish()` to wait for completion
-
-See `src/image.rs` for complete G2D integration.
-
-**Operations:**
-
-- **Format Conversion:** YUYV → NV12, RGB, RGBA
-- **Scaling:** Arbitrary resolution changes (e.g., 4K → 1080p)
-- **Cropping:** Extract rectangular regions for tiling
-- **Rotation:** 90°, 180°, 270° transformations
-- **Mirroring:** Horizontal, vertical, or both axes
-
-**Performance:** Hardware acceleration provides significant speedup over CPU-based implementations. Actual timing depends on resolution, operation type, and system load.
-
-### H.264 Hardware Encoder (Hantro)
-
-**V4L2 M2M (Memory-to-Memory) Interface:**
-
-The H264 encoder is accessed via V4L2 memory-to-memory interface at `/dev/mxc-hantro-h1`:
-- Configure output format (resolution, pixel format NV12)
-- Set encoding parameters (bitrate in bps, GOP size)
-- Encode frames by submitting NV12 buffers
-- Receive H264 NAL units
-
-See `src/video.rs` for complete encoder implementation.
-
-**Specifications:**
-
-- **Max Resolution:** 1920×1080 (requires tiling for 4K sources)
-- **Max FPS:** 60 FPS @ 1080p
-- **Bitrate Range:** 1-100 Mbps
-- **Profiles:** Baseline, Main, High
-- **Latency:** Implementation-dependent, varies with resolution and system load
-
----
-
-## Record and Replay
-
-Two built-in operating modes let the camera service run the same Zenoh
-publish path against either a live V4L2 device or a recorded file. The
-intent is reproducible tests and demos — byte-identical CameraFrame,
-CameraInfo, and TF streams from a known input.
-
-### File format
-
-A recording is a **pair** of files with a shared basename:
-
-| File | Contents |
+| Module | Role |
 |---|---|
-| `<name>.h264` | Raw H.264 Annex-B bitstream. NAL units back-to-back; no container, no index. |
-| `<name>.json` | Sidecar metadata. Written once at record start, read once at replay start. |
+| `main.rs` | Argument parsing, logging, the Zenoh session, signals, and the startup sequence |
+| `args.rs` | Command-line flags and their environment variables, and the empty-variable scrub for systemd `EnvironmentFile`s |
+| `source.rs` | The request built from the command line, opening and starting the source, the capture pool, mirroring, and the retry while the ISP is not ready |
+| `pipeline.rs` | The capture loop, publishers, encoder threads, drop reports and `tf_static` |
+| `encode.rs` | H.264 stages for the main stream and the tiles |
+| `jpeg.rs` | The JPEG stage |
+| `messages.rs` | `camera/info`, `tf_static`, the compressed image and video payloads, and the Zenoh sample timestamp |
 
-The `.h264` file is power-loss resilient by design — every NAL unit is
-written via `write_all`, so any prefix is a valid partial decode. The
-recorder flushes the `BufWriter` on every keyframe, bounding the
-power-loss window to ~1 s at default GOP settings. VLC / mpv / ffplay
-all play the raw file directly; `ffmpeg -i in.h264 -c copy out.mp4`
-muxes into MP4 without re-encoding.
-
-The `.json` sidecar carries every piece of producer-global state that
-cannot be recovered from the bitstream itself. It is **stateless
-metadata only** — no per-frame index, no timestamps.
-
-#### Sidecar v1 schema
-
-```jsonc
-{
-  "version":     1,               // bump on any incompatible change
-  "codec":       "h264",          // fixed in v1
-  "fps":         30,              // nominal recorded frame rate
-  "width":       1920,            // bitstream resolution
-  "height":      1080,
-  "colorimetry": {                // empty strings = unknown
-    "color_space":    "bt709",
-    "color_transfer": "bt709",
-    "color_encoding": "bt601",
-    "color_range":    "limited"
-  },
-  "camera_info": { /* full CameraInfoFields — k, r, p, roi, etc. */ },
-  "tf_static":   { /* full TfStaticFields — frames, translation, rotation */ }
-}
-```
-
-Intentionally no `format` field: the hardware decoder always produces
-NV12 regardless of the original capture fourcc, so recording the
-source fourcc would mislead consumers on replay. Colorimetry is
-captured verbatim from the live camera path; on replay it is what the
-original capture side would have reported, not necessarily what the
-NV12 decode output precisely implies. Acceptable tradeoff for the
-reproducible-test scope.
-
-### Record mode (`--record <path>`)
-
-The recorder taps `h264_task` **before** the Zenoh publish. Every
-frame the encoder emits flows to both the file and the publish path —
-if Zenoh drops a publish under congestion, the recorder still captures
-it. Flow in record mode:
-
-```
-CameraBuffer → [G2D convert → H.264 encode]
-                     │
-         ┌───────────┴───────────┐
-         ▼                       ▼
-  BufWriter<File>           build_h264_msg()
-   (.h264 on disk)                │
-                                  ▼
-                         Publisher.put (camera/h264)
-```
-
-The sidecar is written once at `stream()` entry, before the first
-frame, via a single `fs::write` — if a torn write happens we fail
-fast at launch time rather than silently producing an unreadable
-recording.
-
-### Replay mode (`--replay <path>`)
-
-In replay mode, the V4L2 device is not opened. A `videostream::Decoder`
-reads the `.h264` file in 256 KiB chunks and emits decoded `Frame`s
-(NV12) that stand in for `CameraBuffer` on the publish path:
-
-```
-  BufReader<File>
-       │
-       ▼
-  Decoder.decode_frame (H.264 → NV12 Frame)
-       │
-   ┌───┴──────────────┬────────────────────┬─────────────────┐
-   ▼                  ▼                    ▼                 ▼
-camera/frame     camera/h264     camera/info      tf_static
-(CameraFrame)    (Annex-B bytes     (from sidecar,      (from sidecar,
-                  forwarded          stamped and         re-stamped at each
-                  verbatim)          published/frame)    1 Hz republish)
-```
-
-Key semantics:
-
-- **`camera/h264` is byte-for-byte identical** to the recording —
-  the replay loop collects every byte the decoder consumes for each
-  frame and forwards those bytes verbatim. No re-encode.
-- **`CameraFrame.seq` continues incrementing across loop boundaries**.
-  V4L2 / libcamera frame sequence counters do not reset across a
-  session; neither does ours under `--replay-loop`. Consumers see
-  one continuous monotonic stream.
-- **Pacing** is `tokio::time::interval(1/fps)`. Under load replay can
-  lag but never runs ahead. The `--replay-fps` flag overrides the
-  sidecar's recorded `fps`.
-- **Malformed bytes**: a `decode_frame` error causes the loop to drop
-  one byte and retry — the Annex-B NAL start-code search resyncs on
-  the next valid boundary. Logs a warning with the file offset.
-
-### Limitations
-
-- **Multi-fd planes are not supported.** Recorded files carry a
-  single H.264 stream; on replay, the decoded Frame is published with
-  a single `TensorPlane` entry covering the whole dma-buf, matching
-  the live path's behavior. Non-contiguous MPLANE fourccs cannot be
-  fully expressed until `videostream` exposes per-plane fds.
-- **No seek.** Replay is forward-only.
-- **`--replay` + `--jpeg` / `--h264-tiles`** is rejected at launch.
-  Only the main H.264 stream is recorded, so those outputs would
-  require a re-encode path that is out of scope for this release.
-- **`/camera/info` and `/tf_static` flags are overridden** during
-  replay — the sidecar is the source of truth. `--cam-info-path`,
-  `--cam-tf-vec`, `--base-frame-id`, etc. emit a warning and are
-  ignored when replaying.
-
-See `README.md` for end-user docs and example invocations.
+The application is Linux-only for now (Unix signals, journald); the SDK also builds on macOS and Windows.
 
 ---
 
-## Instrumentation and Profiling
+## Startup
 
-The camera node uses the Tokio tracing ecosystem for observability and the Tracy profiler for performance analysis.
+1. **Arguments.** Empty environment variables are removed before parsing, so `KEY=""` in `/etc/default/camera` means unset. Combinations that cannot work (`--record` without `--h264`, or with a `file:` source) fail before anything opens.
+2. **Request.** `source::Request` resolves the source (`--source`, else the hidden 2.x `--replay` as a `file:` source, else `--camera`), the requested size and rate, the pool depth, the memory strategy, mirroring and controls. A `CAMERA_MODE` is checked against the modes the camera reports (`edgefirst_camera::probe`) and expands to a size and rate; explicit `CAMERA_SIZE` and `CAMERA_FPS` win over it with a warning. File and mock sources cannot report modes, so a mode there is an error. Devices are asked for YUYV, which the encoders and converters take directly; a device that does not offer it is captured in its current format.
+3. **Open.** `source::open` opens the camera, applies mirroring, provides the capture pool and starts streaming (see [Buffers](#buffers-and-backpressure)). It retries while the SDK reports `NotReady` (`ENOENT` on open, or no first frame within the SDK's timeout, as when `isp_media_server` has not started serving the device), within a 15 s budget and six attempts, so a wedged ISP lands the unit in `failed` within systemd's start limit instead of hammering it. Every other error fails startup. A shutdown during the retry exits cleanly.
+4. **Pipeline.** `pipeline::run` opens the encoders, the recording if any, and the publishers, then runs the capture loop. An encoder that cannot open is a startup error.
 
-### Tracing Architecture
+The tokio runtime serves signal handling and the tokio console only. Capture and encoding run on plain threads: the image crate's GL converter blocks on its worker, which a tokio runtime thread may not do, and Zenoh's synchronous API (`Wait`) needs no runtime.
 
-**Tracing Layers:**
+---
 
-The application uses `tracing-subscriber` with multiple layers configured in `src/main.rs`:
-- Registry base for span context
-- stdout_log for console output
-- journald for systemd journal integration
-- tokio-console for async task monitoring (optional, `--tokio-console` flag)
-- Tracy profiler integration (optional, `--tracy` flag)
+## Threads
 
-**Layer Details:**
+| Thread | Work |
+|---|---|
+| main (capture) | `next_frame`, one stamp per frame, `camera/frame` and `camera/info`, `try_send` to the encoders, the forwarded H.264 of a `file:` source, drop reports |
+| `h264` | Converts if needed, encodes, records, publishes `camera/h264` |
+| `h264_tl`, `h264_tr`, `h264_bl`, `h264_br` | One per tile: rate limit, crop or convert, encode, publish |
+| `jpeg` | Converts to RGBA at the stream size, compresses, publishes `camera/jpeg` |
+| `tf_static` | Republishes the camera transform every second |
 
-1. **stdout_log** - Console output with pretty formatting
-   - Filter: `RUST_LOG` environment variable (default: INFO)
-   - Use: Development and debugging
+Each encoder thread owns its encoder and, when it converts, its own `ImageProcessor`. Encoders are opened on the main thread before capture begins, so a missing encoder is reported at startup, and each converter is warmed with one conversion so its first-use setup (GL shader compilation) does not stall capture. Shutdown (SIGTERM or SIGINT) stops the capture loop at the next frame; dropping the channel senders ends the encoder threads, which drain their encoders and flush the recording before they are joined, and the camera is stopped.
 
-2. **journald** - systemd journal integration
-   - Filter: `RUST_LOG` environment variable (default: INFO)
-   - Use: Production deployment, queryable with `journalctl`
+---
 
-3. **console** - Tokio async task monitoring (optional, `--tokio-console` flag)
-   - Requires: `tokio-console` binary running
-   - Use: Debugging async task issues, deadlocks, blocking
+## Buffers and Backpressure
 
-4. **tracy** - Tracy profiler integration (optional, `--tracy` flag)
-   - Requires: Tracy profiler GUI connected
-   - Use: Frame timing, performance analysis, CPU profiling
+### The capture pool
 
-### Tracy Integration
+On camera devices the service allocates the capture pool itself, through `ImageProcessor::create_image_desc` with physically contiguous (CMA) memory, so the buffers suit every converter including G2D, and provides it to the SDK. Mock sources get a pool in any memory; file sources use the decoder's pool.
 
-**Features Available:**
+- If the device refuses the buffers at `start()` (`BuffersRejected`, for example a pitch it does not accept), the service logs the reason and slot, takes its buffers back, and starts on the SDK's own pool.
+- If contiguous memory runs out (`ContiguousUnavailable`, from the allocation or from the SDK), startup fails with a message naming the shortfall and suggesting a smaller `CAMERA_BUFFERS`.
+- `--memory export` skips the service's pool and uses the driver's buffers.
 
-The camera node has Tracy instrumentation enabled by default (via `default = ["tracy"]` feature).
+### Frames hold their buffers
 
-**Tracy Markers:**
+A `Frame` holds its capture buffer until it drops; the SDK never hands a buffer back to the driver while a frame references it. The capture loop wraps each frame in an `Arc` and sends a clone to each encoder, so a buffer returns to the driver once the last encoder is done with it. Converting stages drop the frame as soon as the conversion has read it; the direct H.264 path holds it until the encoder has read it.
 
-1. **Frame Markers:** Track frame completion for main camera loop, H264 encoding, JPEG encoding, and tile encoding pipelines
+Because queued and in-flight frames hold buffers, the pool is `CAMERA_BUFFERS` plus two while any encoder runs. `CAMERA_BUFFERS` keeps its meaning for subscribers to `camera/frame`: they have about `CAMERA_BUFFERS - 1` frame periods to read a frame. Each encoder queue holds one frame: one absorbs encoder jitter at the H.264 encoder, and keeps the JPEG compressor, which takes longer than a frame period at 1080p, busy without waiting for the next frame. Measured on the i.MX 8M Plus at 1080p30 with H.264 and JPEG, four buffers without the encoder headroom held capture to about 25 fps; with it, capture holds 30 fps.
 
-2. **Performance Plots:** Monitor runtime metrics including FPS, JPEG output size, and frame timing
+### Drops
 
-3. **Span Instrumentation:** Major functions use `#[instrument]` attribute to create Tracy zones automatically, providing hierarchical timing information
+`try_send` never blocks capture: a full queue drops the frame for that encoder. kanal reports a full channel as `Ok(false)` and a closed one as `Err`, and both count as drops. Frames the camera lost are counted by the SDK from timestamp gaps against the negotiated rate (`CaptureStats::dropped`), which needs a camera that reports its rate. Both are summarised in one warning per 10 s window.
 
-See `src/main.rs`, `src/image.rs`, and `src/video.rs` for instrumentation placement.
+At startup, the frames the camera captured while the encoders opened are discarded before the loop begins: they are stale, and the gap behind them is not a capture loss.
 
-**Advanced Profiling:**
+---
 
-When built with the `profiling` feature, additional instrumentation is available:
+## Encoding
 
-- **Memory profiling**: Global allocator tracking
-- **System-level tracing**: CPU sampling, context switches
-- **Thread sampling**: Statistical profiling
+### H.264
 
-See `README.md` for build instructions with profiling enabled.
+A stage encodes the captured tensor directly when the encoder takes the capture format at the stream size and no software mirroring is needed. Otherwise it converts each frame first, scaling to the stream size and mirroring, into YUYV (half the bytes of RGBA, and written by the i.MX 8M Plus G2D) or, if the encoder does not take YUYV, RGBA. A direct stage that fails on its first frame switches to converting.
 
-### Instrumentation Points
+The encoder may return an access unit for an earlier frame, so each stage keeps the stamps of frames whose access unit has not come back, keyed by the frame's `seq` as the encoder's presentation timestamp, and publishes each access unit with its own frame's stamp. The recording is written from the same access units, flushed at every key frame.
 
-**Main Thread:**
-- Camera frame capture timing
-- DMA publish operations
-- CameraInfo publish operations
-- Frame distribution to encoder channels
-- FPS calculation and monitoring
+### Tiles
 
-**Encoder Threads:**
-- Frame receive timing
-- G2D conversion operations
-- JPEG/H264 encoding duration
-- Message serialization
-- Zenoh publish operations
+Above 1080p (or with `--h264-tiles`), four more stages encode the quadrants of the frame at their own size, up to 1920x1080, on `camera/h264/{tl,tr,bl,br}` with `frame_id` suffixes `topleft`, `topright`, `bottomleft` and `bottomright`. A tile is encoded from the capture through the encoder's crop where the device can express it, which on a 4K capture is three of the four: the device reads `stride x rows` from the plane offset, which for the bottom-right quadrant runs past the end of a tightly sized buffer, so that tile converts instead. A tile pacer limits tiles to `H264_TILES_FPS`, advancing its deadline by whole intervals so the rate stays phase locked.
 
-**Span Hierarchy Example:**
+### JPEG
 
-```
-main
-├── camera_read
-├── dma_publish
-├── info_publish
-└── frame_distribution
-    ├── jpeg_task
-    │   ├── g2d_convert
-    │   ├── jpeg_encode
-    │   └── jpeg_publish
-    └── h264_task
-        ├── g2d_convert
-        ├── h264_encode
-        └── h264_publish
-```
+The JPEG stage converts to RGBA at the stream size (mirroring there when needed) and compresses with turbojpeg at `JPEG_QUALITY`, 4:2:0.
 
-Each span appears as a zone in Tracy with timing information.
+### Mirroring
+
+Mirroring is requested from the camera (on vvcam, through the ISP's control). When the camera cannot mirror, or rejects the control in the current mode, the encoders mirror their outputs instead (a flip, or a 180° rotation for both axes), and tiles are taken from the quadrant their mirror image covers. `camera/frame` is then published unmirrored, with a warning at startup: raw frames cannot be mirrored without a copy. File sources are not mirrored; the recording was mirrored when it was made.
+
+---
+
+## Messages
+
+All messages are ROS 2 CDR, and every message about a frame carries that frame's stamp.
+
+| Topic | Type | Content |
+|---|---|---|
+| `camera/frame` | `edgefirst_msgs/CameraFrame` | The frame by reference (DMA-BUF) |
+| `camera/info` | `sensor_msgs/CameraInfo` | Calibration, per frame |
+| `camera/jpeg` | `sensor_msgs/CompressedImage` | JPEG at the stream size |
+| `camera/h264` | `foxglove_msgs/CompressedVideo` | H.264 Annex B at the stream size |
+| `camera/h264/{tl,tr,bl,br}` | `foxglove_msgs/CompressedVideo` | 4K tiles |
+| `tf_static` | `geometry_msgs/TransformStamped` | Camera transform, 1 Hz |
+
+### Camera frame
+
+`camera/frame` is built by the SDK's `schemas` mapping (`edgefirst_camera::schema::FrameTensor`), the one definition of a `Frame` as a `CameraFrame`: the tensor-ABI storage kind and dtype codes, the format's addressing shape and C byte strides at the frame's row stride, the HAL wire name of the format (`YUYV`, `NV12`, ...), the stream's colorimetry (empty when unspecified), and one plane per image plane, so NV12 carries its chroma plane. Frames in process memory (the mock source) have no handle another process can open, so their planes travel inline.
+
+Consumers:
+
+1. Decode the `CameraFrame` and read its tensor.
+2. Wait on `fence_fd` when it is non-negative.
+3. Map each plane with `handle >= 0` through `pidfd_getfd` on the producer `pid`, then `mmap`.
+4. Read `[0, used)` of each plane within about `CAMERA_BUFFERS - 1` frame periods, before the buffer is captured into again.
+5. Unmap and close the imported descriptors.
+
+### Camera info and transform
+
+`camera/info` comes from the calibration at `CAM_INFO_PATH` (an isp-imx dewarp configuration), or nominal 1080p defaults with a warning when none is configured or it cannot be read. `tf_static` comes from `CAM_TF_VEC`, `CAM_TF_QUAT`, `BASE_FRAME_ID` and `CAMERA_FRAME_ID`. For a `file:` source both come from the recording's sidecar when it has them.
 
 ---
 
@@ -743,34 +171,79 @@ Each span appears as a zone in Tracy with timing information.
 
 Camera topics follow the EdgeFirst middleware timestamp contract (Perception > Clock Synchronization and Timestamps in the EdgeFirst manual): `header.stamp` is the acquisition instant as Unix time from the host `CLOCK_REALTIME`, and the Zenoh sample timestamp carries the same instant.
 
-- **Acquisition instant.** The V4L2 buffer timestamp, recorded by the capture driver on `CLOCK_MONOTONIC`. No exposure or readout correction is applied; a constant residual to the physical event is a consumer-side offset.
-- **One stamp per frame.** The capture loop converts the V4L2 timestamp once (`clock::RealtimeClock::convert`) and passes the resulting `Time` to the H.264, JPEG and tile encoder threads, so every representation of a frame carries an identical stamp. `camera/info` is re-stamped with the stamp of the frame it accompanies.
-- **Clock steps.** The offset `CLOCK_REALTIME - CLOCK_MONOTONIC` is measured at every conversion, bracketing the monotonic read between two realtime reads and using their midpoint. A wall-clock step (NTP or GNSS sync on a unit without a working RTC) is followed on the next frame without a restart and logged once at INFO. Nothing orders the service after time synchronization.
-- **Metadata.** `tf_static` is re-stamped at each 1 Hz republish. Replay has no acquisition time and stamps at the publish instant.
-- **Zenoh timestamp precision.** Zenoh timestamps are NTP64 (32.32 fixed point, about 0.23 ns resolution), so a decoded Zenoh timestamp matches `header.stamp` to within a nanosecond rather than bit for bit.
+- **Acquisition instant.** The SDK converts the driver's capture timestamp (`CLOCK_MONOTONIC` for V4L2) to wall-clock time once, at dequeue, with `RealtimeClock`, which measures the realtime-monotonic offset at every conversion between two realtime reads, so a wall-clock step (NTP or GNSS sync on a unit without a working RTC) is followed on the next frame. `Frame::realtime()` carries the result. No exposure or readout correction is applied.
+- **One stamp per frame.** The capture loop reads `Frame::realtime()` once (`schema::stamp`) and passes that `Time` with the frame to every encoder, so `camera/frame`, `camera/info`, `camera/jpeg`, `camera/h264` and the tiles carry an identical stamp. A frame whose clock cannot be converted is stamped at publication.
+- **Sample timestamp.** Each message's Zenoh timestamp is `schema::ntp64` of its header stamp. Zenoh timestamps are NTP64 (32.32 fixed point, about 0.23 ns resolution), so a decoded Zenoh timestamp matches `header.stamp` to within a nanosecond rather than bit for bit.
+- **Metadata.** `tf_static` is re-stamped at each republish. A `file:` source has no acquisition time; its frames are stamped at their paced delivery instant.
 
 ### ROS 2 Year 2038 Limit
 
-The ROS 2 `builtin_interfaces/msg/Time` message uses `int32` for the `sec` field, which overflows on 2038-01-19T03:14:07Z. Every stamp is produced by `clock.rs`, which saturates times past the limit to `sec = i32::MAX`, `nanosec = 999_999_999` with a warning and clamps pre-epoch times to the epoch, so the header stamp and the Zenoh timestamp always agree. Camera data continues to be published; only the stamp is clamped. Downstream consumers should treat a saturated stamp as the Y2038 limit having been reached.
+The ROS 2 `builtin_interfaces/msg/Time` message uses `int32` for the `sec` field, which overflows on 2038-01-19T03:14:07Z. Every stamp is produced by `edgefirst_camera::schema::time`, which saturates times past the limit to `sec = i32::MAX`, `nanosec = 999_999_999` and clamps pre-epoch times to the epoch, so the header stamp and the Zenoh timestamp always agree. Camera data continues to be published; only the stamp is clamped.
+
+---
+
+## Record and Replay
+
+A recording is a pair of files with a shared basename:
+
+| File | Contents |
+|---|---|
+| `<name>.h264` | Raw H.264 Annex B, access units back to back, no container or index |
+| `<name>.json` | Sidecar metadata, written once at record start |
+
+The `.h264` file is written as the encoder produces it and flushed at every key frame, so any prefix decodes. VLC, mpv and ffplay play it directly; `ffmpeg -i in.h264 -c copy out.mp4` muxes it into MP4 without re-encoding.
+
+### Sidecar v1
+
+```jsonc
+{
+  "version":     1,
+  "codec":       "h264",
+  "fps":         30,              // the stream's rate; whole rates are integers
+  "width":       1920,            // the encoded stream's size
+  "height":      1080,
+  "colorimetry": {                // empty strings are unspecified
+    "color_space":    "bt709",
+    "color_transfer": "bt709",
+    "color_encoding": "bt601",
+    "color_range":    "limited"
+  },
+  "camera_info": { /* CameraInfoFields: k, r, p, roi, ... */ },
+  "tf_static":   { /* TfStaticFields: frames, translation, rotation */ }
+}
+```
+
+The SDK's `edgefirst_camera::Sidecar` reads and writes it. `fps`, `width`, `height` and `colorimetry` describe the stream; every other field is the application's and travels as `extras`. There is no `format` field: the decoder produces NV12 whatever the capture format was. Recordings from camera 2.x replay unchanged, and 2.x reads the sidecars written here when the rate is a whole number.
+
+### Recording (`--record <path>`)
+
+The recording file is created and the sidecar written before any frame flows, so a recording that cannot start fails the service without an orphaned sidecar. The sidecar's size is the stream size, its rate the capture rate, its colorimetry the camera's, and its `camera_info` and `tf_static` those being published.
+
+### Replay (`--source file:<path>`)
+
+A `file:` source is an SDK camera like any other: the SDK decodes the recording with the platform's V4L2 decoder and paces delivery at the recorded rate, or at `CAMERA_FPS` (`REPLAY_FPS`). The pipeline treats its frames as captured frames, with these differences:
+
+- `camera/h264` republishes the recorded access units verbatim (`Frame::encoded()`), so consumers receive the original bitstream; nothing is re-encoded. Pictures the decoder releases at the end of the stream carry no access units of their own, since the earlier frames already carried those bytes.
+- `camera/frame` carries the decoded NV12 frames, and JPEG compresses them.
+- `camera/info` and `tf_static` come from the sidecar.
+- Outputs keep the recording's size; `STREAM_SIZE` and `MIRROR` do not apply.
+- At the end of the file the service exits cleanly, or with `--replay-loop` restarts from the first frame with `seq` continuing.
+
+---
+
+## Instrumentation and Profiling
+
+Logging uses `tracing` with layers for stdout (pretty), journald, the tokio console (`--tokio-console`) and Tracy (`--tracy`); `RUST_LOG` sets the filter (default INFO). The HAL's `log` output is bridged into the same subscriber.
+
+Spans mark the work Tracy shows as zones: `camera_read` and `camera_publish` on the capture thread, `h264` (with the stage name) and `jpeg` on the encoder threads. With `--tracy`, the capture loop marks each frame and plots `fps`; the encoders mark secondary frames and plot `h264_kb` and `jpeg_kb`. The `profiling` feature adds Tracy's allocation tracking, sampling and system tracing.
 
 ---
 
 ## References
 
-**Rust Crates:**
-
-- [tokio](https://tokio.rs/) - Async runtime
+- [edgefirst-camera SDK](crates/camera/README.md) and its [architecture](crates/camera/ARCHITECTURE.md)
+- [EdgeFirst HAL](https://github.com/EdgeFirstAI/hal) - `edgefirst-image`, `edgefirst-codec`, `edgefirst-tensor`
 - [zenoh](https://zenoh.io/) - Pub/sub middleware
-- [kanal](https://github.com/fereidani/kanal) - Fast MPMC channels
-- [videostream](https://github.com/EdgeFirstAI/videostream) - V4L2 camera interface
-
-**Hardware Documentation:**
-
-- [NXP i.MX8M Plus Reference Manual](https://www.nxp.com/docs/en/reference-manual/IMX8MPRM.pdf)
+- [kanal](https://github.com/fereidani/kanal) - Bounded channels
 - [V4L2 API Specification](https://www.kernel.org/doc/html/latest/userspace-api/media/v4l/v4l2.html)
-
-**ROS2 Standards:**
-
-- [ROS2 CDR Serialization](https://design.ros2.org/articles/generated_interfaces_cpp.html)
-- [sensor_msgs/CameraInfo](https://docs.ros2.org/latest/api/sensor_msgs/msg/CameraInfo.html)
-- [sensor_msgs/CompressedImage](https://docs.ros2.org/latest/api/sensor_msgs/msg/CompressedImage.html)
+- [NXP i.MX 8M Plus Reference Manual](https://www.nxp.com/docs/en/reference-manual/IMX8MPRM.pdf)

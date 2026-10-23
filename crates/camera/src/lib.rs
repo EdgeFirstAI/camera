@@ -68,6 +68,8 @@ mod frame;
 mod pool;
 #[cfg(feature = "schemas")]
 pub mod schema;
+#[cfg(feature = "file")]
+mod sidecar;
 mod timestamp;
 
 pub use builder::CameraBuilder;
@@ -83,6 +85,8 @@ pub use enumerate::{modes, Backend, CameraDescriptor, FormatInfo, Mode, Rates, S
 pub use error::{Error, ErrorKind, Rejection, Result};
 pub use frame::{Frame, FrameMeta, PlaneLayout, SlotRelease};
 pub use pool::SlotTable;
+#[cfg(feature = "file")]
+pub use sidecar::Sidecar;
 pub use timestamp::{CaptureClock, RealtimeClock, Timestamp, TimestampSource};
 
 /// Lists the cameras every compiled backend can see.

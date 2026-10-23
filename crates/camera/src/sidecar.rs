@@ -189,7 +189,9 @@ impl Sidecar {
             _ => return Err(invalid("extras must be a JSON object".into())),
         };
         if let Some(key) = extras.keys().find(|k| STREAM_FIELDS.contains(&k.as_str())) {
-            return Err(invalid(format!("extras must not set the stream field {key:?}")));
+            return Err(invalid(format!(
+                "extras must not set the stream field {key:?}"
+            )));
         }
         let fps = if self.fps.fract() == 0.0 && self.fps <= u32::MAX as f64 {
             Value::from(self.fps as u32)
@@ -395,7 +397,11 @@ mod tests {
         let mut s = Sidecar::new(30.0, 640, 480);
         for bad in ["[1]", "not json", r#"{"fps": 60}"#] {
             s.extras = bad.into();
-            assert_eq!(s.to_json().unwrap_err().kind(), ErrorKind::InvalidConfig, "{bad}");
+            assert_eq!(
+                s.to_json().unwrap_err().kind(),
+                ErrorKind::InvalidConfig,
+                "{bad}"
+            );
         }
         let zero = Sidecar::new(0.0, 640, 480);
         assert!(zero.to_json().is_err());

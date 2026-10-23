@@ -26,14 +26,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `CameraBuilder::looping` restarts the file with `seq` continuous; without it the end is `ErrorKind::EndOfStream`. `Camera::extras()` returns the sidecar's other fields (`camera_info`, `tf_static`) as JSON.
   - Units the decoder rejects and bytes outside any access unit are skipped with a warning.
   - Frames own their decoded pictures, and `Frame::tensor()` borrows the tensor, so no caller keeps reading a buffer after it goes back to the driver or decoder.
+- `Sidecar` in the SDK (feature `file`) reads and writes the version 1 recording sidecar; whole rates are written as integers and unspecified colorimetry as empty labels, as 2.x reads them (EDGEAI-1525).
+- Application flags (EDGEAI-1526):
+  - `--source` / `SOURCE` selects the frame source: a device path, `file:<name>.h264`, or `mock[:WxH@fps]`. Unset uses `--camera` / `CAMERA`.
+  - `--camera-fps` / `CAMERA_FPS` requests a capture rate, or sets the playback rate of a `file:` source.
+  - `--memory` / `MEMORY` (`auto`, `import`, `export`) selects how capture buffers are allocated.
+  - `--exposure`, `--gain` and `--white-balance` (`EXPOSURE`, `GAIN`, `WHITE_BALANCE`) set camera controls to `auto` or a value; a camera without the control logs a warning.
+- JPEG output for `file:` sources, compressed from the decoded frames (EDGEAI-1525).
 
 ### Changed
+- The application captures through the `edgefirst-camera` SDK instead of `videostream`, converts and scales through `edgefirst-image` (OpenGL, G2D or CPU) and encodes H.264 through `edgefirst-codec` (EDGEAI-1525).
+  - The capture pool is allocated in contiguous memory through the image crate. A device that refuses it falls back to the SDK's buffers with a warning; contiguous memory that cannot be allocated fails startup with a message naming the shortfall.
+  - While any encoder runs, the pool is `CAMERA_BUFFERS` plus two, because frames waiting for or being read by an encoder hold their buffer. `CAMERA_BUFFERS` keeps its meaning for `camera/frame` subscribers and defaults to 4.
+  - Camera devices are asked for YUYV, which the encoders take directly; a device without it is captured in its current format.
+  - A camera that cannot mirror, or rejects the mirror control, is mirrored in the JPEG and H.264 outputs instead, and `camera/frame` is published unmirrored with a warning.
+  - The ISP retry at startup keys on the SDK's `NotReady` (`ENOENT` on open, or no first frame in time).
+  - Drop warnings report frames the camera lost, from timestamp gaps, as well as frames dropped at full encoder queues.
+  - H.264 tiles are encoded at the quadrant's size, up to 1920x1080, through the encoder's crop where the device can express it.
+- `camera/frame` tensors name their format with the HAL wire names (`YUYV`, `NV12`, ...), and NV12 frames describe their chroma plane (EDGEAI-1525).
+- Replay is the `file:` source: `--source file:<name>.h264` republishes the recorded H.264 verbatim, publishes the decoded frames on `camera/frame`, and takes `camera/info` and `tf_static` from the sidecar. Outputs keep the recording's size, and `MIRROR` and `STREAM_SIZE` do not apply. `--replay` / `REPLAY` remains as a deprecated alias, and `REPLAY_FPS` as an alias of `CAMERA_FPS` (EDGEAI-1525, EDGEAI-1526).
+- `CAMERA_MODE` is shorthand for `CAMERA_SIZE` plus `CAMERA_FPS`, accepted only when the camera reports the mode; otherwise startup fails and lists the modes it offers. Explicit `CAMERA_SIZE` and `CAMERA_FPS` win over it with a warning. The rate-only form (`30FPS`) is removed; use `CAMERA_FPS` (EDGEAI-1526).
+- `camera.default` documents the new variables and carries a commented, i.MX 95-only `LIBCAMERA_PIPELINES_MATCH_LIST=nxp/neo` entry (EDGEAI-1526).
+- The SDK takes every V4L2 code from `edgefirst-v4l2` (EDGEAI-2202).
 - The repository is a Cargo workspace. The application package is renamed `edgefirst-camera-app`; its binary is still `edgefirst-camera`. The application and the SDK share version 3.0.0 (EDGEAI-1518).
 - The Rust toolchain is pinned to 1.94.0 by `rust-toolchain.toml`, matching the HAL (EDGEAI-1518).
 - Documented that `MIRROR` exists to publish the image in its natural
   orientation, and that downstream consumers such as fusion assume a natural
   image whose TF and calibration do not encode the mount rotation
   (EDGEAI-2021).
+
+### Removed
+- The `edgefirst_camera_app` library (`image` module), the G2D and DMA-heap code, the videostream dependency, and the image and encoder benchmarks; the HAL covers them (EDGEAI-1525).
 
 ## [2.12.0] - 2026-10-01
 

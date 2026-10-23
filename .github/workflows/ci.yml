@@ -61,7 +61,6 @@ jobs:
               - 'src/**'
               - 'crates/**'
               - 'tests/**'
-              - 'benches/**'
               - 'Cargo.*'
               - 'rustfmt.toml'
               - 'rust-toolchain.toml'
@@ -167,10 +166,9 @@ jobs:
       runner-class-linux: larger
       runner-class-linux-arm: larger
       pre-command: bash .github/scripts/ci-setup.sh
-      board-pre-command: bash .github/scripts/ci-board-setup.sh
       board-extra-args: -j 1 --no-fail-fast -- --include-ignored
       nextest-args: --workspace --locked --features edgefirst-camera/mock,edgefirst-camera/schemas,edgefirst-camera/file --lib --bin edgefirst-camera --test env_scrub --test on_target --test mock --test schema --test file --test v4l2_vivid
-      archive-args: --locked --bin edgefirst-camera --test test_image --test on_target
+      archive-args: --locked --bin edgefirst-camera --test on_target
     secrets: inherit
 
   camera-full:

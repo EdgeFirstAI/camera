@@ -1,8 +1,8 @@
 # Camera-only Full lanes. Called from ci.yml (ci:full) and nightly.yml.
 #
 # The SDK crate (crates/camera) builds and runs on macOS and Windows against
-# its mock backend. The application crate is Linux-only (V4L2, G2D,
-# videostream), and rust-full.yml runs its macOS and Windows lanes with the
+# its mock backend. The application crate is Linux-only for now (Unix
+# signals, journald), and rust-full.yml runs its macOS and Windows lanes with the
 # same workspace-wide nextest-args string as Linux, so those shared lanes stay
 # skipped and these lanes test the SDK package alone.
 #

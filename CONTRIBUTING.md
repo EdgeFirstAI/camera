@@ -245,7 +245,7 @@ Real-time plots visible in Tracy:
 
 All instrumented functions appear as zones in Tracy timeline:
 - Camera read operations
-- G2D conversions
+- Image conversions (HAL `ImageProcessor`)
 - JPEG/H.264 encoding
 - Zenoh publishing
 - Frame distribution
@@ -306,7 +306,7 @@ If you see gaps in the main frame timeline:
 
 1. Use Tracy's CPU sampling (profiling feature)
 2. Identify functions consuming most CPU time
-3. Check for unexpected software fallbacks (should use G2D hardware)
+3. Check for unexpected software fallbacks (the HAL should pick OpenGL or G2D, not CPU)
 4. Verify encoder threads aren't blocking each other
 
 **Scenario 3: Memory Growth**
@@ -362,7 +362,7 @@ tokio-console
 **Optimization Guidelines:**
 - Profile before optimizing (measure, don't guess)
 - Focus on hot paths (zones that appear frequently)
-- Prefer hardware acceleration (G2D, H.264 encoder)
+- Prefer hardware acceleration (HAL image conversion, H.264 encoder)
 - Avoid allocations in encoding threads
 
 ---
@@ -430,26 +430,22 @@ cargo clippy --all-targets --all-features -- -D warnings
 **Example:**
 
 ```rust
-/// Encodes a frame using NXP G2D hardware acceleration.
+/// Opens the platform's hardware H.264 encoder for `config`.
 ///
 /// # Arguments
-/// * `src` - Source DMA buffer in YUYV format
-/// * `dst_format` - Target format (NV12, RGBA, etc.)
+/// * `config` - Stream size, input format, frame rate and bitrate
 ///
 /// # Returns
-/// Encoded frame in destination DMA buffer
+/// The encoder, ready for its first frame.
 ///
 /// # Errors
-/// Returns error if G2D device is unavailable or operation fails.
+/// Returns the codec error when no V4L2 memory-to-memory encoder is present
+/// or it refuses the configuration.
 ///
 /// # Platform Requirements
-/// Requires NXP i.MX8 G2D hardware. Falls back to software on other platforms.
-///
-/// # Example
-/// ```no_run
-/// let dst = encode_frame(&src_buffer, G2D_NV12)?;
-/// ```
-pub fn encode_frame(src: &Image, dst_format: G2dFormat) -> Result<Image> {
+/// Linux with a V4L2 memory-to-memory H.264 encoder (vsi_v4l2 on
+/// i.MX 8M Plus). There is no software fallback.
+pub(crate) fn open_hardware(config: EncoderConfig) -> Result<Box<dyn Encode>, CodecError> {
     // Implementation
 }
 ```
@@ -459,23 +455,18 @@ pub fn encode_frame(src: &Image, dst_format: G2dFormat) -> Result<Image> {
 **Platform Conditionals:**
 
 ```rust
-#[cfg(target_arch = "aarch64")]
-fn use_g2d_acceleration() -> bool {
-    // Check for NXP hardware
-    std::path::Path::new("/dev/galcore").exists()
-}
-
-#[cfg(not(target_arch = "aarch64"))]
-fn use_g2d_acceleration() -> bool {
-    false
-}
+let clock = if cfg!(unix) {
+    CaptureClock::Monotonic
+} else {
+    CaptureClock::Realtime
+};
 ```
 
 **Fallback Implementations:**
 
 - Always provide software fallback for hardware features
 - Gracefully degrade when hardware unavailable
-- Log when using fallback: `warn!("G2D unavailable, using software conversion")`
+- Log when using fallback: `warn!("cannot allocate the capture pool, using the camera's: {e}")`
 
 ---
 
@@ -497,28 +488,28 @@ fn use_g2d_acceleration() -> bool {
 
 **Benchmarks:**
 
-- Performance tests in `benches/` directory
+- The SDK capture benchmark is `crates/camera/benches/capture.rs`
 - Use `criterion` framework
-- Run with `cargo bench`
+- Run on a board with `EDGEFIRST_CAMERA_BENCH_SOURCE=/dev/video3 cargo bench -p edgefirst-camera --bench capture`
 
 ### Running Tests
 
 **All Tests (no hardware):**
 
 ```bash
-cargo test --lib
+cargo test --workspace
 ```
 
 **Integration Tests:**
 
 ```bash
-cargo test --test test_image
+cargo test --test env_scrub
 ```
 
 **Hardware-Dependent Tests (on device):**
 
 ```bash
-cargo test -- --ignored --test-threads=1
+cargo test --test on_target -- --include-ignored
 ```
 
 **With Coverage:**
@@ -538,17 +529,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_timestamp_conversion() {
-        let ros_time = unix_to_ros_time(1234567890);
-        assert_eq!(ros_time.sec, 1234567890);
-        assert_eq!(ros_time.nanosec, 0);
-    }
-
-    #[test]
-    #[ignore]  // Requires hardware
-    fn test_g2d_conversion() {
-        let g2d = G2dContext::new().expect("G2D device required");
-        // Hardware test
+    fn record_requires_h264() {
+        let err = validate(&args(&["--record", "a.h264", "--h264", "false"])).unwrap_err();
+        assert!(err.to_string().contains("--h264"), "{err}");
+        validate(&args(&["--record", "a.h264"])).unwrap();
     }
 }
 ```
@@ -556,26 +540,23 @@ mod tests {
 **Integration Test Example:**
 
 ```rust
-// tests/test_jpeg_encoding.rs
-use edgefirst_camera::image::*;
-
+// tests/on_target.rs
 #[test]
-fn test_jpeg_round_trip() {
-    let img = create_test_image(640, 480);
-    let jpeg = encode_jpeg(&img, 95).unwrap();
-    assert!(jpeg.len() > 0);
-    assert!(jpeg.len() < img.data.len());  // Compressed
+#[serial]
+#[ignore = "requires a V4L2 camera (run with --include-ignored on a board)"]
+fn jpeg_capture() -> Result<(), Box<dyn Error>> {
+    run_for(&capture(&["--jpeg"]), Duration::from_secs(15))
 }
 ```
 
 ### Coverage Requirements
 
 - **Minimum overall**: 70%
-- **Core modules** (`image.rs`, `video.rs`): 80%+
+- **Core modules** (`pipeline.rs`, `encode.rs`, `source.rs`): 80%+
 - **Public APIs**: 100%
 - **Hardware paths**: Best effort (requires device)
 
-**Coverage is measured in CI** by the nightly **Full** run, which covers host, board and SonarCloud every day `main` changes. Every PR runs the **Quick** tier (`ci-gate`), **including draft PRs** — CI is not gated on “Ready for review”; the expected flow is a green `ci-gate` before reviewers start. Full and hardware runs on a PR are opt-in, decided per change: apply `ci:full` for host coverage, board tests and Sonar when a change warrants it. Apply `ci:hardware` when on-target validation alone is needed: it runs on a board with a V4L2 camera (runner label `camera-v4l2`) and covers JPEG/H.264 capture, record and replay (`tests/on_target.rs`) and the G2D image tests (`tests/test_image.rs`).
+**Coverage is measured in CI** by the nightly **Full** run, which covers host, board and SonarCloud every day `main` changes. Every PR runs the **Quick** tier (`ci-gate`), **including draft PRs** — CI is not gated on “Ready for review”; the expected flow is a green `ci-gate` before reviewers start. Full and hardware runs on a PR are opt-in, decided per change: apply `ci:full` for host coverage, board tests and Sonar when a change warrants it. Apply `ci:hardware` when on-target validation alone is needed: it runs on a board with a V4L2 camera (runner label `camera-v4l2`) and covers JPEG/H.264 capture, record and replay (`tests/on_target.rs`).
 
 ---
 

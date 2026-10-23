@@ -6,38 +6,24 @@ use serde_json::json;
 use std::{fmt, path::PathBuf, str::FromStr};
 use zenoh::config::{Config, WhatAmI};
 
-/// A camera mode: named `SIZExFPS` (`1080p30`) or FPS-only (`30FPS`).
+/// A named capture mode: a size name and a frame rate (`1080p30`).
 ///
 /// Size names: VGA (640×480), WVGA (800×480), 540p (960×540), 720p
-/// (1280×720), 1080p (1920×1080), 4K (3840×2160). Any positive whole
-/// FPS is accepted. Combined modes supply both size and FPS; FPS-only
-/// leaves resolution to `CAMERA_SIZE` or the live device.
+/// (1280×720), 1080p (1920×1080), 4K (3840×2160). A mode is shorthand for
+/// `CAMERA_SIZE` plus `CAMERA_FPS`, accepted only when the camera reports
+/// it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CameraMode {
-    /// Named capture size, if this was a combined mode.
-    pub size: Option<(u32, u32)>,
-    /// Requested frames per second.
+    /// Capture size.
+    pub size: (u32, u32),
+    /// Frames per second.
     pub fps: u32,
-}
-
-impl CameraMode {
-    /// Capture size from a combined mode, if any.
-    pub fn size(&self) -> Option<(u32, u32)> {
-        self.size
-    }
-
-    /// Requested frames per second.
-    pub fn fps(&self) -> u32 {
-        self.fps
-    }
 }
 
 impl fmt::Display for CameraMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.size {
-            Some((w, h)) => write!(f, "{w}x{h}@{fps}", fps = self.fps),
-            None => write!(f, "{fps}FPS", fps = self.fps),
-        }
+        let (w, h) = self.size;
+        write!(f, "{w}x{h}@{fps}", fps = self.fps)
     }
 }
 
@@ -70,7 +56,6 @@ fn named_size(token: &str) -> Result<(u32, u32), String> {
         "720p" => Ok((1280, 720)),
         "1080p" => Ok((1920, 1080)),
         "4k" => Ok((3840, 2160)),
-        "" => Err("camera mode must be SIZExFPS (e.g. 1080p30) or FPS-only (e.g. 30FPS)".into()),
         other => Err(format!(
             "unknown camera size '{other}'; expected VGA, WVGA, 540p, 720p, 1080p, or 4K"
         )),
@@ -84,12 +69,12 @@ fn parse_camera_mode(raw: &str) -> Result<CameraMode, String> {
     }
     let lower = s.to_ascii_lowercase();
 
-    if let Some(fps_str) = lower.strip_suffix("fps") {
-        if !fps_str.is_empty() && fps_str.bytes().all(|b| b.is_ascii_digit()) {
-            return Ok(CameraMode {
-                size: None,
-                fps: parse_fps(fps_str)?,
-            });
+    if let Some(fps) = lower.strip_suffix("fps") {
+        if !fps.is_empty() && fps.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!(
+                "camera mode '{raw}' sets only a frame rate, which is no longer accepted; \
+                 use CAMERA_FPS={fps} (--camera-fps {fps})"
+            ));
         }
     }
 
@@ -100,19 +85,84 @@ fn parse_camera_mode(raw: &str) -> Result<CameraMode, String> {
         .unwrap_or(0);
     if fps_start == lower.len() {
         return Err(format!(
-            "camera mode '{raw}' is missing a frame rate; use e.g. 1080p30 or 30FPS"
+            "camera mode '{raw}' is missing a frame rate; use e.g. 1080p30"
         ));
     }
     if fps_start == 0 {
         return Err(format!(
-            "camera mode '{raw}' needs a size name or an FPS suffix; use e.g. 1080p30 or 30FPS"
+            "camera mode '{raw}' needs a size name; use e.g. 1080p30"
         ));
     }
 
     Ok(CameraMode {
-        size: Some(named_size(&lower[..fps_start])?),
+        size: named_size(&lower[..fps_start])?,
         fps: parse_fps(&lower[fps_start..])?,
     })
+}
+
+/// A camera control setting: `auto`, or a fixed value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Setting<T> {
+    /// Let the camera choose.
+    Auto,
+    /// A fixed value.
+    Manual(T),
+}
+
+fn parse_setting<T: FromStr>(raw: &str, what: &str) -> Result<Setting<T>, String> {
+    let s = raw.trim();
+    if s.eq_ignore_ascii_case("auto") {
+        return Ok(Setting::Auto);
+    }
+    s.parse()
+        .map(Setting::Manual)
+        .map_err(|_| format!("{what} must be 'auto' or a number, not '{raw}'"))
+}
+
+fn parse_exposure(raw: &str) -> Result<Setting<u32>, String> {
+    match parse_setting(raw, "exposure")? {
+        Setting::Manual(0) => Err("exposure must be at least 1 microsecond".into()),
+        other => Ok(other),
+    }
+}
+
+fn parse_gain(raw: &str) -> Result<Setting<f32>, String> {
+    match parse_setting::<f32>(raw, "gain")? {
+        Setting::Manual(g) if !(g.is_finite() && g > 0.0) => {
+            Err(format!("gain must be positive, not {g}"))
+        }
+        other => Ok(other),
+    }
+}
+
+fn parse_white_balance(raw: &str) -> Result<Setting<u32>, String> {
+    match parse_setting(raw, "white balance")? {
+        Setting::Manual(0) => Err("white balance must be a positive colour temperature".into()),
+        other => Ok(other),
+    }
+}
+
+fn parse_positive_fps(raw: &str) -> Result<f64, String> {
+    let fps: f64 = raw
+        .trim()
+        .parse()
+        .map_err(|_| format!("frame rate must be a number, not '{raw}'"))?;
+    if !(fps.is_finite() && fps > 0.0) {
+        return Err(format!("frame rate must be positive, not {fps}"));
+    }
+    Ok(fps)
+}
+
+/// How capture buffers are allocated.
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
+pub enum MemorySetting {
+    /// Import this service's buffers, falling back to the driver's own when
+    /// it refuses them.
+    Auto,
+    /// Import buffers allocated by this service.
+    Import,
+    /// Use the driver's own buffers.
+    Export,
 }
 
 /// Camera image mirroring options.
@@ -162,50 +212,80 @@ pub enum H264Bitrate {
 ///
 /// ```bash
 /// # Via command line
-/// edgefirst-camera --camera /dev/video0 --jpeg --h264
+/// edgefirst-camera --source /dev/video0 --jpeg --h264
 ///
 /// # Via environment variables
-/// export CAMERA=/dev/video0
+/// export SOURCE=/dev/video0
 /// export JPEG=true
 /// edgefirst-camera
 /// ```
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
-    /// Camera capture device path (e.g., /dev/video0)
+    /// Frame source: a V4L2 device path (`/dev/video3`), `file:<name>.h264`
+    /// for a recording with its `<name>.json` sidecar, or `mock[:WxH@fps]`
+    /// for synthetic frames. Unset uses `--camera`.
+    #[arg(long, env = "SOURCE")]
+    pub source: Option<String>,
+
+    /// Camera device path, used when `--source` is unset.
     #[arg(short, long, env = "CAMERA", default_value = "/dev/video3")]
     pub camera: String,
 
-    /// Camera capture resolution in pixels (width height).
-    ///
-    /// Unset means use the size from `--camera-mode` when that is a
-    /// combined `SIZExFPS` value, otherwise probe the live device.
+    /// Recording to replay; the 2.x form of `--source file:<path>`.
+    #[arg(long, env = "REPLAY", hide = true, conflicts_with = "source")]
+    pub replay: Option<PathBuf>,
+
+    /// How capture buffers are allocated: `import` this service's
+    /// contiguous buffers, `export` the driver's own, or `auto` to import
+    /// and fall back to the driver's buffers when it refuses them.
+    #[arg(long, env = "MEMORY", default_value = "auto", value_enum)]
+    pub memory: MemorySetting,
+
+    /// Requested capture size in pixels (width height). Unset keeps the
+    /// camera's current size.
     #[arg(long, env = "CAMERA_SIZE", value_delimiter = ' ', num_args = 2)]
     pub camera_size: Option<Vec<u32>>,
 
-    /// Capture mode: named `SIZExFPS` (`1080p30`) or FPS-only (`30FPS`).
-    ///
-    /// Combined modes override `--camera-size`. FPS-only leaves resolution
-    /// to `--camera-size` or the live device. Unset probes the device for
-    /// both size and rate.
+    /// Requested capture rate in frames per second. Unset keeps the
+    /// camera's current rate. For a `file:` source, the playback rate
+    /// (default: the recording's).
+    #[arg(long, env = "CAMERA_FPS", value_parser = parse_positive_fps)]
+    pub camera_fps: Option<f64>,
+
+    /// Capture mode shorthand (`1080p30`): `--camera-size` plus
+    /// `--camera-fps`, accepted only when the camera reports the mode.
+    /// Explicit `--camera-size` and `--camera-fps` win over it.
     #[arg(long, env = "CAMERA_MODE")]
     pub camera_mode: Option<CameraMode>,
 
-    /// Number of V4L2 capture buffers to request from the driver.
+    /// Number of capture buffers (2-32).
     ///
     /// Each published frame references one of these buffers by DMA-BUF
-    /// file descriptor, and the driver refills a buffer once the frames
+    /// file descriptor, and the camera refills a buffer once the frames
     /// queued ahead of it are captured. A subscriber therefore has about
     /// `(buffers - 1)` frame periods to read a frame before its pixels
     /// are overwritten: 100 ms with 4 buffers at 30 FPS, 50 ms at 60 FPS.
-    /// Each buffer costs one capture frame of CMA memory. Unset uses the
-    /// videostream default of 4. The driver may adjust the count.
+    /// Each buffer costs one capture frame of contiguous (CMA) memory.
     #[arg(
         long,
         env = "CAMERA_BUFFERS",
+        default_value_t = 4,
         value_parser = clap::value_parser!(u32).range(2..=32)
     )]
-    pub camera_buffers: Option<u32>,
+    pub camera_buffers: u32,
+
+    /// Exposure: `auto`, or a fixed exposure time in microseconds.
+    #[arg(long, env = "EXPOSURE", value_parser = parse_exposure)]
+    pub exposure: Option<Setting<u32>>,
+
+    /// Analogue gain: `auto`, or a fixed gain multiplier.
+    #[arg(long, env = "GAIN", value_parser = parse_gain)]
+    pub gain: Option<Setting<f32>>,
+
+    /// White balance: `auto`, or a fixed colour temperature in kelvin.
+    #[arg(long, env = "WHITE_BALANCE", value_parser = parse_white_balance)]
+    pub white_balance: Option<Setting<u32>>,
 
     /// Flip the camera image into its natural orientation to undo the sensor
     /// mount (Maivin and Raivin mount it upside down, hence `both`).
@@ -291,36 +371,25 @@ pub struct Args {
     #[arg(long, env = "H264_TILES_FPS", default_value = "15")]
     pub h264_tiles_fps: u32,
 
-    /// Record the live H.264 stream to this file (raw Annex-B `.h264`).
+    /// Record the H.264 stream to this file (raw Annex-B `.h264`).
     ///
-    /// A matching `<path>.json` sidecar is written alongside at startup
-    /// carrying colorimetry, `/camera/info`, and `/tf_static` — every
-    /// piece of producer-global state that is not recoverable from the
-    /// bitstream. Requires `--h264`; mutually exclusive with `--replay`.
-    #[arg(long, env = "RECORD", conflicts_with = "replay")]
+    /// A matching `<name>.json` sidecar is written alongside at startup
+    /// carrying colorimetry, `/camera/info`, and `/tf_static`: the producer
+    /// state that is not recoverable from the bitstream. Requires `--h264`
+    /// and a camera source.
+    #[arg(long, env = "RECORD")]
     pub record: Option<PathBuf>,
 
-    /// Replay a previously recorded H.264 file instead of opening a V4L2
-    /// camera device.
-    ///
-    /// Requires the matching `<path>.json` sidecar alongside the `.h264`
-    /// file. Mutually exclusive with `--record`. When enabled, `--jpeg`
-    /// and `--h264-tiles` are rejected because the recorded file carries
-    /// only the main H.264 bitstream.
-    #[arg(long, env = "REPLAY")]
-    pub replay: Option<PathBuf>,
-
-    /// Loop the replay back to the start on EOF instead of exiting.
-    ///
-    /// The `CameraFrame.seq` counter continues to increment across loop
-    /// boundaries so consumers see one continuous monotonic stream,
-    /// matching the contract of a live camera session.
+    /// Loop a `file:` source back to its start at the end instead of
+    /// exiting. `CameraFrame.seq` keeps counting across loops, as from a
+    /// live camera.
     #[arg(long, env = "REPLAY_LOOP", default_value_t = false)]
     pub replay_loop: bool,
 
-    /// Override the playback frame rate. Defaults to the sidecar's `fps`.
-    #[arg(long, env = "REPLAY_FPS")]
-    pub replay_fps: Option<u32>,
+    /// Playback rate of a `file:` source; the 2.x name of `--camera-fps`,
+    /// which wins when both are set.
+    #[arg(long, env = "REPLAY_FPS", value_parser = parse_positive_fps)]
+    pub replay_fps: Option<f64>,
 
     /// Output streaming resolution in pixels (width height)
     #[arg(
@@ -395,24 +464,35 @@ pub struct Args {
 }
 
 impl Args {
-    /// Capture size requested by configuration, if any.
-    ///
-    /// A combined `CAMERA_MODE` size wins over `CAMERA_SIZE`. `None`
-    /// means probe the live device.
-    pub fn requested_capture_size(&self) -> Option<(u32, u32)> {
-        if let Some(mode) = &self.camera_mode {
-            if let Some(size) = mode.size {
-                return Some(size);
-            }
+    /// The source string for the SDK: `--source`, else `--replay` as a
+    /// `file:` source, else the `--camera` device.
+    pub fn source_spec(&self) -> String {
+        if let Some(source) = &self.source {
+            return source.clone();
         }
+        if let Some(path) = &self.replay {
+            return format!("file:{}", path.display());
+        }
+        self.camera.clone()
+    }
+
+    /// Whether the source is a recording.
+    pub fn is_file_source(&self) -> bool {
+        self.source_spec().starts_with("file:")
+    }
+
+    /// Capture size set by `--camera-size`.
+    pub fn explicit_size(&self) -> Option<(u32, u32)> {
         self.camera_size
             .as_ref()
             .and_then(|v| (v.len() >= 2).then_some((v[0], v[1])))
     }
 
-    /// Frame rate requested by `CAMERA_MODE`, if any.
-    pub fn requested_capture_fps(&self) -> Option<u32> {
-        self.camera_mode.as_ref().map(CameraMode::fps)
+    /// Frame rate set by `--camera-fps`, or by `--replay-fps` for a `file:`
+    /// source.
+    pub fn explicit_fps(&self) -> Option<f64> {
+        self.camera_fps
+            .or_else(|| self.replay_fps.filter(|_| self.is_file_source()))
     }
 }
 
@@ -421,7 +501,7 @@ impl Args {
 /// documented "disable" sentinel).
 ///
 /// Empty for this service: every option that documents "leave empty to
-/// disable" (`CAM_INFO_PATH`, `CONNECT`, `LISTEN`, `RECORD`, `REPLAY`,
+/// disable" (`CAM_INFO_PATH`, `CONNECT`, `LISTEN`, `RECORD`, `SOURCE`,
 /// `REPLAY_FPS`) either has no default or an empty one, so scrubbing it
 /// yields the same result as passing "".
 pub const KEEP: &[&str] = &[];
@@ -530,6 +610,52 @@ impl From<Args> for Config {
     }
 }
 
+/// Every flag and the environment variable that sets it, with a value
+/// each accepts. `/etc/default/camera` reaches the service only through
+/// the environment, so a flag without its variable is unconfigurable
+/// there; `tests/env_scrub.rs` sets each variable and checks it parses
+/// as the flag does.
+#[cfg(test)]
+pub(crate) const FLAG_ENV: &[(&str, &str, &str)] = &[
+    ("source", "SOURCE", "mock:640x480@30"),
+    ("camera", "CAMERA", "/dev/video0"),
+    ("memory", "MEMORY", "import"),
+    ("camera-size", "CAMERA_SIZE", "1280 720"),
+    ("camera-fps", "CAMERA_FPS", "15"),
+    ("camera-mode", "CAMERA_MODE", "720p30"),
+    ("camera-buffers", "CAMERA_BUFFERS", "6"),
+    ("exposure", "EXPOSURE", "auto"),
+    ("gain", "GAIN", "2.5"),
+    ("white-balance", "WHITE_BALANCE", "4000"),
+    ("mirror", "MIRROR", "none"),
+    ("frame-topic", "FRAME_TOPIC", "cam/frame"),
+    ("info-topic", "INFO_TOPIC", "cam/info"),
+    ("jpeg", "JPEG", "true"),
+    ("jpeg-topic", "JPEG_TOPIC", "cam/jpeg"),
+    ("jpeg-quality", "JPEG_QUALITY", "70"),
+    ("h264", "H264", "false"),
+    ("h264-topic", "H264_TOPIC", "cam/h264"),
+    ("h264-bitrate", "H264_BITRATE", "mbps5"),
+    ("h264-tiles", "H264_TILES", "true"),
+    ("h264-tiles-topics", "H264_TILES_TOPICS", "a b c d"),
+    ("h264-tiles-fps", "H264_TILES_FPS", "5"),
+    ("record", "RECORD", "out.h264"),
+    ("replay-loop", "REPLAY_LOOP", "true"),
+    ("replay-fps", "REPLAY_FPS", "12"),
+    ("stream-size", "STREAM_SIZE", "640 480"),
+    ("cam-info-path", "CAM_INFO_PATH", "cal.json"),
+    ("cam-tf-vec", "CAM_TF_VEC", "1 2 3"),
+    ("cam-tf-quat", "CAM_TF_QUAT", "0 0 0 1"),
+    ("base-frame-id", "BASE_FRAME_ID", "base"),
+    ("camera-frame-id", "CAMERA_FRAME_ID", "cam"),
+    ("tokio-console", "TOKIO_CONSOLE", "true"),
+    ("tracy", "TRACY", "true"),
+    ("mode", "MODE", "client"),
+    ("connect", "CONNECT", "tcp/127.0.0.1:7447"),
+    ("listen", "LISTEN", "tcp/127.0.0.1:7448"),
+    ("no-multicast-scouting", "NO_MULTICAST_SCOUTING", "true"),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,6 +665,8 @@ mod tests {
     /// scrubbing to the default is correct).
     const SCRUB_REVIEWED: &[&str] = &[
         "CAMERA",
+        "MEMORY",
+        "CAMERA_BUFFERS",
         "MIRROR",
         "FRAME_TOPIC",
         "INFO_TOPIC",
@@ -591,8 +719,7 @@ mod tests {
         }
     }
 
-    /// Behavioural check for EDGEAI-1094 on the pure selection: a
-    /// numeric, a boolean, an enum and an optional variable exported as
+    /// A numeric, a boolean, an enum and an optional variable exported as
     /// "" are selected for scrubbing.
     #[test]
     fn empty_env_vars_are_selected() {
@@ -639,10 +766,7 @@ mod tests {
 
     #[test]
     fn h264_is_enabled_by_default() {
-        // EDGEAI-1230: running the binary with no options published no
-        // camera/h264 stream, because the flag defaulted to off. The
-        // service never saw it -- /etc/default/camera sets H264=true --
-        // so it only ever bit manual runs.
+        // A bare manual run publishes video, as the service does.
         assert!(Args::parse_from(["edgefirst-camera"]).h264);
     }
 
@@ -655,8 +779,6 @@ mod tests {
 
     #[test]
     fn jpeg_quality_defaults_below_lossless() {
-        // EDGEAI-1230: JPEG encoding was a hardcoded quality-100 CPU
-        // encode with no knob, which is the bulk of its cost.
         assert_eq!(Args::parse_from(["edgefirst-camera"]).jpeg_quality, 85);
     }
 
@@ -683,37 +805,6 @@ mod tests {
             .expect("namespace should be set in config");
         assert!(!ns.is_empty(), "namespace should be non-empty");
         assert!(!ns.contains('/'), "namespace must not contain '/'");
-    }
-
-    /// Every configurable option must be reachable from
-    /// `/etc/default/camera`, which systemd applies as an
-    /// `EnvironmentFile`. An option with a CLI flag but no `env` binding
-    /// is silently unconfigurable there -- it does not error, it just
-    /// ignores the setting (EDGEAI-1438).
-    #[test]
-    fn topic_and_frame_args_are_env_bound() {
-        let cmd = Args::command();
-        for (id, env) in [
-            ("frame_topic", "FRAME_TOPIC"),
-            ("info_topic", "INFO_TOPIC"),
-            ("jpeg_topic", "JPEG_TOPIC"),
-            ("h264_topic", "H264_TOPIC"),
-            ("h264_tiles_topics", "H264_TILES_TOPICS"),
-            ("base_frame_id", "BASE_FRAME_ID"),
-            ("camera_frame_id", "CAMERA_FRAME_ID"),
-        ] {
-            let arg = cmd
-                .get_arguments()
-                .find(|a| a.get_id() == id)
-                .unwrap_or_else(|| panic!("no such argument: {id}"));
-            let bound = arg.get_env().map(|e| e.to_string_lossy().into_owned());
-            assert_eq!(
-                bound.as_deref(),
-                Some(env),
-                "--{} must be settable via {env}",
-                id.replace('_', "-")
-            );
-        }
     }
 
     #[test]
@@ -744,19 +835,17 @@ mod tests {
         ];
         for (raw, w, h, fps) in cases {
             let mode = CameraMode::from_str(raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
-            assert_eq!(mode.size, Some((w, h)), "{raw}");
+            assert_eq!(mode.size, (w, h), "{raw}");
             assert_eq!(mode.fps, fps, "{raw}");
         }
     }
 
     #[test]
-    fn fps_only_modes_leave_size_unset() {
-        for raw in ["30FPS", "30fps", "5FPS", " 60FPS "] {
-            let mode = CameraMode::from_str(raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
-            assert_eq!(mode.size, None, "{raw}");
-            assert!(mode.fps > 0, "{raw}");
+    fn fps_only_modes_point_to_camera_fps() {
+        for raw in ["30FPS", "30fps", " 60FPS "] {
+            let err = CameraMode::from_str(raw).unwrap_err();
+            assert!(err.contains("CAMERA_FPS"), "{raw}: {err}");
         }
-        assert_eq!(CameraMode::from_str("30FPS").unwrap().fps, 30);
     }
 
     #[test]
@@ -767,7 +856,6 @@ mod tests {
             "30",
             "FPS30",
             "1080p0",
-            "2147483648FPS",
             "4K2147483648",
             "QSXGA30",
             "1080p30fps",
@@ -777,59 +865,91 @@ mod tests {
     }
 
     #[test]
-    fn combined_mode_overrides_camera_size() {
-        let args = Args::parse_from([
-            "edgefirst-camera",
-            "--camera-mode",
-            "720p30",
-            "--camera-size",
-            "1920",
-            "1080",
-        ]);
-        assert_eq!(args.requested_capture_size(), Some((1280, 720)));
-        assert_eq!(args.requested_capture_fps(), Some(30));
-    }
-
-    #[test]
-    fn fps_only_mode_uses_camera_size() {
-        let args = Args::parse_from([
-            "edgefirst-camera",
-            "--camera-mode",
-            "30FPS",
-            "--camera-size",
-            "1440",
-            "1080",
-        ]);
-        assert_eq!(args.requested_capture_size(), Some((1440, 1080)));
-        assert_eq!(args.requested_capture_fps(), Some(30));
-    }
-
-    #[test]
-    fn neither_mode_nor_size_means_probe_the_device() {
+    fn source_defaults_to_the_camera_device() {
         let args = Args::parse_from(["edgefirst-camera"]);
-        assert_eq!(args.camera_size, None);
+        assert_eq!(args.source_spec(), "/dev/video3");
+        assert!(!args.is_file_source());
+        let args = Args::parse_from(["edgefirst-camera", "--camera", "/dev/video0"]);
+        assert_eq!(args.source_spec(), "/dev/video0");
+    }
+
+    #[test]
+    fn source_wins_over_camera() {
+        let args = Args::parse_from([
+            "edgefirst-camera",
+            "--camera",
+            "/dev/video0",
+            "--source",
+            "mock:640x480@30",
+        ]);
+        assert_eq!(args.source_spec(), "mock:640x480@30");
+    }
+
+    #[test]
+    fn replay_is_a_file_source() {
+        let args = Args::parse_from(["edgefirst-camera", "--replay", "rec/run.h264"]);
+        assert_eq!(args.source_spec(), "file:rec/run.h264");
+        assert!(args.is_file_source());
+        assert!(
+            Args::try_parse_from(["edgefirst-camera", "--replay", "a.h264", "--source", "mock"])
+                .is_err(),
+            "--replay and --source name the same thing"
+        );
+    }
+
+    #[test]
+    fn replay_fps_applies_to_file_sources_only() {
+        let file = Args::parse_from([
+            "edgefirst-camera",
+            "--source",
+            "file:a.h264",
+            "--replay-fps",
+            "15",
+        ]);
+        assert_eq!(file.explicit_fps(), Some(15.0));
+        let live = Args::parse_from(["edgefirst-camera", "--replay-fps", "15"]);
+        assert_eq!(live.explicit_fps(), None);
+        let both = Args::parse_from([
+            "edgefirst-camera",
+            "--source",
+            "file:a.h264",
+            "--replay-fps",
+            "15",
+            "--camera-fps",
+            "10",
+        ]);
+        assert_eq!(both.explicit_fps(), Some(10.0), "CAMERA_FPS wins");
+    }
+
+    #[test]
+    fn camera_fps_accepts_fractional_positive_rates() {
+        let args = Args::parse_from(["edgefirst-camera", "--camera-fps", "29.97"]);
+        assert_eq!(args.explicit_fps(), Some(29.97));
+        for bad in ["0", "-1", "fast", "inf"] {
+            assert!(
+                Args::try_parse_from(["edgefirst-camera", "--camera-fps", bad]).is_err(),
+                "{bad} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn neither_size_nor_fps_keeps_the_camera_setting() {
+        let args = Args::parse_from(["edgefirst-camera"]);
+        assert_eq!(args.explicit_size(), None);
+        assert_eq!(args.explicit_fps(), None);
         assert_eq!(args.camera_mode, None);
-        assert_eq!(args.requested_capture_size(), None);
-        assert_eq!(args.requested_capture_fps(), None);
     }
 
     #[test]
-    fn camera_size_alone_requests_size_but_not_fps() {
-        let args = Args::parse_from(["edgefirst-camera", "--camera-size", "800", "600"]);
-        assert_eq!(args.requested_capture_size(), Some((800, 600)));
-        assert_eq!(args.requested_capture_fps(), None);
-    }
-
-    #[test]
-    fn camera_buffers_defaults_to_unset() {
-        let args = Args::parse_from(["edgefirst-camera"]);
-        assert_eq!(args.camera_buffers, None);
+    fn camera_buffers_defaults_to_four() {
+        assert_eq!(Args::parse_from(["edgefirst-camera"]).camera_buffers, 4);
     }
 
     #[test]
     fn camera_buffers_accepts_the_supported_range() {
         let args = Args::parse_from(["edgefirst-camera", "--camera-buffers", "6"]);
-        assert_eq!(args.camera_buffers, Some(6));
+        assert_eq!(args.camera_buffers, 6);
         for bad in ["0", "1", "33", "four"] {
             assert!(
                 Args::try_parse_from(["edgefirst-camera", "--camera-buffers", bad]).is_err(),
@@ -839,32 +959,88 @@ mod tests {
     }
 
     #[test]
-    fn camera_buffers_is_env_bound() {
-        let cmd = Args::command();
-        let arg = cmd
-            .get_arguments()
-            .find(|a| a.get_id() == "camera_buffers")
-            .expect("camera_buffers");
-        assert_eq!(
-            arg.get_env()
-                .map(|e| e.to_string_lossy().into_owned())
-                .as_deref(),
-            Some("CAMERA_BUFFERS")
-        );
+    fn controls_take_auto_or_a_value() {
+        let args = Args::parse_from([
+            "edgefirst-camera",
+            "--exposure",
+            "10000",
+            "--gain",
+            "AUTO",
+            "--white-balance",
+            "5600",
+        ]);
+        assert_eq!(args.exposure, Some(Setting::Manual(10_000)));
+        assert_eq!(args.gain, Some(Setting::Auto));
+        assert_eq!(args.white_balance, Some(Setting::Manual(5600)));
+        for (flag, bad) in [
+            ("--exposure", "0"),
+            ("--exposure", "long"),
+            ("--gain", "-2"),
+            ("--white-balance", "0"),
+        ] {
+            assert!(
+                Args::try_parse_from(["edgefirst-camera", flag, bad]).is_err(),
+                "{flag} {bad} must be rejected"
+            );
+        }
     }
 
     #[test]
-    fn camera_mode_is_env_bound() {
-        let cmd = Args::command();
-        let arg = cmd
-            .get_arguments()
-            .find(|a| a.get_id() == "camera_mode")
-            .expect("camera_mode");
+    fn memory_defaults_to_auto() {
         assert_eq!(
-            arg.get_env()
-                .map(|e| e.to_string_lossy().into_owned())
-                .as_deref(),
-            Some("CAMERA_MODE")
+            Args::parse_from(["edgefirst-camera"]).memory,
+            MemorySetting::Auto
         );
+        let args = Args::parse_from(["edgefirst-camera", "--memory", "export"]);
+        assert_eq!(args.memory, MemorySetting::Export);
+    }
+
+    /// Arguments bound to the environment but deliberately absent from
+    /// `FLAG_ENV`: hidden 2.x aliases.
+    const UNLISTED: &[&str] = &["REPLAY"];
+
+    #[test]
+    fn every_flag_is_bound_to_its_environment_variable() {
+        let cmd = Args::command();
+        let mut bound: Vec<String> = cmd
+            .get_arguments()
+            .filter_map(|a| a.get_env().map(|e| e.to_string_lossy().into_owned()))
+            .filter(|e| !UNLISTED.contains(&e.as_str()))
+            .collect();
+        bound.sort();
+        let mut listed: Vec<String> = FLAG_ENV.iter().map(|(_, e, _)| (*e).into()).collect();
+        listed.sort();
+        assert_eq!(bound, listed, "FLAG_ENV must list every env-bound argument");
+        for (flag, env, _) in FLAG_ENV {
+            let arg = cmd
+                .get_arguments()
+                .find(|a| a.get_long() == Some(*flag))
+                .unwrap_or_else(|| panic!("no --{flag}"));
+            assert_eq!(
+                arg.get_env()
+                    .map(|e| e.to_string_lossy().into_owned())
+                    .as_deref(),
+                Some(*env),
+                "--{flag} must be settable via {env}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_flag_accepts_its_sample_value() {
+        let cmd = Args::command();
+        for (flag, _, value) in FLAG_ENV {
+            let mut argv = vec!["edgefirst-camera".to_string(), format!("--{flag}")];
+            let switch = cmd
+                .get_arguments()
+                .find(|a| a.get_long() == Some(*flag))
+                .is_some_and(|a| !a.get_action().takes_values());
+            // A switch takes no value on the command line, only from the
+            // environment.
+            if !switch {
+                argv.extend(value.split(' ').map(str::to_string));
+            }
+            Args::try_parse_from(&argv).unwrap_or_else(|e| panic!("--{flag} {value}: {e}"));
+        }
     }
 }

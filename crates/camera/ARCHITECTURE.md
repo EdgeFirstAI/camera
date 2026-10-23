@@ -83,11 +83,12 @@ It behaves like an Import backend:
 
 ## The file backend
 
-`backend/file/` (feature `file`) plays a recording made by camera 2.x: `<name>.h264`, a raw Annex B stream, and its `<name>.json` sidecar.
+`backend/file/` (feature `file`) plays a recording made by camera 2.x or 3.0: `<name>.h264`, a raw Annex B stream, and its `<name>.json` sidecar.
+
+The sidecar is the public `Sidecar` (`sidecar.rs`, feature `file`), which recorders also write: version 1, whose `fps`, `width`, `height` and colorimetry (tensor-crate labels) configure the stream, and every other field (`camera_info`, `tf_static`) is kept verbatim as `extras` for `Camera::extras()`. It writes a whole rate as an integer and unspecified colorimetry as empty labels, as 2.x reads them.
 
 | File | Contents |
 |---|---|
-| `sidecar.rs` | Sidecar v1: `fps`, `width`, `height` and colorimetry (tensor-crate labels) configure the stream; every other field (`camera_info`, `tf_static`) is kept verbatim for `Camera::extras()` |
 | `annexb.rs` | Reads the file in chunks and splits it with `edgefirst_codec::video::access_units`; an access unit is complete once the next one starts or the file ends. Bytes outside any access unit are skipped with a warning |
 | `decode.rs` | The `Decode` seam the source drives, implemented over `edgefirst_codec::video::VideoDecoder`; unit tests drive a mock instead |
 | `mod.rs` | The `Camera`: pacing, looping, stamps, `encoded()` |

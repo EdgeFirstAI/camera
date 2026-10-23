@@ -12,7 +12,7 @@
 # ===========================================================================
 
 PROJECT_TYPE := rust
-SRC_DIRS := src tests benches
+SRC_DIRS := src tests crates
 TEST_CMD := cargo test --lib --bins
 VERSION_FILE := Cargo.toml
 VERSION_FILES := Cargo.toml CHANGELOG.md
@@ -26,7 +26,7 @@ help:
 	@echo "Available targets:"
 	@echo "  make format         - Format Rust code with cargo fmt"
 	@echo "  make lint           - Run cargo clippy"
-	@echo "  make test           - Run lib/bin unit tests (not G2D image tests)"
+	@echo "  make test           - Run lib/bin unit tests"
 	@echo "  make sbom           - Generate SBOM and check license policy"
 	@echo "  make abi-check      - Trace the vivid tests for V4L2 ioctl ABI mismatches"
 	@echo "  make bench-capture  - Run the SDK capture benchmarks on a V4L2 camera"
