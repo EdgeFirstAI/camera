@@ -250,8 +250,8 @@ struct Codec {
     #[serde(skip_serializing_if = "Option::is_none")]
     device: Option<String>,
     /// Input formats the encoder takes, of those the service feeds it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    inputs: Option<Vec<&'static str>>,
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "wire_names")]
+    inputs: Option<Vec<PixelFormat>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -302,7 +302,7 @@ fn encoder() -> Codec {
         match VideoEncoder::new(EncoderConfig::h264(640, 480, format, 30.0)) {
             Ok(encoder) => {
                 codec.device.get_or_insert_with(|| encoder.device());
-                inputs.push(format.as_str());
+                inputs.push(format);
             }
             Err(CodecError::UnsupportedFormat(_)) => {}
             Err(e) => {
@@ -335,13 +335,23 @@ fn decoder() -> Codec {
     }
 }
 
+fn wire_names<S: serde::Serializer>(
+    formats: &Option<Vec<PixelFormat>>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    s.collect_seq(formats.iter().flatten().map(|f| f.as_str()))
+}
+
 fn codec_text(codec: &Codec) -> String {
     if !codec.available {
         return format!("none ({})", codec.error.as_deref().unwrap_or("not found"));
     }
     let device = codec.device.as_deref().unwrap_or("unknown device");
     match &codec.inputs {
-        Some(inputs) => format!("{device}, inputs {}", inputs.join(", ")),
+        Some(inputs) => {
+            let names: Vec<String> = inputs.iter().map(ToString::to_string).collect();
+            format!("{device}, inputs {}", names.join(", "))
+        }
         None => device.to_owned(),
     }
 }
@@ -409,6 +419,19 @@ mod tests {
         );
         let modes = json["modes"].as_array().unwrap();
         assert!(modes.contains(&"1080p30".into()), "{modes:?}");
+    }
+
+    #[test]
+    fn encoder_inputs_are_wire_names_in_json_and_display_names_in_text() {
+        let codec = Codec {
+            available: true,
+            device: Some("/dev/video0".into()),
+            inputs: Some(vec![PixelFormat::Yuyv, PixelFormat::Rgba]),
+            error: None,
+        };
+        let json = serde_json::to_value(&codec).unwrap();
+        assert_eq!(json["inputs"], serde_json::json!(["YUYV", "rgba8"]));
+        assert_eq!(codec_text(&codec), "/dev/video0, inputs YUYV, RGBA");
     }
 
     #[test]
