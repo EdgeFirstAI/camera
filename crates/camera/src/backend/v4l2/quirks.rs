@@ -8,9 +8,13 @@
 //! - Flip goes through the `V4L2_CID_VIV_EXTCTRL` JSON control
 //!   (`dwe.s.hflip` / `dwe.s.vflip`), tried only after `HFLIP`/`VFLIP`.
 //! - While `isp_media_server` restarts, `open()` fails with `ENOENT`, then
-//!   no frame arrives for about 4 s. The backend reports both as
-//!   `NotReady` (see `device::open` and the first-frame timeout); neither
-//!   ever appears as `EAGAIN`.
+//!   no frame arrives for about 4 s. The vvcam on Maivin's 6.6 kernel also
+//!   answers setup ioctls (`S_FMT`, `S_EXT_CTRLS`, `REQBUFS`, `QBUF`,
+//!   `STREAMON`) with `EAGAIN` meanwhile. The backend reports all of these
+//!   as `NotReady` (see `device::open`, `device::v4l2_error` and the
+//!   first-frame timeout).
+//! - Maivin's vvcam rejects `S_PARM`; the frame rate goes through the
+//!   JSON control's `s.fps` once streaming.
 //! - A bare `STREAMOFF`/`STREAMON` restart delivers no frames and the next
 //!   close crashes `isp_media_server`, so `stop()` always frees the queue
 //!   with `REQBUFS(0)`.

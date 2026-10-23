@@ -80,6 +80,10 @@ struct MockCamera {
     periods: u64,
     seq: u64,
     stats: CaptureStats,
+    /// The `stall-after=N` and `disconnect-after=N` faults: after N frames
+    /// every read times out, as a vvcam stream does once its ISP daemon
+    /// restarts, or fails as an unplugged camera does.
+    fail_after: Option<(u64, ErrorKind)>,
 }
 
 pub(crate) fn open(builder: CameraBuilder) -> Result<Box<dyn Camera>> {
@@ -140,6 +144,15 @@ pub(crate) fn open(builder: CameraBuilder) -> Result<Box<dyn Camera>> {
         periods: 0,
         seq: 0,
         stats: CaptureStats::default(),
+        fail_after: builder.faults.iter().find_map(|f| {
+            let (name, n) = f.split_once('=')?;
+            let kind = match name {
+                "stall-after" => ErrorKind::Timeout,
+                "disconnect-after" => ErrorKind::Disconnected,
+                _ => return None,
+            };
+            Some((n.parse().ok()?, kind))
+        }),
     };
     for control in builder.controls {
         let applied = camera.set_control(control)?;
@@ -362,6 +375,20 @@ impl Camera for MockCamera {
                 ErrorKind::InvalidConfig,
                 "next_frame while stopped",
             ));
+        }
+        match self.fail_after {
+            Some((n, ErrorKind::Timeout)) if self.stats.frames >= n => {
+                std::thread::sleep(timeout.unwrap_or(Duration::from_millis(10)));
+                self.stats.timeouts += 1;
+                return Err(Error::new(
+                    ErrorKind::Timeout,
+                    "no frame within the timeout",
+                ));
+            }
+            Some((n, kind)) if self.stats.frames >= n => {
+                return Err(Error::new(kind, "the mock camera went away"));
+            }
+            _ => {}
         }
         let interval = Duration::from_secs_f64(1.0 / self.config.frame_rate.unwrap_or(30.0));
         let deadline = timeout.map(|t| Instant::now() + t);

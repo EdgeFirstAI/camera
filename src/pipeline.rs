@@ -25,7 +25,7 @@ use std::{
 
 use edgefirst_camera::{
     schema::{self, FrameTensor},
-    Camera, ErrorKind, Frame, Sidecar, StreamConfig,
+    Camera, ErrorKind, Frame, Mirror, Sidecar, StreamConfig,
 };
 use edgefirst_codec::video::{Bitrate, EncodedFrame};
 use edgefirst_schemas::{builtin_interfaces::Time, edgefirst_msgs::CameraFrame};
@@ -99,18 +99,43 @@ pub(crate) struct Settings {
 /// A frame on its way to an encoder thread, with its stamp.
 type Job = (Arc<Frame>, Time);
 
+/// Opens the source again after it stopped delivering; `None` when a
+/// shutdown came first.
+pub(crate) type Reopen<'a> = &'a mut dyn FnMut() -> Result<Option<Opened>, Box<dyn Error>>;
+
+/// What the capture loop carries across a reopened camera.
+#[derive(Debug)]
+struct Progress {
+    /// Added to the camera's `seq`, so `seq` continues across a reopen.
+    seq_base: u64,
+    /// The `seq` after the last one published.
+    next_seq: u64,
+    /// Frames captured in all.
+    captured: u64,
+    /// Frames the current camera delivered.
+    since_open: u64,
+    /// When `max_duration` runs out.
+    deadline: Option<Instant>,
+}
+
 /// Runs the pipeline until `shutdown` is set, the camera fails, or a file
 /// source ends.
+///
+/// A camera that delivered frames and then stops (read timeouts, a
+/// disconnect, an ISP restart) is closed and opened again with `reopen`
+/// while the encoders keep running, when the new camera delivers the same
+/// stream.
 ///
 /// # Errors
 ///
 /// Startup failures (no encoder, an unwritable recording, a stream larger
-/// than the capture) and camera failures.
+/// than the capture) and camera failures that a reopen does not recover.
 pub(crate) fn run(
     opened: Opened,
     session: &Session,
     settings: &Settings,
     open_encoder: OpenEncoder,
+    mut reopen: Option<Reopen<'_>>,
     shutdown: &AtomicBool,
 ) -> Result<(), Box<dyn Error>> {
     let Opened {
@@ -246,16 +271,60 @@ pub(crate) fn run(
     if !file {
         discard_waiting(camera.as_mut());
     }
-    let result = capture(
-        camera.as_mut(),
-        session,
-        settings,
-        &config,
-        fps,
-        &sinks,
-        forward.as_ref(),
-        shutdown,
-    );
+    let mut progress = Progress {
+        seq_base: 0,
+        next_seq: 0,
+        captured: 0,
+        since_open: 0,
+        deadline: settings.max_duration.map(|d| Instant::now() + d),
+    };
+    let mut camera = Some(camera);
+    let result = loop {
+        let Some(current) = camera.as_deref_mut() else {
+            break Ok(());
+        };
+        let result = capture(
+            current,
+            session,
+            settings,
+            &config,
+            fps,
+            &sinks,
+            forward.as_ref(),
+            &mut progress,
+            shutdown,
+        );
+        let Err(e) = result else {
+            break Ok(());
+        };
+        let Some(reopen) = reopen
+            .as_mut()
+            .filter(|_| progress.since_open > 0 && recoverable(&*e))
+        else {
+            break Err(e);
+        };
+        warn!("the camera stopped delivering ({e}); reopening it");
+        if let Some(mut old) = camera.take() {
+            if let Err(e) = old.stop() {
+                debug!("stopping the camera: {e}");
+            }
+        }
+        match reopen() {
+            Ok(Some(next)) => {
+                if let Err(e) = same_stream(&config, software_mirror, &next) {
+                    break Err(e);
+                }
+                let mut next = next.camera;
+                discard_waiting(next.as_mut());
+                info!("Camera reopened; capturing again");
+                progress.seq_base = progress.next_seq;
+                progress.since_open = 0;
+                camera = Some(next);
+            }
+            Ok(None) => break Ok(()),
+            Err(e) => break Err(e),
+        }
+    };
 
     drop(sinks);
     for t in threads {
@@ -265,10 +334,51 @@ pub(crate) fn run(
     }
     done.store(true, Ordering::SeqCst);
     let _ = tf.join();
-    if let Err(e) = camera.stop() {
-        warn!("stopping the camera: {e}");
+    if let Some(mut camera) = camera {
+        if let Err(e) = camera.stop() {
+            warn!("stopping the camera: {e}");
+        }
     }
     result
+}
+
+/// Whether a reopen may recover the camera failure `e`.
+fn recoverable(e: &(dyn Error + 'static)) -> bool {
+    e.downcast_ref::<edgefirst_camera::Error>()
+        .is_some_and(|e| {
+            matches!(
+                e.kind(),
+                ErrorKind::Timeout | ErrorKind::Disconnected | ErrorKind::NotReady | ErrorKind::Io
+            )
+        })
+}
+
+/// Refuses a reopened camera whose stream differs from the one the
+/// encoders were set up for.
+fn same_stream(
+    config: &StreamConfig,
+    software_mirror: Option<Mirror>,
+    next: &Opened,
+) -> Result<(), Box<dyn Error>> {
+    let got = next.camera.config();
+    if (got.width, got.height, got.format) != (config.width, config.height, config.format)
+        || next.software_mirror != software_mirror
+    {
+        return Err(format!(
+            "the reopened camera delivers {}x{} {}, mirrored in software: {:?}, where the \
+             stream is {}x{} {}, mirrored in software: {:?}",
+            got.width,
+            got.height,
+            got.format,
+            next.software_mirror,
+            config.width,
+            config.height,
+            config.format,
+            software_mirror
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Discards the frames captured while the encoders started: they are
@@ -397,6 +507,7 @@ fn capture(
     fps: f64,
     sinks: &[(Sender<Job>, &'static str)],
     forward: Option<&Output>,
+    progress: &mut Progress,
     shutdown: &AtomicBool,
 ) -> Result<(), Box<dyn Error>> {
     let frames = session
@@ -422,14 +533,14 @@ fn capture(
     // started) are not capture losses; the baseline is the first frame's.
     let mut lost: Option<u64> = None;
     let mut cdr = Vec::new();
-    let deadline = settings.max_duration.map(|d| Instant::now() + d);
-    let mut captured = 0u64;
 
     while !shutdown.load(Ordering::SeqCst) {
-        if settings.max_frames.is_some_and(|max| captured >= max)
-            || deadline.is_some_and(|d| Instant::now() >= d)
+        if settings
+            .max_frames
+            .is_some_and(|max| progress.captured >= max)
+            || progress.deadline.is_some_and(|d| Instant::now() >= d)
         {
-            info!("Captured {captured} frames; stopping");
+            info!("Captured {} frames; stopping", progress.captured);
             break;
         }
         let frame = match info_span!("camera_read").in_scope(|| camera.next_frame(Some(timeout))) {
@@ -457,7 +568,10 @@ fn capture(
                 }
             },
         };
-        captured += 1;
+        progress.captured += 1;
+        progress.since_open += 1;
+        let seq = progress.seq_base + frame.seq();
+        progress.next_seq = seq + 1;
         if settings.tracy {
             plot!("fps", rate.update(Instant::now()));
         }
@@ -475,7 +589,7 @@ fn capture(
                 CameraFrame::builder()
                     .stamp(stamp)
                     .frame_id(settings.frame_id.as_str())
-                    .seq(frame.seq())
+                    .seq(seq)
                     .tensor(fields)
                     .encode_into_vec(&mut cdr)
             })?;
@@ -927,7 +1041,7 @@ mod tests {
         let opened = source::open(&request, processor.as_ref(), &shutdown)
             .unwrap()
             .unwrap();
-        run(opened, &session, &settings, open_fake, &shutdown).unwrap();
+        run(opened, &session, &settings, open_fake, None, &shutdown).unwrap();
         // tf_static is republished every second.
         let deadline = Instant::now() + Duration::from_secs(3);
         while !received.lock().unwrap().contains_key("tf_static") && Instant::now() < deadline {
@@ -1021,6 +1135,106 @@ mod tests {
         assert_eq!((header.width, header.height), (320, 240));
     }
 
+    fn mock_opened(fault: &str) -> Opened {
+        let mut camera = edgefirst_camera::CameraBuilder::source("mock:64x48@120")
+            .unwrap()
+            .fault(fault)
+            .open()
+            .unwrap();
+        camera.start().unwrap();
+        Opened {
+            camera,
+            kind: SourceKind::Synthetic,
+            software_mirror: None,
+        }
+    }
+
+    /// The `seq` of every `camera/frame` published until `count` arrive.
+    fn frame_seqs(
+        session: &Session,
+        count: usize,
+        shutdown: &Arc<AtomicBool>,
+    ) -> (Arc<Mutex<Vec<u64>>>, zenoh::pubsub::Subscriber<()>) {
+        let seqs: Arc<Mutex<Vec<u64>>> = Arc::default();
+        let subscriber = {
+            let seqs = Arc::clone(&seqs);
+            let shutdown = Arc::clone(shutdown);
+            session
+                .declare_subscriber("camera/frame")
+                .callback(move |sample| {
+                    let payload = sample.payload().to_bytes();
+                    let mut seqs = seqs.lock().unwrap();
+                    seqs.push(CameraFrame::from_cdr(&payload[..]).unwrap().seq());
+                    if seqs.len() >= count {
+                        shutdown.store(true, Ordering::SeqCst);
+                    }
+                })
+                .wait()
+                .unwrap()
+        };
+        (seqs, subscriber)
+    }
+
+    /// A camera that goes away after delivering is opened again, and the
+    /// published `seq` runs on instead of restarting.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn a_camera_that_goes_away_is_reopened_and_seq_runs_on() {
+        let (_, settings) = settings(&["--source", "mock:64x48@120", "--h264", "false"]);
+        let session = local_session();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (seqs, _subscriber) = frame_seqs(&session, 35, &shutdown);
+        let mut reopens = 0;
+        let mut reopen = || -> Result<Option<Opened>, Box<dyn Error>> {
+            reopens += 1;
+            Ok(Some(mock_opened("disconnect-after=10")))
+        };
+        run(
+            mock_opened("disconnect-after=10"),
+            &session,
+            &settings,
+            open_fake,
+            Some(&mut reopen),
+            &shutdown,
+        )
+        .unwrap();
+        let seqs = seqs.lock().unwrap().clone();
+        assert!(reopens >= 3, "{reopens} reopens");
+        // Each camera's first frame is discarded as stale, as at startup,
+        // so a reopen skips one number and never starts again from 0.
+        assert!(
+            seqs.windows(2).all(|w| w[1] > w[0] && w[1] - w[0] <= 2),
+            "{seqs:?}"
+        );
+        assert!(seqs.last().unwrap() >= &30, "{seqs:?}");
+    }
+
+    /// A camera that fails before delivering a frame is not reopened: the
+    /// failure ends the run, for the service manager to restart.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn a_camera_that_never_delivers_is_not_reopened() {
+        let (_, settings) = settings(&["--source", "mock:64x48@120", "--h264", "false"]);
+        let session = local_session();
+        let shutdown = AtomicBool::new(false);
+        let mut reopens = 0;
+        let mut reopen = || -> Result<Option<Opened>, Box<dyn Error>> {
+            reopens += 1;
+            Ok(Some(mock_opened("disconnect-after=0")))
+        };
+        let err = run(
+            mock_opened("disconnect-after=10"),
+            &session,
+            &settings,
+            open_fake,
+            Some(&mut reopen),
+            &shutdown,
+        )
+        .unwrap_err();
+        assert_eq!(reopens, 1, "reopened once, then gave up");
+        assert!(err.to_string().contains("went away"), "{err}");
+    }
+
     #[test]
     fn camera_frame_describes_the_tensor() {
         let all = run_until(
@@ -1089,7 +1303,7 @@ mod tests {
         let session = local_session();
         let flag = AtomicBool::new(false);
         let opened = source::open(&request, None, &flag).unwrap().unwrap();
-        let err = run(opened, &session, &settings, open_fake, &flag).unwrap_err();
+        let err = run(opened, &session, &settings, open_fake, None, &flag).unwrap_err();
         assert!(err.to_string().contains("STREAM_SIZE 1920x1080"), "{err}");
     }
 

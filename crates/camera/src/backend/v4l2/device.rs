@@ -13,8 +13,19 @@ use super::format;
 use crate::{Backend, CameraDescriptor, Error, ErrorKind, FormatInfo, Rates, SizeRates, Sizes};
 
 /// Converts an `edgefirst-v4l2` error, naming what the backend was doing.
+///
+/// `EAGAIN` is [`ErrorKind::NotReady`]: vvcam answers setup ioctls with it
+/// while `isp_media_server` restarts. A dequeue's `EAGAIN` (no buffer yet)
+/// never reaches here; `edgefirst-v4l2` returns it as no buffer.
 pub(crate) fn v4l2_error(what: &str, e: edgefirst_v4l2::Error) -> Error {
     use edgefirst_v4l2::ErrorKind as K;
+    if errno(&e) == Some(libc::EAGAIN) {
+        return Error::new(
+            ErrorKind::NotReady,
+            format!("{what}: the device is not ready ({e})"),
+        )
+        .with_source(e);
+    }
     let kind = match e.kind() {
         K::Disconnected => ErrorKind::Disconnected,
         K::Busy => ErrorKind::Busy,

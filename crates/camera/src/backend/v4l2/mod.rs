@@ -527,6 +527,13 @@ impl V4l2Camera {
         on_refusal: OnRefusal,
         refusal: Refusal,
     ) -> Result<bool> {
+        // A device that is not ready refused nothing; the caller retries.
+        if refusal.error.kind() == ErrorKind::NotReady {
+            if is_caller {
+                self.provided = Some(untable(table));
+            }
+            return Err(refusal.error);
+        }
         match on_refusal {
             OnRefusal::Reject => {
                 if is_caller {
@@ -689,6 +696,11 @@ enum StartFailure {
 impl StartFailure {
     fn is_disconnected(&self) -> bool {
         matches!(self, Self::Driver(e) if e.is_disconnected())
+    }
+
+    /// The driver is not ready yet: no reason to try other buffers.
+    fn is_eagain(&self) -> bool {
+        matches!(self, Self::Driver(e) if errno(e) == Some(libc::EAGAIN))
     }
 }
 
@@ -875,7 +887,8 @@ impl Camera for V4l2Camera {
                 let pool = self.pool.as_ref().map(|p| (p.memory, p.caller));
                 let auto_probe = pool == Some((ResolvedMemory::Import, false))
                     && self.request.memory == MemoryStrategy::Auto
-                    && !failure.is_disconnected();
+                    && !failure.is_disconnected()
+                    && !failure.is_eagain();
                 if !auto_probe {
                     let e = self.start_error(failure);
                     // Import keeps its tensors for the next attempt; Export
@@ -1037,7 +1050,7 @@ impl V4l2Camera {
             self.pool = Some(pool);
             return r.map_err(|refusal| {
                 let _ = self.queue.free();
-                if caller {
+                if caller && refusal.error.kind() != ErrorKind::NotReady {
                     Error::buffers_rejected(
                         Rejection::Driver {
                             errno: refusal.errno,

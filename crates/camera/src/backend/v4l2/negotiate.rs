@@ -176,9 +176,9 @@ pub(crate) fn negotiate(
     )
     .entered();
     dev.try_format(&mut fmt)
-        .map_err(|e| format_error("TRY_FMT", e))?;
+        .map_err(|e| v4l2_error("TRY_FMT", e))?;
     dev.set_format(&mut fmt)
-        .map_err(|e| format_error("S_FMT", e))?;
+        .map_err(|e| v4l2_error("S_FMT", e))?;
 
     let got = current_fourcc(&mut fmt, multiplanar);
     if got != mapping.fourcc {
@@ -290,20 +290,6 @@ fn layout(
 
 /// The frame interval for `fps`, as a fraction with millisecond-of-a-frame
 /// precision (30 fps is 1000/30000).
-/// A format ioctl's error. `EAGAIN` is [`ErrorKind::NotReady`]: vvcam
-/// returns it while `isp_media_server` restarts.
-fn format_error(what: &str, e: edgefirst_v4l2::Error) -> Error {
-    if super::device::errno(&e) == Some(libc::EAGAIN) {
-        Error::new(
-            ErrorKind::NotReady,
-            format!("{what}: the device is not ready (EAGAIN)"),
-        )
-        .with_source(e)
-    } else {
-        v4l2_error(what, e)
-    }
-}
-
 pub(crate) fn interval_for(fps: f64) -> Fraction {
     Fraction::new(
         1000,

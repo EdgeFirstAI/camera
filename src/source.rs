@@ -340,6 +340,8 @@ fn open_once(
         let why = match camera.set_control(Control::Mirror(request.mirror)) {
             Ok(Applied::Unsupported(why)) => Some(format!("{why:?}")),
             Ok(_) => None,
+            // Not refused: the device is not ready yet, so open again.
+            Err(e) if e.kind() == ErrorKind::NotReady => return Err(e),
             Err(e) => Some(e.to_string()),
         };
         if let Some(why) = why {

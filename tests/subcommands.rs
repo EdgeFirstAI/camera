@@ -120,7 +120,7 @@ fn convert_writes_an_mp4() -> Result<(), BoxError> {
 }
 
 /// `record` writes the stream and a sidecar a `file:` source reads where
-/// there is an encoder, and exits with 4 where there is none.
+/// there is an encoder, and exits with 69 (`UNAVAILABLE`) where there is none.
 #[test]
 fn record_needs_an_encoder() -> Result<(), BoxError> {
     let encoder = json(&["info", "--json"])?["encoder"]["available"]
@@ -142,7 +142,7 @@ fn record_needs_an_encoder() -> Result<(), BoxError> {
         ])?;
         let stderr = String::from_utf8_lossy(&o.stderr);
         if !encoder {
-            assert_eq!(o.status.code(), Some(4), "{stderr}");
+            assert_eq!(o.status.code(), Some(69), "{stderr}");
             assert!(stderr.contains("record needs an H.264 encoder"), "{stderr}");
             return Ok(());
         }

@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Au-Zone Technologies. All Rights Reserved.
 
-//! Exit statuses, the same table as the videostream CLI's.
+//! Exit statuses.
+//!
+//! systemd names exit statuses in the journal: 1 to 7 by their LSB init
+//! script meanings and 64 to 78 by `sysexits.h`. Each status here is one
+//! whose name matches its meaning (`status=75/TEMPFAIL`), not the
+//! videostream CLI's 3 to 6, which systemd would report as
+//! `NOTIMPLEMENTED`, `NOPERMISSION`, `NOTINSTALLED` and `NOTCONFIGURED`.
 
 use std::{error::Error, fmt, process::ExitCode};
 
@@ -12,18 +18,21 @@ use edgefirst_codec::CodecError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum Status {
-    /// A failure with no more specific status.
+    /// A failure with no more specific status (`FAILURE`).
     General = 1,
-    /// Invalid arguments or configuration. clap exits with 2 too.
+    /// Invalid arguments or configuration (`INVALIDARGUMENT`). clap exits
+    /// with 2 too.
     InvalidArgs = 2,
-    /// The camera is missing, held by another process, or went away.
-    CameraNotFound = 3,
-    /// No H.264 encoder or decoder.
-    CodecUnavailable = 4,
-    /// The Zenoh session could not be opened.
-    Socket = 5,
-    /// The camera delivered no frames in time.
-    Timeout = 6,
+    /// The camera or recording is missing, held by another process, or
+    /// went away (`EX_NOINPUT`, `NOINPUT`).
+    CameraNotFound = 66,
+    /// No H.264 encoder or decoder (`EX_UNAVAILABLE`, `UNAVAILABLE`).
+    CodecUnavailable = 69,
+    /// The Zenoh session could not be opened (`EX_NOHOST`, `NOHOST`).
+    Socket = 68,
+    /// The camera delivered no frames in time; trying again later may
+    /// work (`EX_TEMPFAIL`, `TEMPFAIL`).
+    Timeout = 75,
 }
 
 impl From<Status> for ExitCode {
@@ -110,14 +119,14 @@ mod tests {
     }
 
     #[test]
-    fn statuses_match_the_videostream_table() {
+    fn statuses_are_the_codes_systemd_names_for_their_meaning() {
         let codes = [
             (Status::General, 1),
             (Status::InvalidArgs, 2),
-            (Status::CameraNotFound, 3),
-            (Status::CodecUnavailable, 4),
-            (Status::Socket, 5),
-            (Status::Timeout, 6),
+            (Status::CameraNotFound, 66),
+            (Status::CodecUnavailable, 69),
+            (Status::Socket, 68),
+            (Status::Timeout, 75),
         ];
         for (status, code) in codes {
             assert_eq!(status as u8, code);

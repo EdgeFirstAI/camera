@@ -203,11 +203,22 @@ fn run(
     let Some(opened) = source::open(&request, processor.as_ref(), &SHUTDOWN)? else {
         return Ok(());
     };
-    drop(processor);
 
     let mut settings = settings(args, &request, opened.camera.extras());
     adjust(&mut settings);
-    pipeline::run(opened, session, &settings, encode::open_hardware, &SHUTDOWN)?;
+    // A camera that stops delivering (an ISP daemon restart on vvcam, a
+    // USB reset) is opened again in this process, with the startup retry.
+    let mut reopen = || source::open(&request, processor.as_ref(), &SHUTDOWN);
+    let reopen: Option<pipeline::Reopen<'_>> =
+        (request.kind == SourceKind::Device).then_some(&mut reopen);
+    pipeline::run(
+        opened,
+        session,
+        &settings,
+        encode::open_hardware,
+        reopen,
+        &SHUTDOWN,
+    )?;
     info!("Shutdown complete");
     Ok(())
 }

@@ -416,17 +416,17 @@ edgefirst-camera record out.h264 --frames 300   # capture and encode to a file w
 edgefirst-camera convert out.h264 out.mp4       # Annex-B to MP4, no hardware needed
 ```
 
-`record` takes the capture options after its name (`--source`, `--camera-size`, `--mirror`, `--stream-size`, ...). The program exits with the same statuses as the videostream CLI:
+`record` takes the capture options after its name (`--source`, `--camera-size`, `--mirror`, `--stream-size`, ...). Exit statuses are ones systemd names correctly in the journal (`status=75/TEMPFAIL`):
 
 | Status | Meaning |
 |---|---|
 | 0 | Success |
 | 1 | Any other failure |
 | 2 | Invalid arguments or configuration |
-| 3 | The camera or recording is missing, busy or went away |
-| 4 | No H.264 encoder or decoder |
-| 5 | The Zenoh session could not be opened |
-| 6 | The camera delivered no frames in time |
+| 66 (`NOINPUT`) | The camera or recording is missing, busy or went away |
+| 68 (`NOHOST`) | The Zenoh session could not be opened |
+| 69 (`UNAVAILABLE`) | No H.264 encoder or decoder |
+| 75 (`TEMPFAIL`) | The camera delivered no frames in time |
 
 ---
 

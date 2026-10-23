@@ -354,3 +354,21 @@ fn test_mock_pool_depth_limits() {
         assert_eq!(err.kind(), ErrorKind::InvalidConfig, "depth {depth}");
     }
 }
+
+#[test]
+#[cfg(debug_assertions)]
+fn test_mock_stall_fault_times_out_after_n_frames() {
+    let mut camera = edgefirst_camera::CameraBuilder::source("mock:64x48@120")
+        .unwrap()
+        .fault("stall-after=3")
+        .open()
+        .unwrap();
+    camera.start().unwrap();
+    for _ in 0..3 {
+        camera.next_frame(Some(Duration::from_secs(1))).unwrap();
+    }
+    let err = camera
+        .next_frame(Some(Duration::from_millis(20)))
+        .unwrap_err();
+    assert_eq!(err.kind(), edgefirst_camera::ErrorKind::Timeout);
+}

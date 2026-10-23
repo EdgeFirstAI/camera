@@ -73,8 +73,10 @@ The application and the SDK also build and run on macOS and Windows, where only 
 
 1. **Arguments.** Empty environment variables are removed before parsing, so `KEY=""` in `/etc/default/camera` means unset. Combinations that cannot work (`--record` without `--h264`, or with a `file:` source) fail before anything opens.
 2. **Request.** `source::Request` resolves the source (`--source`, else the hidden 2.x `--replay` as a `file:` source, else `--camera`), the requested size and rate, the pool depth, the memory strategy, mirroring and controls. A `CAMERA_MODE` is checked against the modes the camera reports (`edgefirst_camera::probe`) and expands to a size and rate; explicit `CAMERA_SIZE` and `CAMERA_FPS` win over it with a warning. File and mock sources cannot report modes, so a mode there is an error. Devices are asked for YUYV, which the encoders and converters take directly; a device that does not offer it is captured in its current format.
-3. **Open.** `source::open` opens the camera, applies mirroring, provides the capture pool and starts streaming (see [Buffers](#buffers-and-backpressure)). It retries while the SDK reports `NotReady` (`ENOENT` on open, or no first frame within the SDK's timeout, as when `isp_media_server` has not started serving the device), within a 15 s budget and six attempts, so a wedged ISP lands the unit in `failed` within systemd's start limit instead of hammering it. Every other error fails startup. A shutdown during the retry exits cleanly.
+3. **Open.** `source::open` opens the camera, applies mirroring, provides the capture pool and starts streaming (see [Buffers](#buffers-and-backpressure)). It retries while the SDK reports `NotReady` (`ENOENT` on open, `EAGAIN` on `S_FMT`, or no first frame within the SDK's timeout, as when `isp_media_server` has not started serving the device), within a 15 s budget and six attempts, so a wedged ISP lands the unit in `failed` within systemd's start limit instead of hammering it. Every other error fails startup. A shutdown during the retry exits cleanly.
 4. **Pipeline.** `pipeline::run` opens the encoders, the recording if any, and the publishers, then runs the capture loop. An encoder that cannot open is a startup error.
+
+**Recovery.** A camera that delivered frames and then stops (read timeouts past the five-retry budget, a disconnect, `NotReady` or an I/O error) is stopped, closed and opened again with step 3 while the encoders, recorder and publishers keep running. On vvcam that is what an `isp_media_server` restart needs: the old stream delivers nothing until the device is reopened. `seq` continues from the last published frame. Frames held by the encoders keep their buffers across the close. When the reopened camera delivers a different size, format or software mirroring, or fails before delivering a frame, the service exits for systemd to restart. File sources are not reopened.
 
 The tokio runtime serves signal handling and the tokio console only. Capture and encoding run on plain threads: the image crate's GL converter blocks on its worker, which a tokio runtime thread may not do, and Zenoh's synchronous API (`Wait`) needs no runtime.
 
@@ -252,17 +254,17 @@ Without a subcommand the program runs the service. The subcommands are tools for
 
 JSON output names pixel formats by their HAL wire names (`YUYV`, `rgba8`), as `CameraFrame.format` does. Logs go to stderr so stdout holds only the output.
 
-Every failure, of the service or a subcommand, exits with a status from the videostream CLI's table. A missing codec anywhere in an error's source chain wins over the camera error that carries it, so a `file:` source without a decoder exits with 4.
+Every failure, of the service or a subcommand, exits with a status systemd names for its meaning in the journal: 1 and 2 are LSB statuses (`FAILURE`, `INVALIDARGUMENT`), the rest are `sysexits.h` codes. The videostream CLI's 3 to 6 would read as `NOTIMPLEMENTED`, `NOPERMISSION`, `NOTINSTALLED` and `NOTCONFIGURED`. A missing codec anywhere in an error's source chain wins over the camera error that carries it, so a `file:` source without a decoder exits with 69.
 
 | Status | Meaning |
 |---|---|
 | 0 | Success |
 | 1 | Any other failure |
 | 2 | Invalid arguments or configuration |
-| 3 | The camera or recording is missing, busy or went away |
-| 4 | No H.264 encoder or decoder |
-| 5 | The Zenoh session could not be opened |
-| 6 | The camera delivered no frames in time |
+| 66 (`NOINPUT`) | The camera or recording is missing, busy or went away |
+| 68 (`NOHOST`) | The Zenoh session could not be opened |
+| 69 (`UNAVAILABLE`) | No H.264 encoder or decoder |
+| 75 (`TEMPFAIL`) | The camera delivered no frames in time |
 
 Explicit service options before a subcommand are a usage error; values from the environment are not, and `record` reads its capture options from them.
 
