@@ -187,6 +187,29 @@ fn capture(n: u32, memory: MemoryStrategy, expected: ResolvedMemory) {
     assert!(f.seq() > held[1].seq(), "seq continues across a restart");
 }
 
+/// A zero timeout takes a frame the driver has finished, and times out
+/// only when there is none.
+#[test]
+fn a_zero_timeout_takes_a_finished_frame() {
+    let Some(v) = vivid(SINGLE) else { return };
+    let mut camera = builder(&v).open().unwrap();
+    camera.start().unwrap();
+    let first = next(&mut camera);
+    drop(first);
+    std::thread::sleep(Duration::from_millis(150));
+    let f = camera
+        .next_frame(Some(Duration::ZERO))
+        .expect("frames finished while waiting");
+    let mut taken = 1;
+    while camera.next_frame(Some(Duration::ZERO)).is_ok() {
+        taken += 1;
+        assert!(taken < 16, "a zero timeout never ran dry");
+    }
+    drop(f);
+    let err = camera.next_frame(Some(Duration::ZERO)).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Timeout);
+}
+
 #[test]
 fn import_captures_single_planar() {
     capture(SINGLE, MemoryStrategy::Import, ResolvedMemory::Import);

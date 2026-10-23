@@ -965,34 +965,33 @@ impl Camera for V4l2Camera {
         loop {
             self.requeue_released()?;
             let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
-            if left.is_some_and(|l| l.is_zero()) {
+            // With nothing queued the driver cannot complete a buffer, so
+            // wait in short slices and requeue what frames release. A spent
+            // deadline still polls once, so a finished buffer is taken.
+            let slice = if self.queue.queued_count() == 0 {
+                Some(left.map_or(STARVED_POLL, |l| l.min(STARVED_POLL)))
+            } else {
+                left
+            };
+            if self.queue.wait(slice).map_err(|e| v4l2_error("poll", e))? {
+                if let Some(d) = self.queue.dequeue().map_err(|e| v4l2_error("DQBUF", e))? {
+                    if !d.flags.is_error() {
+                        return Ok(self.frame(d));
+                    }
+                    self.stats.errors += 1;
+                    if let Some(pool) = &self.pool {
+                        pool.table.recycle(d.index as usize);
+                    }
+                    continue;
+                }
+            }
+            if deadline.is_some_and(|d| Instant::now() >= d) {
                 self.stats.timeouts += 1;
                 return Err(Error::new(
                     ErrorKind::Timeout,
                     format!("no frame within {timeout:?}"),
                 ));
             }
-            // With nothing queued the driver cannot complete a buffer, so
-            // wait in short slices and requeue what frames release.
-            let slice = if self.queue.queued_count() == 0 {
-                Some(left.map_or(STARVED_POLL, |l| l.min(STARVED_POLL)))
-            } else {
-                left
-            };
-            if !self.queue.wait(slice).map_err(|e| v4l2_error("poll", e))? {
-                continue;
-            }
-            let Some(d) = self.queue.dequeue().map_err(|e| v4l2_error("DQBUF", e))? else {
-                continue;
-            };
-            if d.flags.is_error() {
-                self.stats.errors += 1;
-                if let Some(pool) = &self.pool {
-                    pool.table.recycle(d.index as usize);
-                }
-                continue;
-            }
-            return Ok(self.frame(d));
         }
     }
 
