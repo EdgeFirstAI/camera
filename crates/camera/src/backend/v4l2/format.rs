@@ -4,12 +4,7 @@
 //! V4L2 fourcc codes and the tensor pixel formats they capture into.
 
 use edgefirst_tensor::PixelFormat;
-use edgefirst_v4l2::uapi::{self, fourcc};
-
-/// `V4L2_PIX_FMT_RGBA32`: bytes R, G, B, A.
-const RGBA32: u32 = fourcc(b'A', b'B', b'2', b'4');
-/// `V4L2_PIX_FMT_NV16M`: NV16 with the chroma plane in its own buffer.
-const NV16M: u32 = fourcc(b'N', b'M', b'1', b'6');
+use edgefirst_v4l2::uapi;
 
 /// One capturable V4L2 format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +46,7 @@ const TABLE: &[Mapping] = &[
         mem_planes: 1,
     },
     Mapping {
-        fourcc: NV16M,
+        fourcc: uapi::V4L2_PIX_FMT_NV16M,
         format: PixelFormat::Nv16,
         mem_planes: 2,
     },
@@ -71,7 +66,7 @@ const TABLE: &[Mapping] = &[
         mem_planes: 1,
     },
     Mapping {
-        fourcc: RGBA32,
+        fourcc: uapi::V4L2_PIX_FMT_RGBA32,
         format: PixelFormat::Rgba,
         mem_planes: 1,
     },
