@@ -277,7 +277,7 @@ pub fn field_str(field: &[c_char]) -> String {
     let bytes: Vec<u8> = field
         .iter()
         .take_while(|&&c| c != 0)
-        .map(|&c| c as u8)
+        .map(|&c| u8::from_ne_bytes(c.to_ne_bytes()))
         .collect();
     String::from_utf8_lossy(&bytes).into_owned()
 }
@@ -359,9 +359,9 @@ mod tests {
 
     #[test]
     fn field_str_stops_at_the_first_nul() {
-        let mut f = [0 as c_char; 8];
+        let mut f: [c_char; 8] = [0; 8];
         for (d, s) in f.iter_mut().zip(b"imx708") {
-            *d = *s as c_char;
+            *d = c_char::from_ne_bytes([*s]);
         }
         assert_eq!(field_str(&f), "imx708");
     }

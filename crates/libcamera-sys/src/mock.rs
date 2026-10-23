@@ -317,10 +317,10 @@ unsafe extern "C" fn mgr_camera_info(
     };
     let mut v = efcam_lc_camera_info::default();
     for (d, s) in v.id.iter_mut().zip(c.id.bytes().take(255)) {
-        *d = s as c_char;
+        *d = c_char::from_ne_bytes([s]);
     }
     for (d, s) in v.model.iter_mut().zip(c.model.bytes().take(63)) {
-        *d = s as c_char;
+        *d = c_char::from_ne_bytes([s]);
     }
     v.location = -1;
     v.rotation = 0;

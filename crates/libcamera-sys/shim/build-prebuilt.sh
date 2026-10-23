@@ -85,8 +85,9 @@ version=$(pkg-config --modversion --define-variable=prefix="$WORK/prefix" \
 minor=$(echo "$version" | cut -d. -f1-2)
 "$SHIM/check-symbols.sh" "$so" "$WORK/prefix/lib"
 
-# Natively, load it as the SDK does and start a CameraManager (no pipelines
-# are built, so it finds no cameras).
+# Natively, load it as the SDK does and start a CameraManager. No pipelines
+# are built, so it finds no cameras; in a container without media devices
+# it fails to start with -ENODEV, which still proves libcamera was called.
 if [ -z "$CROSS" ]; then
     LD_LIBRARY_PATH="$WORK/prefix/lib" python3 - "$so" <<'PY'
 import ctypes, sys
@@ -94,10 +95,14 @@ lib = ctypes.CDLL(sys.argv[1])
 assert lib.efcam_lc_abi_version() == 1, "ABI version"
 lib.efcam_lc_build_version.restype = ctypes.c_char_p
 mgr = ctypes.c_void_p()
-assert lib.efcam_lc_mgr_create(ctypes.byref(mgr)) == 0, "CameraManager start"
-count = lib.efcam_lc_mgr_camera_count(mgr)
-lib.efcam_lc_mgr_destroy(mgr)
-print(f"smoke: shim {lib.efcam_lc_build_version().decode()} loaded, {count} cameras")
+ret = lib.efcam_lc_mgr_create(ctypes.byref(mgr))
+assert ret in (0, -19), f"CameraManager start: {ret}"
+if ret == 0:
+    count = lib.efcam_lc_mgr_camera_count(mgr)
+    lib.efcam_lc_mgr_destroy(mgr)
+    print(f"smoke: shim {lib.efcam_lc_build_version().decode()} loaded, {count} cameras")
+else:
+    print(f"smoke: shim {lib.efcam_lc_build_version().decode()} loaded; no media devices here")
 PY
 fi
 
