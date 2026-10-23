@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `info [--json]` lists the cameras and whether an H.264 encoder (with its inputs) and decoder are available.
   - `record <out.h264>` captures and records the H.264 stream with its sidecar without publishing, until `--frames`, `--duration` or a signal.
   - `convert <in.h264> <out.mp4>` muxes a recording into MP4 in software, at `--fps` or the sidecar's rate.
+- Platform validation suite `tests/board.rs`, run by the board lane: a 1080p30 soak into an image-crate pool with GL import-cache hits, mirror, `NotReady` across an ISP daemon restart on vvcam, stop/start cycles, H.264 capture-to-access-unit latency, decode of a 2.x recording, and frames held across close (EDGEAI-1532).
 - Exit statuses follow the videostream CLI: 2 invalid arguments, 3 camera not found, 4 no encoder or decoder, 5 Zenoh session, 6 timeout, 1 otherwise (EDGEAI-1527).
 
 ### Changed

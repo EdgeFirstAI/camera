@@ -298,6 +298,9 @@ All options can be set via command line or environment variables. Environment va
 - **Integration tests**: `tests/` directory at project root
   - `tests/env_scrub.rs` - every environment variable parses as its flag, and `KEY=""` behaves as unset (`harness = false`)
   - `tests/on_target.rs` - end-to-end runs of the binary on a board: JPEG, H.264, record then replay; `#[ignore]`, run with `--include-ignored` on a board with a V4L2 camera
+  - `tests/board.rs` - platform validation on a board: 1080p30 soak into an image-crate pool with GL import-cache hits, mirror, NotReady across an ISP restart (vvcam), stop/start cycles, H.264 latency, 2.x recording decode, frames held across close; `#[ignore]`
+  - `tests/publish.rs` - the binary on the mock source with a Zenoh subscriber (every host, macOS and Windows included)
+  - `tests/subcommands.rs` - `devices`, `info`, `record` and `convert` as the binary
 - **SDK tests**: `crates/camera/tests/` (`mock.rs`, `schema.rs`, `file.rs`, `v4l2_vivid.rs`), and the SDK capture benchmark `crates/camera/benches/capture.rs`; see `crates/camera/TESTING.md`
 - **Test naming**: descriptive snake_case names stating the behaviour (`record_requires_h264`)
 - **Serial tests**: Use `serial_test` crate for tests that require exclusive hardware access
@@ -309,7 +312,10 @@ camera/
 ├── src/                  # Unit tests at the bottom of each module with #[cfg(test)]
 ├── tests/
 │   ├── env_scrub.rs      # Environment variable parsing (harness = false)
-│   └── on_target.rs      # End-to-end runs on a board (#[ignore])
+│   ├── on_target.rs      # End-to-end runs on a board (#[ignore])
+│   ├── board.rs          # Platform validation on a board (#[ignore])
+│   ├── publish.rs        # The binary on mock with a Zenoh subscriber
+│   └── subcommands.rs    # devices, info, record, convert
 └── crates/camera/
     ├── tests/            # SDK tests: mock, schema, file, v4l2_vivid
     └── benches/

@@ -580,7 +580,7 @@ camera/
 │   ├── convert.rs       # convert subcommand (Annex-B to MP4)
 │   └── exit.rs          # Exit statuses
 ├── crates/camera/       # edgefirst-camera SDK (V4L2, file and mock sources)
-├── tests/               # Application integration tests (env_scrub, publish, subcommands, on_target)
+├── tests/               # Application integration tests (env_scrub, publish, subcommands, on_target, board)
 ├── camera.default       # systemd EnvironmentFile reference
 ├── Cargo.toml           # Workspace and application manifest
 └── README.md            # This file

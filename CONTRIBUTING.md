@@ -510,6 +510,11 @@ cargo test --test env_scrub
 
 ```bash
 cargo test --test on_target -- --include-ignored
+
+# Platform validation of the SDK with the image and codec crates; see the
+# file's header for EDGEFIRST_CAMERA_DEVICE, EDGEFIRST_SOAK_SECS (600 for
+# the ten-minute run) and EDGEFIRST_RECORDING (a 2.x recording to decode).
+cargo test --test board -- --include-ignored --test-threads 1
 ```
 
 **With Coverage:**
@@ -556,7 +561,7 @@ fn jpeg_capture() -> Result<(), Box<dyn Error>> {
 - **Public APIs**: 100%
 - **Hardware paths**: Best effort (requires device)
 
-**Coverage is measured in CI** by the nightly **Full** run, which covers host, board and SonarCloud every day `main` changes. Every PR runs the **Quick** tier (`ci-gate`), **including draft PRs** — CI is not gated on “Ready for review”; the expected flow is a green `ci-gate` before reviewers start. Full and hardware runs on a PR are opt-in, decided per change: apply `ci:full` for host coverage, board tests and Sonar when a change warrants it. Apply `ci:hardware` when on-target validation alone is needed: it runs on a board with a V4L2 camera (runner label `camera-v4l2`) and covers JPEG/H.264 capture, record and replay (`tests/on_target.rs`).
+**Coverage is measured in CI** by the nightly **Full** run, which covers host, board and SonarCloud every day `main` changes. Every PR runs the **Quick** tier (`ci-gate`), **including draft PRs** — CI is not gated on “Ready for review”; the expected flow is a green `ci-gate` before reviewers start. Full and hardware runs on a PR are opt-in, decided per change: apply `ci:full` for host coverage, board tests and Sonar when a change warrants it. Apply `ci:hardware` when on-target validation alone is needed: it runs on a board with a V4L2 camera (runner label `camera-v4l2`) and covers JPEG/H.264 capture, record and replay (`tests/on_target.rs`) and the platform checks in `tests/board.rs` with a 20-second soak.
 
 ---
 
