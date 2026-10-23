@@ -132,3 +132,61 @@ fn record_then_replay() -> Result<(), Box<dyn Error>> {
     std::fs::remove_dir_all(&dir)?;
     result
 }
+
+#[test]
+#[serial]
+#[ignore = "requires a V4L2 camera (run with --include-ignored on a board)"]
+fn record_subcommand_writes_a_playable_recording() -> Result<(), Box<dyn Error>> {
+    let dir = scratch_dir("record-sub")?;
+    let recording = dir.join("record.h264");
+    let result = (|| -> Result<(), Box<dyn Error>> {
+        let path = recording.to_str().ok_or("non-UTF-8 temp path")?;
+        let args = [&["record", path, "--frames", "90"][..], &capture(&[])].concat();
+        let mut child = Command::new(camera_bin())
+            .args(&args)
+            .stdin(Stdio::null())
+            .spawn()?;
+        match wait_with_deadline(&mut child, Duration::from_secs(30)) {
+            Some(status) if status.success() => {}
+            Some(status) => return Err(format!("{args:?} exited with {status}").into()),
+            None => {
+                child.kill()?;
+                child.wait()?;
+                return Err(format!("{args:?} did not stop after 90 frames").into());
+            }
+        }
+        assert!(std::fs::metadata(&recording)?.len() > 0);
+        let source = format!("file:{path}");
+        run_for(
+            &["--source", &source, "--replay-loop", "--jpeg"],
+            Duration::from_secs(5),
+        )
+    })();
+    std::fs::remove_dir_all(&dir)?;
+    result
+}
+
+#[test]
+#[serial]
+#[ignore = "requires a V4L2 camera (run with --include-ignored on a board)"]
+fn devices_reports_the_cameras_modes() -> Result<(), Box<dyn Error>> {
+    let out = Command::new(camera_bin())
+        .args(["devices", "--json"])
+        .output()?;
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let devices: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+    let cameras = devices["cameras"].as_array().ok_or("no cameras array")?;
+    let modes: Vec<&str> = cameras
+        .iter()
+        .filter(|c| c["backend"] == "v4l2")
+        .flat_map(|c| c["formats"].as_array().into_iter().flatten())
+        .flat_map(|f| f["modes"].as_array().into_iter().flatten())
+        .filter_map(|m| m.as_str())
+        .collect();
+    assert!(modes.contains(&"1080p30"), "{devices}");
+    Ok(())
+}

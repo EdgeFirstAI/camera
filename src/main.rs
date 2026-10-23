@@ -2,7 +2,10 @@
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
 mod args;
+mod convert;
+mod devices;
 mod encode;
+mod exit;
 mod jpeg;
 mod messages;
 mod pipeline;
@@ -11,18 +14,21 @@ mod source;
 use std::{
     env,
     error::Error,
+    process::ExitCode,
     sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
 };
 
-use args::Args;
+use args::{Args, Command, RecordArgs};
 use clap::Parser;
 use edgefirst_image::ImageProcessor;
+use exit::{Failure, Status};
 use messages::{CameraInfoFields, TfStaticFields};
 use pipeline::Settings;
 use source::{Request, SourceKind};
 use tracing::{info, level_filters::LevelFilter, warn};
 use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter, Layer as _, Registry};
-use zenoh::Wait;
+use zenoh::{Session, Wait};
 
 /// Set by SIGTERM or SIGINT (Ctrl+C or Ctrl+Break on Windows); the pipeline
 /// stops at the next frame.
@@ -34,21 +40,48 @@ static GLOBAL: tracy_client::ProfiledAllocator<std::alloc::System> =
     tracy_client::ProfiledAllocator::new(std::alloc::System, 100);
 
 fn get_env_filter() -> EnvFilter {
+    env_filter(LevelFilter::INFO)
+}
+
+fn env_filter(default: LevelFilter) -> EnvFilter {
     tracing_subscriber::EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
+        .with_default_directive(default.into())
         .from_env_lossy()
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> ExitCode {
     // systemd's EnvironmentFile exports `KEY=""` as an empty string rather
     // than leaving it unset, and clap treats a present-but-empty variable
     // as a supplied value, so `REPLAY_FPS=""` or `JPEG=""` in
     // /etc/default/camera would abort argument parsing. Drop those so the
     // declared defaults apply.
     //
-    // SAFETY: single-threaded here; runs before the runtime is built below.
+    // SAFETY: single-threaded here; nothing has started a thread yet.
     unsafe { args::scrub_empty_env::<Args>(args::KEEP) };
     let args = Args::parse();
+    let result = match args.command.clone() {
+        None => serve(args),
+        Some(Command::Devices(a)) => {
+            log_to_stderr(LevelFilter::WARN).and_then(|()| devices::devices(&a))
+        }
+        Some(Command::Info(a)) => log_to_stderr(LevelFilter::WARN).and_then(|()| devices::info(&a)),
+        Some(Command::Record(a)) => record(args, a),
+        Some(Command::Convert(a)) => {
+            log_to_stderr(LevelFilter::INFO).and_then(|()| convert::convert(&a))
+        }
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            exit::status(&*e).into()
+        }
+    }
+}
+
+/// Runs the camera service until a signal, the end of a recording, or a
+/// camera failure.
+fn serve(args: Args) -> Result<(), Box<dyn Error>> {
     validate(&args)?;
     if args.tokio_console && env::var("TOKIO_CONSOLE_BIND").is_err() {
         // SAFETY: still single-threaded.
@@ -109,11 +142,58 @@ fn main() -> Result<(), Box<dyn Error>> {
         warn!("REPLAY is deprecated; use SOURCE=file:<path>");
     }
 
-    let session = zenoh::open(args.clone())
-        .wait()
-        .map_err(|e| format!("cannot open the Zenoh session: {e}"))?;
+    let session = zenoh::open(args.clone()).wait().map_err(|e| {
+        Failure::new(
+            Status::Socket,
+            format!("cannot open the Zenoh session: {e}"),
+        )
+    })?;
+    run(&args, &session, |_| {}).map_err(|e| {
+        exit::hint_codec(
+            e,
+            "without an encoder, run with --h264 false (H264=false) and without \
+             --h264-tiles; a file: source needs a decoder",
+        )
+    })
+}
 
-    let request = Request::from_args(&args, source::probe_device)?;
+/// The `record` subcommand: the service's capture and H.264 stream with
+/// its recorder and sidecar, on a session with no peers, so nothing is
+/// published. JPEG and the 4K tiles stay off.
+fn record(mut args: Args, rec: Box<RecordArgs>) -> Result<(), Box<dyn Error>> {
+    args.capture = rec.capture;
+    args.replay = None;
+    args.h264 = true;
+    args.h264_tiles = false;
+    args.jpeg = false;
+    args.record = Some(rec.output.clone());
+    validate(&args)?;
+    shutdown_on_signals()?;
+    log_to_stderr(LevelFilter::INFO)?;
+
+    let session = peerless_session()?;
+    run(&args, &session, |s| {
+        s.auto_tiles = false;
+        s.max_frames = rec.frames;
+        s.max_duration = rec.duration.map(Duration::from_secs_f64);
+    })
+    .map_err(|e| exit::hint_codec(e, "record needs an H.264 encoder"))?;
+    println!(
+        "Recorded {} with its sidecar {}",
+        rec.output.display(),
+        rec.output.with_extension("json").display()
+    );
+    Ok(())
+}
+
+/// Opens the source `args` name and runs the pipeline on `session`, with
+/// `adjust` applied to the settings `args` give.
+fn run(
+    args: &Args,
+    session: &Session,
+    adjust: impl FnOnce(&mut Settings),
+) -> Result<(), Box<dyn Error>> {
+    let request = Request::from_args(args, source::probe_device)?;
     let processor = match request.kind {
         SourceKind::File => None,
         _ => ImageProcessor::new()
@@ -125,15 +205,40 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     drop(processor);
 
-    let settings = settings(&args, &request, opened.camera.extras());
-    pipeline::run(
-        opened,
-        &session,
-        &settings,
-        encode::open_hardware,
-        &SHUTDOWN,
-    )?;
+    let mut settings = settings(args, &request, opened.camera.extras());
+    adjust(&mut settings);
+    pipeline::run(opened, session, &settings, encode::open_hardware, &SHUTDOWN)?;
     info!("Shutdown complete");
+    Ok(())
+}
+
+/// A Zenoh session that neither listens, connects nor scouts.
+pub(crate) fn peerless_session() -> Result<Session, Box<dyn Error>> {
+    let mut config = zenoh::Config::default();
+    for (key, value) in [
+        ("mode", "\"peer\""),
+        ("listen/endpoints", "[]"),
+        ("connect/endpoints", "[]"),
+        ("scouting/multicast/enabled", "false"),
+        ("scouting/gossip/enabled", "false"),
+    ] {
+        config
+            .insert_json5(key, value)
+            .map_err(|e| Failure::new(Status::Socket, e.to_string()))?;
+    }
+    Ok(zenoh::open(config)
+        .wait()
+        .map_err(|e| Failure::new(Status::Socket, format!("cannot open a Zenoh session: {e}")))?)
+}
+
+/// Logs to stderr at `default` unless `RUST_LOG` says otherwise, keeping
+/// stdout for a subcommand's output.
+fn log_to_stderr(default: LevelFilter) -> Result<(), Box<dyn Error>> {
+    let layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(env_filter(default));
+    tracing::subscriber::set_global_default(Registry::default().with(layer))?;
+    tracing_log::LogTracer::init()?;
     Ok(())
 }
 
@@ -202,17 +307,23 @@ fn shutdown_on_signals() -> std::io::Result<()> {
 fn validate(args: &Args) -> Result<(), Box<dyn Error>> {
     if let Some(path) = &args.record {
         if !args.h264 {
-            return Err(format!(
-                "--record {} requires --h264 (record writes the main H.264 stream)",
-                path.display()
+            return Err(Failure::new(
+                Status::InvalidArgs,
+                format!(
+                    "--record {} requires --h264 (record writes the main H.264 stream)",
+                    path.display()
+                ),
             )
             .into());
         }
         if args.is_file_source() {
-            return Err(format!(
-                "--record {} needs a camera; {} is a recording already",
-                path.display(),
-                args.source_spec()
+            return Err(Failure::new(
+                Status::InvalidArgs,
+                format!(
+                    "--record {} needs a camera; {} is a recording already",
+                    path.display(),
+                    args.source_spec()
+                ),
             )
             .into());
         }
@@ -240,18 +351,21 @@ pub(crate) fn settings(args: &Args, request: &Request, extras: Option<&str>) -> 
         jpeg_topic: args.jpeg_topic.clone(),
         h264_topic: args.h264_topic.clone(),
         tile_topics: args.h264_tiles_topics.clone(),
-        frame_id: args.camera_frame_id.clone(),
+        frame_id: args.capture.camera_frame_id.clone(),
         jpeg: args.jpeg.then_some(args.jpeg_quality),
         h264: args.h264,
         tiles: args.h264_tiles,
         tile_fps: args.h264_tiles_fps,
-        bitrate: encode::bitrate(args.h264_bitrate),
-        stream_size: (args.stream_size[0], args.stream_size[1]),
+        bitrate: encode::bitrate(args.capture.h264_bitrate),
+        stream_size: (args.capture.stream_size[0], args.capture.stream_size[1]),
         record: args.record.clone(),
         requested_fps: request.fps,
         info,
         tf,
         tracy: args.tracy,
+        auto_tiles: true,
+        max_frames: None,
+        max_duration: None,
     }
 }
 

@@ -172,10 +172,10 @@ fn empty_env_is_treated_as_unset() {
     let args = Args::try_parse_from(ARGV).expect("defaults must apply after scrubbing");
     assert_eq!(args.jpeg_quality, 85);
     assert!(args.h264);
-    assert_eq!(args.mirror, MirrorSetting::Both);
+    assert_eq!(args.capture.mirror, MirrorSetting::Both);
     assert_eq!(args.replay_fps, None);
-    assert_eq!(args.camera_mode, None);
-    assert_eq!(args.camera_size, None);
+    assert_eq!(args.capture.camera_mode, None);
+    assert_eq!(args.capture.camera_size, None);
     assert_eq!(args.h264_tiles_fps, 7);
 }
 
@@ -240,13 +240,13 @@ fn default_files_start_the_service() {
         assert_eq!(args.source_spec(), "/dev/video3", "{name}");
         assert!(args.h264, "{name}");
         assert!(!args.jpeg, "{name}");
-        assert_eq!(args.mirror, MirrorSetting::Both, "{name}");
-        assert_eq!(args.camera_buffers, 4, "{name}");
-        assert_eq!(args.memory, MemorySetting::Auto, "{name}");
-        assert_eq!(args.stream_size, [1920, 1080], "{name}");
+        assert_eq!(args.capture.mirror, MirrorSetting::Both, "{name}");
+        assert_eq!(args.capture.camera_buffers, 4, "{name}");
+        assert_eq!(args.capture.memory, MemorySetting::Auto, "{name}");
+        assert_eq!(args.capture.stream_size, [1920, 1080], "{name}");
         assert_eq!(args.explicit_size(), None, "{name}");
         assert_eq!(args.explicit_fps(), None, "{name}");
-        assert_eq!(args.camera_mode, None, "{name}");
+        assert_eq!(args.capture.camera_mode, None, "{name}");
         for (key, _) in environment_file(text) {
             // SAFETY: as above.
             std::env::remove_var(key);

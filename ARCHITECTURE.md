@@ -16,8 +16,9 @@ This document describes how the EdgeFirst Camera Node is built: its threads, how
 6. [Messages](#messages)
 7. [Timestamps](#timestamps)
 8. [Record and Replay](#record-and-replay)
-9. [Instrumentation and Profiling](#instrumentation-and-profiling)
-10. [References](#references)
+9. [Subcommands](#subcommands)
+10. [Instrumentation and Profiling](#instrumentation-and-profiling)
+11. [References](#references)
 
 ---
 
@@ -60,6 +61,9 @@ graph LR
 | `encode.rs` | H.264 stages for the main stream and the tiles |
 | `jpeg.rs` | The JPEG stage |
 | `messages.rs` | `camera/info`, `tf_static`, the compressed image and video payloads, and the Zenoh sample timestamp |
+| `devices.rs` | The `devices` and `info` subcommands |
+| `convert.rs` | The `convert` subcommand: Annex B to MP4 |
+| `exit.rs` | Exit statuses and the mapping from errors to them |
 
 The application and the SDK also build and run on macOS and Windows, where only the `mock` source exists so far and there is no H.264 encoder: `--h264` stops the application at startup. There, journald logging is left out, and on Windows Ctrl+C and Ctrl+Break take the place of SIGINT and SIGTERM.
 
@@ -228,6 +232,39 @@ A `file:` source is an SDK camera like any other: the SDK decodes the recording 
 - `camera/info` and `tf_static` come from the sidecar.
 - Outputs keep the recording's size; `STREAM_SIZE` and `MIRROR` do not apply.
 - At the end of the file the service exits cleanly, or with `--replay-loop` restarts from the first frame with `seq` continuing.
+
+### The `record` subcommand
+
+`edgefirst-camera record <name>.h264` runs the same capture, H.264 stage, recorder and sidecar as `--record`, on a Zenoh session that neither listens, connects nor scouts, so nothing leaves the process. JPEG and the 4K tiles stay off, and `--frames` or `--duration` stop it. It takes the capture options (`--source`, `--camera-size`, `--mirror`, `--stream-size`, ...) after the subcommand name, from the same environment variables as the service.
+
+---
+
+## Subcommands
+
+Without a subcommand the program runs the service. The subcommands are tools for a person at a shell:
+
+| Subcommand | What it does |
+|---|---|
+| `devices [--json]` | Lists every camera the SDK finds with its formats, sizes and rates from `probe()`, and the named modes (`1080p30`) of each format. A camera whose probe fails, for example because another process streams from it, is listed with its enumerated formats and the error. |
+| `info [--json]` | Lists the cameras and whether an H.264 encoder (with the inputs it takes) and decoder open here. It reports what is missing and exits 0. |
+| `record <out.h264>` | See [the `record` subcommand](#the-record-subcommand). |
+| `convert <in.h264> <out.mp4>` | Muxes a recording into MP4 in software: one sample per access unit, the first SPS and PPS in the `avc1` sample entry, a 90 kHz timescale. The rate is `--fps`, else the sidecar's, else 30. Pictures before the first IDR are dropped. |
+
+JSON output names pixel formats by their HAL wire names (`YUYV`, `rgba8`), as `CameraFrame.format` does. Logs go to stderr so stdout holds only the output.
+
+Every failure, of the service or a subcommand, exits with a status from the videostream CLI's table. A missing codec anywhere in an error's source chain wins over the camera error that carries it, so a `file:` source without a decoder exits with 4.
+
+| Status | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | Any other failure |
+| 2 | Invalid arguments or configuration |
+| 3 | The camera or recording is missing, busy or went away |
+| 4 | No H.264 encoder or decoder |
+| 5 | The Zenoh session could not be opened |
+| 6 | The camera delivered no frames in time |
+
+Explicit service options before a subcommand are a usage error; values from the environment are not, and `record` reads its capture options from them.
 
 ---
 

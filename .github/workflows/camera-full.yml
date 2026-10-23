@@ -57,9 +57,10 @@ jobs:
         run: cargo doc -p edgefirst-camera --no-deps --features mock,schemas,file --locked
       - name: SDK tests
         run: cargo test -p edgefirst-camera --features mock,schemas,file --locked
-      # The application's unit tests, then the binary on the mock source.
+      # The application's unit tests, then the binary on the mock source
+      # and its subcommands.
       - name: Application tests
-        run: cargo test -p edgefirst-camera-app --locked --bin edgefirst-camera --test publish
+        run: cargo test -p edgefirst-camera-app --locked --bin edgefirst-camera --test publish --test subcommands
 
   test-windows:
     name: Build & Test (Windows, SDK)
@@ -91,6 +92,7 @@ jobs:
         run: cargo doc -p edgefirst-camera --no-deps --features mock,schemas,file --locked
       - name: SDK tests
         run: cargo test -p edgefirst-camera --features mock,schemas,file --locked
-      # The application's unit tests, then the binary on the mock source.
+      # The application's unit tests, then the binary on the mock source
+      # and its subcommands.
       - name: Application tests
-        run: cargo test -p edgefirst-camera-app --locked --bin edgefirst-camera --test publish
+        run: cargo test -p edgefirst-camera-app --locked --bin edgefirst-camera --test publish --test subcommands

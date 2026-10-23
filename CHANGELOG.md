@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `--exposure`, `--gain` and `--white-balance` (`EXPOSURE`, `GAIN`, `WHITE_BALANCE`) set camera controls to `auto` or a value; a camera without the control logs a warning.
 - JPEG output for `file:` sources, compressed from the decoded frames (EDGEAI-1525).
 - The application builds and runs on macOS and Windows against the `mock` source, publishing `camera/frame` with its planes inline. There is no camera backend or H.264 encoder there yet: `--h264` (on by default) stops it at startup with a message to run with `--h264 false`. Ctrl+C and Ctrl+Break stop it on Windows, and journald logging is Linux-only (EDGEAI-1528).
+- Subcommands (EDGEAI-1527); without one the program runs the service as before:
+  - `devices [--json]` lists cameras with their formats, sizes, rates and named modes.
+  - `info [--json]` lists the cameras and whether an H.264 encoder (with its inputs) and decoder are available.
+  - `record <out.h264>` captures and records the H.264 stream with its sidecar without publishing, until `--frames`, `--duration` or a signal.
+  - `convert <in.h264> <out.mp4>` muxes a recording into MP4 in software, at `--fps` or the sidecar's rate.
+- Exit statuses follow the videostream CLI: 2 invalid arguments, 3 camera not found, 4 no encoder or decoder, 5 Zenoh session, 6 timeout, 1 otherwise (EDGEAI-1527).
 
 ### Changed
 - The application captures through the `edgefirst-camera` SDK instead of `videostream`, converts and scales through `edgefirst-image` (OpenGL, G2D or CPU) and encodes H.264 through `edgefirst-codec` (EDGEAI-1525).

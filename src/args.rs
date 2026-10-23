@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
-use clap::{ArgAction, CommandFactory, Parser};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand};
 use serde_json::json;
 use std::{fmt, path::PathBuf, str::FromStr};
 use zenoh::config::{Config, WhatAmI};
@@ -153,6 +153,17 @@ fn parse_positive_fps(raw: &str) -> Result<f64, String> {
     Ok(fps)
 }
 
+fn parse_seconds(raw: &str) -> Result<f64, String> {
+    let seconds: f64 = raw
+        .trim()
+        .parse()
+        .map_err(|_| format!("duration must be a number of seconds, not '{raw}'"))?;
+    if !(seconds.is_finite() && seconds > 0.0) {
+        return Err(format!("duration must be positive, not {seconds}"));
+    }
+    Ok(seconds)
+}
+
 /// How capture buffers are allocated.
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
 pub enum MemorySetting {
@@ -201,27 +212,10 @@ pub enum H264Bitrate {
     Mbps100,
 }
 
-/// Command-line arguments for EdgeFirst Camera Node.
-///
-/// This structure defines all configuration options for the camera node,
-/// including camera selection, output formats, Zenoh configuration, and
-/// debugging options. Arguments can be specified via command line or
-/// environment variables.
-///
-/// # Example
-///
-/// ```bash
-/// # Via command line
-/// edgefirst-camera --source /dev/video0 --jpeg --h264
-///
-/// # Via environment variables
-/// export SOURCE=/dev/video0
-/// export JPEG=true
-/// edgefirst-camera
-/// ```
-#[derive(Parser, Debug, Clone)]
-#[command(author, version, about, long_about = None)]
-pub struct Args {
+/// What to capture and how to encode it: the options the service and
+/// `record` share.
+#[derive(clap::Args, Debug, Clone)]
+pub struct CaptureArgs {
     /// Frame source: a V4L2 device path (`/dev/video3`), `file:<name>.h264`
     /// for a recording with its `<name>.json` sidecar, or `mock[:WxH@fps]`
     /// for synthetic frames. Unset uses `--camera`.
@@ -231,10 +225,6 @@ pub struct Args {
     /// Camera device path, used when `--source` is unset.
     #[arg(short, long, env = "CAMERA", default_value = "/dev/video3")]
     pub camera: String,
-
-    /// Recording to replay; the 2.x form of `--source file:<path>`.
-    #[arg(long, env = "REPLAY", hide = true, conflicts_with = "source")]
-    pub replay: Option<PathBuf>,
 
     /// How capture buffers are allocated: `import` this service's
     /// contiguous buffers, `export` the driver's own, or `auto` to import
@@ -292,6 +282,82 @@ pub struct Args {
     #[arg(long, env = "MIRROR", default_value = "both", value_enum)]
     pub mirror: MirrorSetting,
 
+    /// H.264 encoding bitrate preset
+    #[arg(long, env = "H264_BITRATE", default_value = "auto")]
+    pub h264_bitrate: H264Bitrate,
+
+    /// Output streaming resolution in pixels (width height)
+    #[arg(
+        short,
+        long,
+        env = "STREAM_SIZE",
+        default_value = "1920 1080",
+        value_delimiter = ' ',
+        num_args = 2
+    )]
+    pub stream_size: Vec<u32>,
+
+    /// Path to camera calibration JSON file (isp-imx format)
+    #[arg(long, env = "CAM_INFO_PATH", default_value = "")]
+    pub cam_info_path: String,
+
+    /// Camera optical frame translation from base_link (x y z in meters)
+    #[arg(
+        long,
+        env = "CAM_TF_VEC",
+        default_value = "0 0 0",
+        value_delimiter = ' ',
+        num_args = 3
+    )]
+    pub cam_tf_vec: Vec<f64>,
+
+    /// Camera optical frame rotation quaternion from base_link (x y z w)
+    #[arg(
+        long,
+        env = "CAM_TF_QUAT",
+        default_value = "-1 1 -1 1",
+        value_delimiter = ' ',
+        num_args = 4
+    )]
+    pub cam_tf_quat: Vec<f64>,
+
+    /// TF frame ID for robot base
+    #[arg(long, env = "BASE_FRAME_ID", default_value = "base_link")]
+    pub base_frame_id: String,
+
+    /// TF frame ID for camera optical frame
+    #[arg(long, env = "CAMERA_FRAME_ID", default_value = "camera_optical")]
+    pub camera_frame_id: String,
+}
+
+/// Command-line arguments for EdgeFirst Camera Node.
+///
+/// This structure defines all configuration options for the camera node,
+/// including camera selection, output formats, Zenoh configuration, and
+/// debugging options. Arguments can be specified via command line or
+/// environment variables.
+///
+/// # Example
+///
+/// ```bash
+/// # Via command line
+/// edgefirst-camera --source /dev/video0 --jpeg --h264
+///
+/// # Via environment variables
+/// export SOURCE=/dev/video0
+/// export JPEG=true
+/// edgefirst-camera
+/// ```
+#[derive(Parser, Debug, Clone)]
+#[command(author, version, about, long_about = None, args_conflicts_with_subcommands = true)]
+pub struct Args {
+    #[command(flatten)]
+    pub capture: CaptureArgs,
+
+    /// Recording to replay; the 2.x form of `--source file:<path>`.
+    #[arg(long, env = "REPLAY", hide = true, conflicts_with = "source")]
+    pub replay: Option<PathBuf>,
+
     /// Zenoh topic for multi-plane camera frame (edgefirst_msgs/CameraFrame).
     /// Supersedes `--dma-topic` from 2.6.x. The new topic drops the `rt/`
     /// prefix per the schemas 3.1 convention for newly introduced topics.
@@ -347,10 +413,6 @@ pub struct Args {
     #[arg(long, env = "H264_TOPIC", default_value = "camera/h264")]
     pub h264_topic: String,
 
-    /// H.264 encoding bitrate preset
-    #[arg(long, env = "H264_BITRATE", default_value = "auto")]
-    pub h264_bitrate: H264Bitrate,
-
     /// Enable 4K tiling (splits 4K into 4x 1080p tiles for hardware encoding)
     #[arg(long, env = "H264_TILES")]
     pub h264_tiles: bool,
@@ -391,52 +453,9 @@ pub struct Args {
     #[arg(long, env = "REPLAY_FPS", value_parser = parse_positive_fps)]
     pub replay_fps: Option<f64>,
 
-    /// Output streaming resolution in pixels (width height)
-    #[arg(
-        short,
-        long,
-        env = "STREAM_SIZE",
-        default_value = "1920 1080",
-        value_delimiter = ' ',
-        num_args = 2
-    )]
-    pub stream_size: Vec<u32>,
-
     /// Enable verbose debug logging
     #[arg(short, long)]
     pub verbose: bool,
-
-    /// Path to camera calibration JSON file (isp-imx format)
-    #[arg(long, env = "CAM_INFO_PATH", default_value = "")]
-    pub cam_info_path: String,
-
-    /// Camera optical frame translation from base_link (x y z in meters)
-    #[arg(
-        long,
-        env = "CAM_TF_VEC",
-        default_value = "0 0 0",
-        value_delimiter = ' ',
-        num_args = 3
-    )]
-    pub cam_tf_vec: Vec<f64>,
-
-    /// Camera optical frame rotation quaternion from base_link (x y z w)
-    #[arg(
-        long,
-        env = "CAM_TF_QUAT",
-        default_value = "-1 1 -1 1",
-        value_delimiter = ' ',
-        num_args = 4
-    )]
-    pub cam_tf_quat: Vec<f64>,
-
-    /// TF frame ID for robot base
-    #[arg(long, env = "BASE_FRAME_ID", default_value = "base_link")]
-    pub base_frame_id: String,
-
-    /// TF frame ID for camera optical frame
-    #[arg(long, env = "CAMERA_FRAME_ID", default_value = "camera_optical")]
-    pub camera_frame_id: String,
 
     /// Enable Tokio async runtime console for debugging
     #[arg(long, env = "TOKIO_CONSOLE")]
@@ -461,19 +480,22 @@ pub struct Args {
     /// Disable Zenoh multicast peer discovery
     #[arg(long, env = "NO_MULTICAST_SCOUTING")]
     no_multicast_scouting: bool,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
 }
 
 impl Args {
     /// The source string for the SDK: `--source`, else `--replay` as a
     /// `file:` source, else the `--camera` device.
     pub fn source_spec(&self) -> String {
-        if let Some(source) = &self.source {
+        if let Some(source) = &self.capture.source {
             return source.clone();
         }
         if let Some(path) = &self.replay {
             return format!("file:{}", path.display());
         }
-        self.camera.clone()
+        self.capture.camera.clone()
     }
 
     /// Whether the source is a recording.
@@ -483,7 +505,8 @@ impl Args {
 
     /// Capture size set by `--camera-size`.
     pub fn explicit_size(&self) -> Option<(u32, u32)> {
-        self.camera_size
+        self.capture
+            .camera_size
             .as_ref()
             .and_then(|v| (v.len() >= 2).then_some((v[0], v[1])))
     }
@@ -491,9 +514,72 @@ impl Args {
     /// Frame rate set by `--camera-fps`, or by `--replay-fps` for a `file:`
     /// source.
     pub fn explicit_fps(&self) -> Option<f64> {
-        self.camera_fps
+        self.capture
+            .camera_fps
             .or_else(|| self.replay_fps.filter(|_| self.is_file_source()))
     }
+}
+
+/// Subcommands. Without one, the program runs the camera service.
+#[derive(Subcommand, Debug, Clone)]
+pub enum Command {
+    /// List cameras with their formats, sizes, rates and modes
+    Devices(DevicesArgs),
+    /// Report the cameras, H.264 encoder and H.264 decoder found here
+    Info(InfoArgs),
+    /// Record the camera's H.264 stream and sidecar to a file, without
+    /// publishing
+    Record(Box<RecordArgs>),
+    /// Convert a recording (Annex-B H.264) to MP4
+    Convert(ConvertArgs),
+}
+
+/// Arguments of `devices`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct DevicesArgs {
+    /// Print JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments of `info`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct InfoArgs {
+    /// Print JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments of `record`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct RecordArgs {
+    /// The recording (`.h264`); its sidecar is written next to it (`.json`)
+    pub output: PathBuf,
+
+    /// Stop after this many captured frames
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub frames: Option<u64>,
+
+    /// Stop after this many seconds
+    #[arg(long, value_parser = parse_seconds, value_name = "SECONDS")]
+    pub duration: Option<f64>,
+
+    #[command(flatten)]
+    pub capture: CaptureArgs,
+}
+
+/// Arguments of `convert`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct ConvertArgs {
+    /// The recording (Annex-B `.h264`)
+    pub input: PathBuf,
+
+    /// The MP4 file to write
+    pub output: PathBuf,
+
+    /// Frame rate; default: the recording's sidecar, else 30
+    #[arg(long, value_parser = parse_positive_fps)]
+    pub fps: Option<f64>,
 }
 
 /// Environment variables where an empty value is meaningful and must be
@@ -941,18 +1027,23 @@ mod tests {
         let args = Args::parse_from(["edgefirst-camera"]);
         assert_eq!(args.explicit_size(), None);
         assert_eq!(args.explicit_fps(), None);
-        assert_eq!(args.camera_mode, None);
+        assert_eq!(args.capture.camera_mode, None);
     }
 
     #[test]
     fn camera_buffers_defaults_to_four() {
-        assert_eq!(Args::parse_from(["edgefirst-camera"]).camera_buffers, 4);
+        assert_eq!(
+            Args::parse_from(["edgefirst-camera"])
+                .capture
+                .camera_buffers,
+            4
+        );
     }
 
     #[test]
     fn camera_buffers_accepts_the_supported_range() {
         let args = Args::parse_from(["edgefirst-camera", "--camera-buffers", "6"]);
-        assert_eq!(args.camera_buffers, 6);
+        assert_eq!(args.capture.camera_buffers, 6);
         for bad in ["0", "1", "33", "four"] {
             assert!(
                 Args::try_parse_from(["edgefirst-camera", "--camera-buffers", bad]).is_err(),
@@ -972,9 +1063,9 @@ mod tests {
             "--white-balance",
             "5600",
         ]);
-        assert_eq!(args.exposure, Some(Setting::Manual(10_000)));
-        assert_eq!(args.gain, Some(Setting::Auto));
-        assert_eq!(args.white_balance, Some(Setting::Manual(5600)));
+        assert_eq!(args.capture.exposure, Some(Setting::Manual(10_000)));
+        assert_eq!(args.capture.gain, Some(Setting::Auto));
+        assert_eq!(args.capture.white_balance, Some(Setting::Manual(5600)));
         for (flag, bad) in [
             ("--exposure", "0"),
             ("--exposure", "long"),
@@ -991,11 +1082,11 @@ mod tests {
     #[test]
     fn memory_defaults_to_auto() {
         assert_eq!(
-            Args::parse_from(["edgefirst-camera"]).memory,
+            Args::parse_from(["edgefirst-camera"]).capture.memory,
             MemorySetting::Auto
         );
         let args = Args::parse_from(["edgefirst-camera", "--memory", "export"]);
-        assert_eq!(args.memory, MemorySetting::Export);
+        assert_eq!(args.capture.memory, MemorySetting::Export);
     }
 
     /// Arguments bound to the environment but deliberately absent from

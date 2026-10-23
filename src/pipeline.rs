@@ -41,6 +41,7 @@ use zenoh::{
 
 use crate::{
     encode::{self, OpenEncoder, Plan, Stage, TILE_NAMES},
+    exit::{Failure, Status},
     jpeg::JpegStage,
     messages::{jpeg_msg, sample_timestamp, video_msg, CameraInfoFields, TfStaticFields},
     source::{Opened, SourceKind},
@@ -76,8 +77,10 @@ pub(crate) struct Settings {
     /// JPEG quality, when JPEG is on.
     pub(crate) jpeg: Option<u8>,
     pub(crate) h264: bool,
-    /// Tiles requested; they are also turned on above 1080p.
+    /// Tiles requested.
     pub(crate) tiles: bool,
+    /// Turn tiles on above 1080p even when not requested.
+    pub(crate) auto_tiles: bool,
     pub(crate) tile_fps: u32,
     pub(crate) bitrate: Bitrate,
     pub(crate) stream_size: (u32, u32),
@@ -87,6 +90,10 @@ pub(crate) struct Settings {
     pub(crate) info: CameraInfoFields,
     pub(crate) tf: TfStaticFields,
     pub(crate) tracy: bool,
+    /// Stop after this many captured frames.
+    pub(crate) max_frames: Option<u64>,
+    /// Stop after capturing for this long.
+    pub(crate) max_duration: Option<Duration>,
 }
 
 /// A frame on its way to an encoder thread, with its stamp.
@@ -131,14 +138,17 @@ pub(crate) fn run(
     };
     let encodes = settings.h264 || settings.jpeg.is_some();
     if !file && encodes && (stream.0 > config.width || stream.1 > config.height) {
-        return Err(format!(
-            "STREAM_SIZE {}x{} is larger than capture size {}x{}; lower STREAM_SIZE, or raise \
-             CAMERA_SIZE / choose a larger CAMERA_MODE that the sensor supports.",
-            stream.0, stream.1, config.width, config.height
+        return Err(Failure::new(
+            Status::InvalidArgs,
+            format!(
+                "STREAM_SIZE {}x{} is larger than capture size {}x{}; lower STREAM_SIZE, or \
+                 raise CAMERA_SIZE / choose a larger CAMERA_MODE that the sensor supports.",
+                stream.0, stream.1, config.width, config.height
+            ),
         )
         .into());
     }
-    let tiles = tiles_enabled(settings.tiles, &config);
+    let tiles = tiles_enabled(settings.tiles, settings.auto_tiles, &config);
 
     let mut threads: Vec<JoinHandle<()>> = Vec::new();
     let mut sinks: Vec<(Sender<Job>, &'static str)> = Vec::new();
@@ -282,11 +292,11 @@ fn tile_frame_suffix(i: usize) -> &'static str {
     ["topleft", "topright", "bottomleft", "bottomright"][i]
 }
 
-/// Tiles are on when requested, and always above 1080p, where the main
-/// stream is scaled down.
-fn tiles_enabled(requested: bool, config: &StreamConfig) -> bool {
+/// Tiles are on when requested, and with `auto` above 1080p, where the
+/// main stream is scaled down.
+fn tiles_enabled(requested: bool, auto: bool, config: &StreamConfig) -> bool {
     let (w, h) = (config.width, config.height);
-    if h > 1080 && !requested {
+    if auto && h > 1080 && !requested {
         info!("Camera resolution {w}x{h} exceeds 1080p, automatically enabling H264 tiling");
         true
     } else {
@@ -412,8 +422,16 @@ fn capture(
     // started) are not capture losses; the baseline is the first frame's.
     let mut lost: Option<u64> = None;
     let mut cdr = Vec::new();
+    let deadline = settings.max_duration.map(|d| Instant::now() + d);
+    let mut captured = 0u64;
 
     while !shutdown.load(Ordering::SeqCst) {
+        if settings.max_frames.is_some_and(|max| captured >= max)
+            || deadline.is_some_and(|d| Instant::now() >= d)
+        {
+            info!("Captured {captured} frames; stopping");
+            break;
+        }
         let frame = match info_span!("camera_read").in_scope(|| camera.next_frame(Some(timeout))) {
             Ok(frame) => {
                 retry.on_success();
@@ -439,6 +457,7 @@ fn capture(
                 }
             },
         };
+        captured += 1;
         if settings.tracy {
             plot!("fps", rate.update(Instant::now()));
         }

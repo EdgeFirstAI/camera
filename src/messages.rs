@@ -118,7 +118,7 @@ impl CameraInfoFields {
     /// Compute the fields that would populate a live `/camera/info`
     /// message from `Args`.
     ///
-    /// Reads the calibration JSON at `args.cam_info_path` when one is
+    /// Reads the calibration JSON at `args.capture.cam_info_path` when one is
     /// configured. A calibration that cannot be loaded -- absent,
     /// unreadable, malformed, or structurally wrong -- is reported and
     /// then treated exactly like no calibration at all: the node keeps
@@ -129,14 +129,14 @@ impl CameraInfoFields {
     /// exist (edgefirst-fusion) must not be starved because one file went
     /// missing under a service that was otherwise healthy.
     pub(crate) fn from_args(args: &Args) -> Self {
-        let loaded = if args.cam_info_path.is_empty() {
+        let loaded = if args.capture.cam_info_path.is_empty() {
             None
         } else {
-            match Self::load_calibration(&args.cam_info_path) {
+            match Self::load_calibration(&args.capture.cam_info_path) {
                 Ok(fields) => Some(fields),
                 Err(e) => {
                     warn!(
-                        path = %args.cam_info_path,
+                        path = %args.capture.cam_info_path,
                         error = %e,
                         "cannot load camera calibration; falling back to built-in defaults -- \
                          camera/info geometry is APPROXIMATE and not valid for projection or \
@@ -151,7 +151,7 @@ impl CameraInfoFields {
             loaded.unwrap_or_else(Self::default_calibration);
 
         CameraInfoFields {
-            frame_id: args.camera_frame_id.clone(),
+            frame_id: args.capture.camera_frame_id.clone(),
             width,
             height,
             distortion_model: distortion_model.to_string(),
@@ -291,14 +291,18 @@ pub(crate) struct TfStaticFields {
 impl TfStaticFields {
     pub(crate) fn from_args(args: &Args) -> Self {
         TfStaticFields {
-            base_frame_id: args.base_frame_id.clone(),
-            child_frame_id: args.camera_frame_id.clone(),
-            translation: [args.cam_tf_vec[0], args.cam_tf_vec[1], args.cam_tf_vec[2]],
+            base_frame_id: args.capture.base_frame_id.clone(),
+            child_frame_id: args.capture.camera_frame_id.clone(),
+            translation: [
+                args.capture.cam_tf_vec[0],
+                args.capture.cam_tf_vec[1],
+                args.capture.cam_tf_vec[2],
+            ],
             rotation: [
-                args.cam_tf_quat[0],
-                args.cam_tf_quat[1],
-                args.cam_tf_quat[2],
-                args.cam_tf_quat[3],
+                args.capture.cam_tf_quat[0],
+                args.capture.cam_tf_quat[1],
+                args.capture.cam_tf_quat[2],
+                args.capture.cam_tf_quat[3],
             ],
         }
     }
@@ -361,7 +365,7 @@ mod tests {
     #[test]
     fn camera_info_fields_from_args_with_no_json_path_uses_defaults() {
         let mut args = default_args();
-        args.cam_info_path = String::new();
+        args.capture.cam_info_path = String::new();
         let f = CameraInfoFields::from_args(&args);
         assert_eq!(f.width, 1920);
         assert_eq!(f.height, 1080);
@@ -407,7 +411,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
 
         let mut args = default_args();
-        args.cam_info_path = path.to_string_lossy().into_owned();
+        args.capture.cam_info_path = path.to_string_lossy().into_owned();
         let f = CameraInfoFields::from_args(&args);
         assert_built_in_defaults(&f);
     }
@@ -431,7 +435,7 @@ mod tests {
         .unwrap();
 
         let mut args = default_args();
-        args.cam_info_path = path.to_string_lossy().into_owned();
+        args.capture.cam_info_path = path.to_string_lossy().into_owned();
         let f = CameraInfoFields::from_args(&args);
         assert_built_in_defaults(&f);
 
@@ -446,7 +450,7 @@ mod tests {
         std::fs::write(&path, b"this is not valid json {").unwrap();
 
         let mut args = default_args();
-        args.cam_info_path = path.to_string_lossy().into_owned();
+        args.capture.cam_info_path = path.to_string_lossy().into_owned();
         let f = CameraInfoFields::from_args(&args);
         assert_built_in_defaults(&f);
 
@@ -461,7 +465,7 @@ mod tests {
         std::fs::write(&path, r#"{"dewarpConfigArray": "not_an_array"}"#).unwrap();
 
         let mut args = default_args();
-        args.cam_info_path = path.to_string_lossy().into_owned();
+        args.capture.cam_info_path = path.to_string_lossy().into_owned();
         let f = CameraInfoFields::from_args(&args);
         assert_built_in_defaults(&f);
 
@@ -490,7 +494,7 @@ mod tests {
         .unwrap();
 
         let mut args = default_args();
-        args.cam_info_path = path.to_string_lossy().into_owned();
+        args.capture.cam_info_path = path.to_string_lossy().into_owned();
         let f = CameraInfoFields::from_args(&args);
         assert_built_in_defaults(&f);
 
@@ -516,7 +520,7 @@ mod tests {
         .unwrap();
 
         let mut args = default_args();
-        args.cam_info_path = path.to_string_lossy().into_owned();
+        args.capture.cam_info_path = path.to_string_lossy().into_owned();
         let f = CameraInfoFields::from_args(&args);
         assert_built_in_defaults(&f);
 
@@ -545,7 +549,7 @@ mod tests {
         .unwrap();
 
         let mut args = default_args();
-        args.cam_info_path = path.to_string_lossy().into_owned();
+        args.capture.cam_info_path = path.to_string_lossy().into_owned();
         let f = CameraInfoFields::from_args(&args);
         assert_built_in_defaults(&f);
 
@@ -559,8 +563,8 @@ mod tests {
         // The defaults may evolve, but base/child frame IDs must always
         // come from the CLI strings and the arrays must have the
         // expected arity.
-        assert_eq!(tf.base_frame_id, args.base_frame_id);
-        assert_eq!(tf.child_frame_id, args.camera_frame_id);
+        assert_eq!(tf.base_frame_id, args.capture.base_frame_id);
+        assert_eq!(tf.child_frame_id, args.capture.camera_frame_id);
         assert_eq!(tf.translation.len(), 3);
         assert_eq!(tf.rotation.len(), 4);
     }
@@ -581,7 +585,7 @@ mod tests {
     #[test]
     fn camera_info_fields_build_msg_produces_nonempty_cdr() {
         let mut args = default_args();
-        args.cam_info_path = String::new();
+        args.capture.cam_info_path = String::new();
         let info = CameraInfoFields::from_args(&args);
         let stamp = Time {
             sec: 1_790_000_000,

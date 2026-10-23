@@ -18,7 +18,10 @@ use edgefirst_image::ImageProcessor;
 use edgefirst_tensor::{CpuAccess, DType, ImageDesc, PixelFormat, TensorDyn, TensorMemory};
 use tracing::{info, warn};
 
-use crate::args::{Args, CameraMode, MemorySetting, MirrorSetting, Setting};
+use crate::{
+    args::{Args, CameraMode, MemorySetting, MirrorSetting, Setting},
+    exit::{Failure, Status},
+};
 
 /// How long to keep retrying while the camera reports it is not ready:
 /// the ISP daemon has not started serving the device, or delivers no first
@@ -116,17 +119,24 @@ impl Request {
         let kind = SourceKind::of(&spec);
         let mut size = args.explicit_size();
         let mut fps = args.explicit_fps();
-        if let Some(mode) = &args.camera_mode {
+        if let Some(mode) = &args.capture.camera_mode {
             if kind != SourceKind::Device {
-                return Err(format!(
-                    "CAMERA_MODE {mode} needs a camera that reports its modes, and {spec} does \
-                     not; set CAMERA_SIZE and CAMERA_FPS instead"
+                return Err(Failure::new(
+                    Status::InvalidArgs,
+                    format!(
+                        "CAMERA_MODE {mode} needs a camera that reports its modes, and {spec} \
+                         does not; set CAMERA_SIZE and CAMERA_FPS instead"
+                    ),
                 )
                 .into());
             }
-            let formats = probe(&spec)
-                .map_err(|e| format!("cannot read the modes of {spec} for CAMERA_MODE: {e}"))?;
-            check_mode(mode, &formats)?;
+            let formats = probe(&spec).map_err(|e| {
+                Failure::of(
+                    &e,
+                    format!("cannot read the modes of {spec} for CAMERA_MODE: {e}"),
+                )
+            })?;
+            check_mode(mode, &formats).map_err(|m| Failure::new(Status::InvalidArgs, m))?;
             let mode_fps = f64::from(mode.fps);
             match size {
                 Some(s) if s != mode.size => warn!(
@@ -149,7 +159,7 @@ impl Request {
             if args.replay_fps.is_some() {
                 warn!("REPLAY_FPS applies to file: sources only; ignored for {spec}");
             }
-        } else if let (Some(c), Some(r)) = (args.camera_fps, args.replay_fps) {
+        } else if let (Some(c), Some(r)) = (args.capture.camera_fps, args.replay_fps) {
             if c != r {
                 warn!("CAMERA_FPS {c} overrides REPLAY_FPS {r}");
             }
@@ -163,13 +173,13 @@ impl Request {
             size,
             fps,
             buffers: pool_depth(args),
-            memory: match args.memory {
+            memory: match args.capture.memory {
                 MemorySetting::Auto => MemoryStrategy::Auto,
                 MemorySetting::Import => MemoryStrategy::Import,
                 MemorySetting::Export => MemoryStrategy::Export,
             },
             // A recording was mirrored when it was made.
-            mirror: match (kind, args.mirror) {
+            mirror: match (kind, args.capture.mirror) {
                 (SourceKind::File, _) | (_, MirrorSetting::None) => Mirror::None,
                 (_, MirrorSetting::Horizontal) => Mirror::Horizontal,
                 (_, MirrorSetting::Vertical) => Mirror::Vertical,
@@ -189,7 +199,7 @@ impl Request {
 /// The capture pool depth: `CAMERA_BUFFERS`, which is what subscribers to
 /// `camera/frame` can rely on, plus what the encoders hold.
 fn pool_depth(args: &Args) -> usize {
-    let buffers = args.camera_buffers as usize;
+    let buffers = args.capture.camera_buffers as usize;
     if args.h264 || args.h264_tiles || args.jpeg {
         (buffers + ENCODER_BUFFERS).min(MAX_BUFFERS)
     } else {
@@ -200,19 +210,19 @@ fn pool_depth(args: &Args) -> usize {
 /// The camera controls set on the command line.
 fn controls(args: &Args) -> Vec<Control> {
     let mut out = Vec::new();
-    if let Some(e) = args.exposure {
+    if let Some(e) = args.capture.exposure {
         out.push(Control::Exposure(match e {
             Setting::Auto => Exposure::Auto,
             Setting::Manual(us) => Exposure::Manual(Duration::from_micros(u64::from(us))),
         }));
     }
-    if let Some(g) = args.gain {
+    if let Some(g) = args.capture.gain {
         out.push(Control::Gain(match g {
             Setting::Auto => Gain::Auto,
             Setting::Manual(g) => Gain::Manual(g),
         }));
     }
-    if let Some(wb) = args.white_balance {
+    if let Some(wb) = args.capture.white_balance {
         out.push(Control::WhiteBalance(match wb {
             Setting::Auto => WhiteBalance::Auto,
             Setting::Manual(kelvin) => WhiteBalance::Manual { kelvin },

@@ -405,6 +405,31 @@ edgefirst-camera --mode client --connect tcp/192.168.1.100:7447 --no-multicast-s
 
 ---
 
+## Subcommands
+
+Without a subcommand, `edgefirst-camera` runs the camera service. The subcommands are tools for use at a shell:
+
+```bash
+edgefirst-camera devices            # cameras with formats, sizes, rates and modes (--json)
+edgefirst-camera info               # cameras, and whether an H.264 encoder and decoder open (--json)
+edgefirst-camera record out.h264 --frames 300   # capture and encode to a file with its sidecar
+edgefirst-camera convert out.h264 out.mp4       # Annex-B to MP4, no hardware needed
+```
+
+`record` takes the capture options after its name (`--source`, `--camera-size`, `--mirror`, `--stream-size`, ...). The program exits with the same statuses as the videostream CLI:
+
+| Status | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | Any other failure |
+| 2 | Invalid arguments or configuration |
+| 3 | The camera or recording is missing, busy or went away |
+| 4 | No H.264 encoder or decoder |
+| 5 | The Zenoh session could not be opened |
+| 6 | The camera delivered no frames in time |
+
+---
+
 ## Recording and Replay
 
 The camera node ships built-in recording and replay of the H.264 stream, intended for reproducible tests and demos. Recordings are plain raw Annex-B bitstream files — power-loss resilient, playable in VLC / mpv / ffplay out of the box.
@@ -412,8 +437,11 @@ The camera node ships built-in recording and replay of the H.264 stream, intende
 ### Recording
 
 ```bash
-# Record H.264 to a file (requires --h264 and a camera source).
+# Record H.264 to a file while the service publishes (requires --h264 and a camera source).
 edgefirst-camera --camera /dev/video0 --h264 --record capture.h264
+
+# Record without publishing, for 10 seconds.
+edgefirst-camera record capture.h264 --source /dev/video0 --duration 10
 ```
 
 Writes two files:
@@ -458,6 +486,7 @@ vlc capture.h264
 mpv --demuxer=h264 capture.h264
 ffplay -f h264 -framerate 30 capture.h264
 ffmpeg -i capture.h264 -c copy capture.mp4   # remux to MP4, no re-encode
+edgefirst-camera convert capture.h264 capture.mp4   # the same without ffmpeg, at the sidecar's rate
 ```
 
 See [ARCHITECTURE.md § Record and Replay](ARCHITECTURE.md#record-and-replay) for the sidecar JSON schema and internals.
@@ -546,9 +575,12 @@ camera/
 │   ├── pipeline.rs      # Capture loop, publishers, encoder threads, drop reports, tf_static
 │   ├── encode.rs        # H.264 main stream and 4K tiles
 │   ├── jpeg.rs          # JPEG compression
-│   └── messages.rs      # camera/info, tf_static, compressed payloads, Zenoh timestamps
+│   ├── messages.rs      # camera/info, tf_static, compressed payloads, Zenoh timestamps
+│   ├── devices.rs       # devices and info subcommands
+│   ├── convert.rs       # convert subcommand (Annex-B to MP4)
+│   └── exit.rs          # Exit statuses
 ├── crates/camera/       # edgefirst-camera SDK (V4L2, file and mock sources)
-├── tests/               # Application integration tests (env_scrub.rs, on_target.rs)
+├── tests/               # Application integration tests (env_scrub, publish, subcommands, on_target)
 ├── camera.default       # systemd EnvironmentFile reference
 ├── Cargo.toml           # Workspace and application manifest
 └── README.md            # This file

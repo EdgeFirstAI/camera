@@ -26,7 +26,7 @@ use edgefirst_schemas::builtin_interfaces::Time;
 use edgefirst_tensor::{CpuAccess, DType, PixelFormat, Region, TensorDyn};
 use tracing::{info, warn};
 
-use crate::args::H264Bitrate;
+use crate::{args::H264Bitrate, exit::Failure};
 
 /// A video encoder: the platform's, or a stand-in in tests.
 pub(crate) trait Encode: Send {
@@ -64,14 +64,7 @@ pub(crate) fn open_hardware(config: EncoderConfig) -> Result<Box<dyn Encode>, Co
 
 /// The startup error for `plan` when its encoder does not open.
 fn open_error(plan: &Plan, e: &CodecError) -> Box<dyn Error> {
-    let hint = match e {
-        CodecError::NoDevice(_) => {
-            "; there is no H.264 encoder here, so run with --h264 false \
-             (H264=false) and without --h264-tiles"
-        }
-        _ => "",
-    };
-    format!("{}: {e}{hint}", plan.label).into()
+    Box::new(Failure::of(e, format!("{}: {e}", plan.label)))
 }
 
 /// The encoder bitrate for a preset.
@@ -584,10 +577,12 @@ pub(crate) mod tests {
         for size in [(64, 48), (32, 24)] {
             let err = Stage::new(plan(size, None, None), cam.config(), open_none)
                 .err()
-                .unwrap()
-                .to_string();
-            assert!(err.contains("none here"), "{err}");
-            assert!(err.contains("--h264 false"), "{err}");
+                .unwrap();
+            assert_eq!(
+                crate::exit::status(&*err),
+                crate::exit::Status::CodecUnavailable
+            );
+            assert!(err.to_string().contains("none here"), "{err}");
         }
     }
 

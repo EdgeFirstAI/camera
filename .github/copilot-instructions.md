@@ -120,6 +120,9 @@ cd src && cargo build  # Where are we now?
   - `src/encode.rs` - H.264 main stream and 4K tiles
   - `src/jpeg.rs` - JPEG compression
   - `src/messages.rs` - camera/info, tf_static, compressed payloads, Zenoh sample timestamps
+  - `src/devices.rs` - `devices` and `info` subcommands
+  - `src/convert.rs` - `convert` subcommand (Annex-B to MP4)
+  - `src/exit.rs` - exit statuses (the videostream CLI table) and the error mapping
   - `crates/camera/` - The `edgefirst-camera` SDK (see its README and ARCHITECTURE)
 - **Error handling**:
   - Uses `Result<T, Box<dyn Error>>` pattern
