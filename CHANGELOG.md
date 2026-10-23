@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `record <out.h264>` captures and records the H.264 stream with its sidecar without publishing, until `--frames`, `--duration` or a signal.
   - `convert <in.h264> <out.mp4>` muxes a recording into MP4 in software, at `--fps` or the sidecar's rate.
 - Platform validation suite `tests/board.rs`, run by the board lane: a 1080p30 soak into an image-crate pool with GL import-cache hits, mirror, `NotReady` across an ISP daemon restart on vvcam, stop/start cycles, H.264 capture-to-access-unit latency, decode of a 2.x recording, and frames held across close (EDGEAI-1532).
+- V4L2 backend on vvcam releases that reject `S_PARM` (Maivin): the requested frame rate is set through the ISP's `s.fps` JSON command once streaming, so 1080p30 is captured at 30 fps instead of the mode's 60, and `EAGAIN` from `S_FMT` while `isp_media_server` restarts is `NotReady`, so callers retry instead of failing (EDGEAI-1532).
 - Exit statuses follow the videostream CLI: 2 invalid arguments, 3 camera not found, 4 no encoder or decoder, 5 Zenoh session, 6 timeout, 1 otherwise (EDGEAI-1527).
 
 ### Changed

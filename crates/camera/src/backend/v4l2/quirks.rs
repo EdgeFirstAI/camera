@@ -51,9 +51,54 @@ pub(crate) fn viv_flip(
     controls::set(dev, info, &ControlValue::String(viv_flip_json(axis, on))).map(|_| ())
 }
 
+/// The JSON request that sets the sensor's frame rate.
+pub(crate) fn viv_fps_json(fps: u32) -> String {
+    format!(r#"{{"id": "s.fps", "streamid": 0, "fps": {fps}}}"#)
+}
+
+/// Sets the sensor's frame rate through the ISP's JSON control, for vvcam
+/// releases that reject `S_PARM`. The ISP applies it to a running stream
+/// and answers with a `result` code, 0 on success, which this returns.
+pub(crate) fn viv_set_fps(
+    dev: &Device,
+    info: &ControlInfo,
+    fps: u32,
+) -> edgefirst_v4l2::Result<i64> {
+    controls::set(dev, info, &ControlValue::String(viv_fps_json(fps)))?;
+    match controls::get(dev, info)? {
+        ControlValue::String(reply) => Ok(viv_result(&reply).unwrap_or(-1)),
+        _ => Ok(-1),
+    }
+}
+
+/// The `result` code of an ISP JSON reply.
+fn viv_result(reply: &str) -> Option<i64> {
+    let rest = &reply[reply.find("\"result\"")? + "\"result\"".len()..];
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start();
+    let end = rest
+        .find(|c: char| !(c == '-' || c.is_ascii_digit()))
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fps_json_matches_the_isp_protocol() {
+        assert_eq!(
+            viv_fps_json(30),
+            r#"{"id": "s.fps", "streamid": 0, "fps": 30}"#
+        );
+    }
+
+    #[test]
+    fn reads_the_result_of_an_isp_reply() {
+        assert_eq!(viv_result("{\n\t\"result\" : 0\n}\n"), Some(0));
+        assert_eq!(viv_result(r#"{"result": -22}"#), Some(-22));
+        assert_eq!(viv_result(r#"{"fps": 30}"#), None);
+    }
 
     #[test]
     fn extctrl_id_matches_the_vendor_header() {

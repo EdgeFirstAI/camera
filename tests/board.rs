@@ -325,6 +325,7 @@ fn not_ready_across_an_isp_restart() -> TestResult {
     isp("restart")?;
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut kinds = Vec::new();
+    let mut messages = Vec::new();
     loop {
         let attempt = (|| {
             let mut camera = builder(&device).open()?;
@@ -335,12 +336,13 @@ fn not_ready_across_an_isp_restart() -> TestResult {
             Ok(()) => break,
             Err(e) if Instant::now() < deadline => {
                 kinds.push(e.kind());
+                messages.push(e.to_string());
                 std::thread::sleep(Duration::from_millis(200));
             }
             Err(e) => return Err(format!("no frame 60 s after the restart: {e}").into()),
         }
     }
-    eprintln!("after the ISP restart: {kinds:?}, then frames");
+    eprintln!("after the ISP restart: {messages:?}, then frames");
     assert!(
         kinds.contains(&ErrorKind::NotReady),
         "no NotReady while the ISP restarted: {kinds:?}"
@@ -492,11 +494,13 @@ fn frames_held_across_close_stay_readable_and_the_device_reopens() -> TestResult
             .collect::<Result<_, _>>()?;
         drop(camera);
 
+        let builder = make();
         let reopen = Instant::now();
-        let mut again = make().open()?;
+        let mut again = builder.open()?;
+        let reopened = reopen.elapsed();
         again.start()?;
         again.next_frame(TIMEOUT)?;
-        let reopened = reopen.elapsed();
+        let first_frame = reopen.elapsed();
         for _ in 0..30 {
             again.next_frame(TIMEOUT)?;
         }
@@ -509,7 +513,12 @@ fn frames_held_across_close_stay_readable_and_the_device_reopens() -> TestResult
                 "{memory:?}: a held frame changed after close"
             );
         }
-        eprintln!("{memory:?}: held frames intact; reopened and delivered in {reopened:?}");
+        eprintln!(
+            "{memory:?}: held frames intact; reopened in {reopened:?}, first frame after \
+             {first_frame:?}"
+        );
+        // Opening while the old frames are still held is what proves the
+        // device was released; the bound only catches a reopen that waited.
         assert!(
             reopened < Duration::from_secs(2),
             "{memory:?}: reopen took {reopened:?}"

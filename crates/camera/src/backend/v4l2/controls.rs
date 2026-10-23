@@ -57,6 +57,26 @@ impl Controls {
             && self.info(quirks::VIV_EXTCTRL).is_some()
     }
 
+    /// Whether the device sets its frame rate through the vvcam ISP's JSON
+    /// control.
+    pub(crate) fn has_isp_frame_rate(&self) -> bool {
+        self.info(quirks::VIV_EXTCTRL).is_some()
+    }
+
+    /// Sets the frame rate through the vvcam ISP's JSON control, or `None`
+    /// when the device has no such control.
+    pub(crate) fn viv_frame_rate(&self, dev: &Device, fps: f64) -> Option<Result<()>> {
+        let viv = self.info(quirks::VIV_EXTCTRL)?;
+        Some(match quirks::viv_set_fps(dev, viv, fps.round() as u32) {
+            Ok(0) => Ok(()),
+            Ok(code) => Err(Error::new(
+                ErrorKind::Backend,
+                format!("the ISP answered result {code} to s.fps {fps}"),
+            )),
+            Err(e) => Err(v4l2_error("S_EXT_CTRLS VIV_EXTCTRL", e)),
+        })
+    }
+
     fn info(&self, cid: u32) -> Option<&V4l2Info> {
         self.infos.get(&cid)
     }

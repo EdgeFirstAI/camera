@@ -835,10 +835,23 @@ impl Camera for V4l2Camera {
                 format!("frame rate {fps} must be positive"),
             ));
         }
-        let got = self
+        let got = match self
             .dev
             .set_frame_interval(self.buf_type, interval_for(fps))
-            .map_err(|e| v4l2_error("S_PARM", e))?;
+        {
+            Ok(got) => got,
+            Err(_) if self.ctl.has_isp_frame_rate() => {
+                // vvcam without S_PARM: the ISP takes the rate on a running
+                // stream, so a stopped one gets it at start().
+                self.neg.unapplied_fps = Some(fps);
+                if self.streaming {
+                    self.apply_isp_frame_rate()?;
+                }
+                return Ok(Applied::Driver);
+            }
+            Err(e) => return Err(v4l2_error("S_PARM", e)),
+        };
+        self.neg.unapplied_fps = None;
         self.neg.interval = (got.numerator != 0 && got.denominator != 0).then_some(got);
         self.config.frame_rate = self.neg.frame_rate();
         Ok(match self.config.frame_rate {
@@ -1084,7 +1097,31 @@ impl V4l2Camera {
     fn streaming_from(&mut self, first: Dequeued) -> Result<()> {
         self.pending = Some(first);
         self.streaming = true;
+        if self.neg.unapplied_fps.is_some() {
+            if let Err(e) = self.apply_isp_frame_rate() {
+                tracing::warn!("{}: {e}", self.path());
+            }
+        }
         Ok(())
+    }
+
+    /// Applies the rate `S_PARM` refused through the vvcam ISP's JSON
+    /// control, which takes it only while streaming. The ISP may return to
+    /// its mode's rate after a stop, so every start applies it again.
+    fn apply_isp_frame_rate(&mut self) -> Result<()> {
+        let Some(fps) = self.neg.unapplied_fps else {
+            return Ok(());
+        };
+        match self.ctl.viv_frame_rate(&self.dev, fps) {
+            Some(Ok(())) => {
+                tracing::debug!("{}: {fps} fps through the ISP", self.path());
+                self.neg.interval = Some(interval_for(fps));
+                self.config.frame_rate = self.neg.frame_rate();
+                Ok(())
+            }
+            Some(Err(e)) => Err(e),
+            None => Ok(()),
+        }
     }
 
     fn start_error(&self, f: StartFailure) -> Error {
