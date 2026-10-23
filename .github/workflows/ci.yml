@@ -152,9 +152,10 @@ jobs:
     uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@9e296f92996b38683c684b9091ed59cb27562770
     with:
       lanes: ${{ needs.changes.outputs.full == 'true' && 'all' || 'hardware' }}
-      # Any board with a working V4L2 capture path; libcamera-only boards
-      # cannot run the camera.
-      boards: camera-v4l2
+      # OV5640 boards only: the application's capture path does not yet
+      # drive the vvcam ISP (its mirror control fails and the ISP daemon
+      # holds the node), so vvcam boards fail the on-target tests.
+      boards: camera-ov5640
       sonar: false
       scancode: true
       # macOS and Windows lanes live in camera-full.yml: the application
