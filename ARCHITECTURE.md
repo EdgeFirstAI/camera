@@ -61,7 +61,7 @@ graph LR
 | `jpeg.rs` | The JPEG stage |
 | `messages.rs` | `camera/info`, `tf_static`, the compressed image and video payloads, and the Zenoh sample timestamp |
 
-The application is Linux-only for now (Unix signals, journald); the SDK also builds on macOS and Windows.
+The application and the SDK also build and run on macOS and Windows, where only the `mock` source exists so far and there is no H.264 encoder: `--h264` stops the application at startup. There, journald logging is left out, and on Windows Ctrl+C and Ctrl+Break take the place of SIGINT and SIGTERM.
 
 ---
 
@@ -233,7 +233,7 @@ A `file:` source is an SDK camera like any other: the SDK decodes the recording 
 
 ## Instrumentation and Profiling
 
-Logging uses `tracing` with layers for stdout (pretty), journald, the tokio console (`--tokio-console`) and Tracy (`--tracy`); `RUST_LOG` sets the filter (default INFO). The HAL's `log` output is bridged into the same subscriber.
+Logging uses `tracing` with layers for stdout (pretty), journald (Linux), the tokio console (`--tokio-console`) and Tracy (`--tracy`); `RUST_LOG` sets the filter (default INFO). The HAL's `log` output is bridged into the same subscriber.
 
 Spans mark the work Tracy shows as zones: `camera_read` and `camera_publish` on the capture thread, `h264` (with the stage name) and `jpeg` on the encoder threads. With `--tracy`, the capture loop marks each frame and plots `fps`; the encoders mark secondary frames and plot `h264_kb` and `jpeg_kb`. The `profiling` feature adds Tracy's allocation tracking, sampling and system tracing.
 

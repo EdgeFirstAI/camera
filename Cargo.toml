@@ -54,7 +54,6 @@ edgefirst-image = { version = "0.36.0", default-features = false, features = ["o
 edgefirst-schemas = "4.0.0"
 edgefirst-tensor = { version = "0.36.0", default-features = false }
 kanal = { git = "https://github.com/fereidani/kanal", rev = "b6aeab2" }
-libc = "0.2.189"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = [
@@ -64,7 +63,6 @@ tokio = { version = "1.53.1", features = [
     "tracing",
 ] }
 tracing = "0.1.44"
-tracing-journald = "0.3.2"
 tracing-log = "0.2.0"
 tracing-subscriber = "0.3.23"
 tracing-tracy = { version = "0.12.0", default-features = false, features = [
@@ -82,6 +80,15 @@ tracy-client = { version = "0.19.0", default-features = false, features = [
 turbojpeg = { version = "1.5.1", features = ["image", "require-simd"] }
 zenoh = "1.10.1"
 gethostname = "1.1.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.189"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tracing-journald = "0.3.2"
+
+[target.'cfg(windows)'.dependencies]
+tokio = { version = "1.53.1", features = ["macros", "signal"] }
 
 [dev-dependencies]
 serial_test = "4.0.1"

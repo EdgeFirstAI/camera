@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `--memory` / `MEMORY` (`auto`, `import`, `export`) selects how capture buffers are allocated.
   - `--exposure`, `--gain` and `--white-balance` (`EXPOSURE`, `GAIN`, `WHITE_BALANCE`) set camera controls to `auto` or a value; a camera without the control logs a warning.
 - JPEG output for `file:` sources, compressed from the decoded frames (EDGEAI-1525).
+- The application builds and runs on macOS and Windows against the `mock` source, publishing `camera/frame` with its planes inline. There is no camera backend or H.264 encoder there yet: `--h264` (on by default) stops it at startup with a message to run with `--h264 false`. Ctrl+C and Ctrl+Break stop it on Windows, and journald logging is Linux-only (EDGEAI-1528).
 
 ### Changed
 - The application captures through the `edgefirst-camera` SDK instead of `videostream`, converts and scales through `edgefirst-image` (OpenGL, G2D or CPU) and encodes H.264 through `edgefirst-codec` (EDGEAI-1525).

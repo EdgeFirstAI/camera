@@ -24,7 +24,8 @@ use tracing::{info, level_filters::LevelFilter, warn};
 use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter, Layer as _, Registry};
 use zenoh::Wait;
 
-/// Set by SIGTERM or SIGINT; the pipeline stops at the next frame.
+/// Set by SIGTERM or SIGINT (Ctrl+C or Ctrl+Break on Windows); the pipeline
+/// stops at the next frame.
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "profiling")]
@@ -71,9 +72,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let stdout_log = tracing_subscriber::fmt::layer()
         .pretty()
         .with_filter(get_env_filter());
+    #[cfg(target_os = "linux")]
     let journald = tracing_journald::layer()
         .ok()
         .map(|j| j.with_filter(get_env_filter()));
+    #[cfg(not(target_os = "linux"))]
+    let journald: Option<tracing_subscriber::layer::Identity> = None;
     let (console, console_server) = if args.tokio_console {
         let (console, server) = runtime.block_on(async {
             console_subscriber::ConsoleLayer::builder()
@@ -135,6 +139,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 /// Blocks SIGTERM and SIGINT in this thread, and so in every thread it
 /// spawns, and sets [`SHUTDOWN`] from a thread that waits for them.
+#[cfg(unix)]
 fn shutdown_on_signals() -> std::io::Result<()> {
     // SAFETY: the set is initialised by sigemptyset before use, and
     // pthread_sigmask only reads it.
@@ -162,6 +167,31 @@ fn shutdown_on_signals() -> std::io::Result<()> {
             } else {
                 "SIGINT"
             };
+            info!("Received {name}, initiating graceful shutdown");
+            SHUTDOWN.store(true, Ordering::SeqCst);
+        })?;
+    Ok(())
+}
+
+/// Sets [`SHUTDOWN`] from a thread that waits for Ctrl+C or Ctrl+Break.
+#[cfg(windows)]
+fn shutdown_on_signals() -> std::io::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    // Registering before the thread starts means an early Ctrl+C is not
+    // missed.
+    let mut ctrl_c = runtime.block_on(async { tokio::signal::windows::ctrl_c() })?;
+    let mut ctrl_break = runtime.block_on(async { tokio::signal::windows::ctrl_break() })?;
+    std::thread::Builder::new()
+        .name("signals".into())
+        .spawn(move || loop {
+            let name = runtime.block_on(async {
+                tokio::select! {
+                    _ = ctrl_c.recv() => "Ctrl+C",
+                    _ = ctrl_break.recv() => "Ctrl+Break",
+                }
+            });
             info!("Received {name}, initiating graceful shutdown");
             SHUTDOWN.store(true, Ordering::SeqCst);
         })?;

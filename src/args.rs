@@ -602,6 +602,9 @@ impl From<Args> for Config {
                 .unwrap();
         }
 
+        // Linux names its loopback `lo`; macOS (`lo0`) and Windows keep
+        // zenoh's default interface.
+        #[cfg(target_os = "linux")]
         config
             .insert_json5("scouting/multicast/interface", &json!("lo").to_string())
             .unwrap();

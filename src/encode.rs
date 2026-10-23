@@ -62,6 +62,18 @@ pub(crate) fn open_hardware(config: EncoderConfig) -> Result<Box<dyn Encode>, Co
     Ok(Box::new(encoder))
 }
 
+/// The startup error for `plan` when its encoder does not open.
+fn open_error(plan: &Plan, e: &CodecError) -> Box<dyn Error> {
+    let hint = match e {
+        CodecError::NoDevice(_) => {
+            "; there is no H.264 encoder here, so run with --h264 false \
+             (H264=false) and without --h264-tiles"
+        }
+        _ => "",
+    };
+    format!("{}: {e}{hint}", plan.label).into()
+}
+
 /// The encoder bitrate for a preset.
 pub(crate) fn bitrate(preset: H264Bitrate) -> Bitrate {
     match preset {
@@ -279,7 +291,7 @@ impl Stage {
                     return Ok(Self::with(plan, capture, open, encoder, feed));
                 }
                 Err(CodecError::UnsupportedFormat(_)) => {}
-                Err(e) => return Err(format!("{}: {e}", plan.label).into()),
+                Err(e) => return Err(open_error(&plan, &e)),
             }
         }
         let (encoder, feed) = Self::converted(&plan, capture, open)?;
@@ -352,7 +364,7 @@ impl Stage {
                     return Ok((encoder, Feed::Convert(Box::new(converter))));
                 }
                 Err(e @ CodecError::UnsupportedFormat(_)) => last = Some(e),
-                Err(e) => return Err(format!("{}: {e}", plan.label).into()),
+                Err(e) => return Err(open_error(plan, &e)),
             }
         }
         Err(format!(
@@ -568,10 +580,15 @@ pub(crate) mod tests {
     #[test]
     fn no_encoder_is_an_error() {
         let cam = mock("64x48");
-        let err = Stage::new(plan((64, 48), None, None), cam.config(), open_none)
-            .err()
-            .unwrap();
-        assert!(err.to_string().contains("none here"), "{err}");
+        // Direct, then scaled through a converter.
+        for size in [(64, 48), (32, 24)] {
+            let err = Stage::new(plan(size, None, None), cam.config(), open_none)
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(err.contains("none here"), "{err}");
+            assert!(err.contains("--h264 false"), "{err}");
+        }
     }
 
     /// Access units come back late; each still carries its own frame's

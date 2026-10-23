@@ -490,7 +490,7 @@ edgefirst-camera --tracy --camera /dev/video0 --jpeg --h264
 | NXP i.MX8M Plus EVK | ARM64 | ✅ Supported | Hardware acceleration available |
 | Generic ARM64 Linux | ARM64 | ⚠️ Partial | Conversion falls back to OpenGL or CPU; H.264 and replay need a V4L2 hardware encoder and decoder |
 | x86_64 Linux | x86_64 | ⚠️ Development Only | Usually no V4L2 H.264 encoder; use `--h264 false` or the `mock` source |
-| macOS, Windows | — | ❌ Not supported | Only the SDK crate (`crates/camera`) builds there |
+| macOS, Windows | x86_64, ARM64 | ⚠️ Development Only | Runs on the `mock` source only, with `--h264 false`: no camera backend or H.264 encoder yet |
 
 ### Camera Compatibility
 

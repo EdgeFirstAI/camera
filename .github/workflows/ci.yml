@@ -94,7 +94,7 @@ jobs:
     uses: EdgeFirstAI/.github/.github/workflows/rust-quick.yml@9e296f92996b38683c684b9091ed59cb27562770
     with:
       pre-command: bash .github/scripts/ci-setup.sh
-      nextest-args: --workspace --locked --features edgefirst-camera/mock,edgefirst-camera/schemas,edgefirst-camera/file --lib --bin edgefirst-camera --test env_scrub --test on_target --test mock --test schema --test file --test v4l2_vivid
+      nextest-args: --workspace --locked --features edgefirst-camera/mock,edgefirst-camera/schemas,edgefirst-camera/file --lib --bin edgefirst-camera --test env_scrub --test on_target --test publish --test mock --test schema --test file --test v4l2_vivid
       clippy-args: --workspace --all-targets --all-features --locked -- -D warnings
       clippy-report: true
       cross-targets: aarch64-unknown-linux-gnu
@@ -156,9 +156,9 @@ jobs:
       boards: camera-v4l2
       sonar: false
       scancode: true
-      # macOS and Windows lanes live in camera-full.yml: the application
-      # crate is Linux-only, and these lanes would run the same
-      # workspace-wide nextest-args string as Linux.
+      # macOS and Windows lanes live in camera-full.yml: these lanes would
+      # run the same workspace-wide nextest-args string as Linux, whose V4L2
+      # and board tests do not apply there.
       skip-macos: true
       skip-windows: true
       timeout-minutes: 45
@@ -169,7 +169,7 @@ jobs:
       # The boards need no setup; unset, the board lane runs pre-command.
       board-pre-command: "true"
       board-extra-args: -j 1 --no-fail-fast -- --include-ignored
-      nextest-args: --workspace --locked --features edgefirst-camera/mock,edgefirst-camera/schemas,edgefirst-camera/file --lib --bin edgefirst-camera --test env_scrub --test on_target --test mock --test schema --test file --test v4l2_vivid
+      nextest-args: --workspace --locked --features edgefirst-camera/mock,edgefirst-camera/schemas,edgefirst-camera/file --lib --bin edgefirst-camera --test env_scrub --test on_target --test publish --test mock --test schema --test file --test v4l2_vivid
       archive-args: --locked --bin edgefirst-camera --test on_target
     secrets: inherit
 

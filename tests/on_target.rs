@@ -5,6 +5,8 @@
 //! camera. Each run is stopped with SIGTERM so the binary shuts down through
 //! its normal path, which is also what writes its coverage profile.
 
+#![cfg(unix)]
+
 use serial_test::serial;
 use std::{
     error::Error,

@@ -1,20 +1,23 @@
 # Camera-only Full lanes. Called from ci.yml (ci:full) and nightly.yml.
 #
-# The SDK crate (crates/camera) builds and runs on macOS and Windows against
-# its mock backend. The application crate is Linux-only for now (Unix
-# signals, journald), and rust-full.yml runs its macOS and Windows lanes with the
-# same workspace-wide nextest-args string as Linux, so those shared lanes stay
-# skipped and these lanes test the SDK package alone.
+# The SDK crate (crates/camera) and the application build and run on macOS
+# and Windows against the mock backend. rust-full.yml runs its macOS and
+# Windows lanes with the same workspace-wide nextest-args string as Linux,
+# whose V4L2 and board tests do not apply here, so those shared lanes stay
+# skipped and these lanes pick their own tests.
 #
 # Runners follow CICD Pipelines 6.5 rule 1: hosted standard runners, which
 # these small lanes fit within the Full budget. No fleet runner is needed:
-# the mac group is empty, and the SDK lanes need no GPU.
+# the mac group is empty, and the lanes need no GPU.
 #
-# These lanes have no camera. They keep platform-specific code out of the SDK
-# core, run the SDK's non-Linux paths (for example wall-clock stamps where
-# there is no monotonic clock to read), and run the mock-backend tests against
-# edgefirst-tensor on each platform. Coverage comes from the Linux lanes;
-# capture is validated on camera boards and devices (Testing and Validation).
+# These lanes have no camera and no H.264 encoder. They keep
+# platform-specific code out of the SDK core and the application, run the
+# SDK's non-Linux paths (for example wall-clock stamps where there is no
+# monotonic clock to read), run the mock-backend tests against
+# edgefirst-tensor on each platform, and run the application on the mock
+# source with a Zenoh subscriber counting its frames. Coverage comes from the
+# Linux lanes; capture is validated on camera boards and devices (Testing and
+# Validation).
 
 name: Camera Full extras
 
@@ -47,13 +50,16 @@ jobs:
           cache-on-failure: true
           cache-bin: false
       - name: Clippy
-        run: cargo clippy -p edgefirst-camera --all-targets --features mock,schemas,file --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Rustdoc
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc -p edgefirst-camera --no-deps --features mock,schemas,file --locked
-      - name: Tests
+      - name: SDK tests
         run: cargo test -p edgefirst-camera --features mock,schemas,file --locked
+      # The application's unit tests, then the binary on the mock source.
+      - name: Application tests
+        run: cargo test -p edgefirst-camera-app --locked --bin edgefirst-camera --test publish
 
   test-windows:
     name: Build & Test (Windows, SDK)
@@ -66,16 +72,25 @@ jobs:
       # rust-toolchain.toml is the single source of the compiler version.
       - name: Install the pinned toolchain
         run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal --component clippy
+      # libjpeg-turbo's SIMD build, required by the turbojpeg feature set,
+      # assembles with NASM on x86_64.
+      - name: Install NASM
+        run: |
+          choco install nasm --no-progress -y
+          echo 'C:\Program Files\NASM' >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           shared-key: rust-windows
           cache-on-failure: true
           cache-bin: false
       - name: Clippy
-        run: cargo clippy -p edgefirst-camera --all-targets --features mock,schemas,file --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Rustdoc
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc -p edgefirst-camera --no-deps --features mock,schemas,file --locked
-      - name: Tests
+      - name: SDK tests
         run: cargo test -p edgefirst-camera --features mock,schemas,file --locked
+      # The application's unit tests, then the binary on the mock source.
+      - name: Application tests
+        run: cargo test -p edgefirst-camera-app --locked --bin edgefirst-camera --test publish

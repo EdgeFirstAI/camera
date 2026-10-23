@@ -51,7 +51,7 @@ jobs:
       # The boards need no setup; unset, the board lane runs pre-command.
       board-pre-command: "true"
       board-extra-args: -j 1 --no-fail-fast -- --include-ignored
-      nextest-args: --workspace --locked --features edgefirst-camera/mock,edgefirst-camera/schemas,edgefirst-camera/file --lib --bin edgefirst-camera --test env_scrub --test on_target --test mock --test schema --test file --test v4l2_vivid
+      nextest-args: --workspace --locked --features edgefirst-camera/mock,edgefirst-camera/schemas,edgefirst-camera/file --lib --bin edgefirst-camera --test env_scrub --test on_target --test publish --test mock --test schema --test file --test v4l2_vivid
       archive-args: --locked --bin edgefirst-camera --test on_target
     secrets: inherit
 

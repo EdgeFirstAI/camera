@@ -100,8 +100,9 @@ cd src && cargo build  # Where are we now?
 - **Target platforms**:
   - Primary: Linux aarch64 (NXP i.MX8M Plus, ARM Cortex-A53/A72)
   - Secondary: Linux x86_64 (development and testing)
-  - **Not supported**: the application on macOS, Windows, RISC-V; only the SDK crate builds on macOS and Windows
-- **Cross-platform**: The application is Linux-only for now: it needs V4L2 capture and a V4L2 H.264 encoder; image conversion uses whatever the HAL finds (OpenGL, G2D or CPU)
+  - Development: macOS and Windows, on the `mock` source with `--h264 false`
+  - **Not supported**: RISC-V
+- **Cross-platform**: Camera capture and H.264 need Linux (V4L2 capture, a V4L2 H.264 encoder); image conversion uses whatever the HAL finds (OpenGL, G2D or CPU). On macOS and Windows the application runs on the `mock` source; keep journald behind `cfg(target_os = "linux")` and Unix signal code behind `cfg(unix)`
 
 ### Architecture
 
@@ -122,9 +123,9 @@ cd src && cargo build  # Where are we now?
   - `crates/camera/` - The `edgefirst-camera` SDK (see its README and ARCHITECTURE)
 - **Error handling**:
   - Uses `Result<T, Box<dyn Error>>` pattern
-  - Logging via `tracing` with journald backend
+  - Logging via `tracing` with a journald layer on Linux
   - Periodic drop reports for camera and encoder drops
-  - Graceful shutdown on SIGTERM/SIGINT signals
+  - Graceful shutdown on SIGTERM/SIGINT (Ctrl+C/Ctrl+Break on Windows)
   - Bounded retry of consecutive camera read timeouts
 
 ### Build and Deployment
@@ -163,7 +164,7 @@ make pre-release
 cargo llvm-cov --all-features --workspace --html
 ```
 
-**Build Verification:** Always run `cargo fmt` and `cargo clippy -- -D warnings` before building. Use `cargo zigbuild --target aarch64-unknown-linux-gnu` when developing on a non-Linux platform (macOS, Windows) or when cross-compiling for the aarch64 target. Native `cargo build` of the application only works on Linux (V4L2 capture and encoding); on macOS and Windows only the SDK crate builds (`cargo build -p edgefirst-camera`).
+**Build Verification:** Always run `cargo fmt` and `cargo clippy -- -D warnings` before building. Use `cargo zigbuild --target aarch64-unknown-linux-gnu` when developing on a non-Linux platform (macOS, Windows) or when cross-compiling for the aarch64 target. Native `cargo build` works on Linux, macOS and Windows; off Linux the application runs only on the `mock` source with `--h264 false`.
 
 **Yocto Integration:**
 
@@ -176,7 +177,7 @@ cargo llvm-cov --all-features --workspace --html
 
 - `ci.yml` - Tiered CI: **Quick** on every PR including drafts (`ci-gate` before review), **Full** with label `ci:full`, board lane with `ci:hardware` (not on ordinary pushes)
 - `nightly.yml` - Scheduled Full + advisories + Sonar main baseline
-- `camera-full.yml` - Full-tier macOS and Windows lanes for the SDK crate (`crates/camera`), called by `ci.yml` (`ci:full`) and `nightly.yml`; the shared macOS and Windows lanes stay skipped because the application crate is Linux-only
+- `camera-full.yml` - Full-tier macOS and Windows lanes for the SDK and the application on the `mock` source (`tests/publish.rs`), called by `ci.yml` (`ci:full`) and `nightly.yml`; the shared macOS and Windows lanes stay skipped because their nextest-args are the Linux set
 - `build.yml` - Release binaries on version tags (native aarch64 + x86_64)
 - `sbom.yml` - Full scancode SBOM on release tags
 - `release.yml` - Automated release with binary artifacts
