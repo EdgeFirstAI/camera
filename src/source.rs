@@ -454,6 +454,10 @@ where
     F: FnMut() -> edgefirst_camera::Result<T>,
 {
     let mut attempt = 0u32;
+    // The ISP removes the device node while it restarts after a failed
+    // attempt, so once the camera has been not ready, a missing node is
+    // the restart rather than a wrong path.
+    let mut seen_not_ready = false;
 
     loop {
         // Re-checked before every attempt: an attempt can block in the
@@ -472,7 +476,11 @@ where
                 }
                 return Ok(Some(opened));
             }
-            Err(err) if err.kind() == ErrorKind::NotReady => {
+            Err(err)
+                if err.kind() == ErrorKind::NotReady
+                    || (seen_not_ready && err.kind() == ErrorKind::NotFound) =>
+            {
+                seen_not_ready = true;
                 if !retry_permitted(attempt, deadline) {
                     return Err(Box::from(not_ready_error(camera, attempt, &err)));
                 }
@@ -853,6 +861,33 @@ mod tests {
             assert_eq!(calls, 1, "{kind:?}");
             assert!(!err.to_string().contains("still not ready"), "{err}");
         }
+    }
+
+    /// A node that vanishes while the ISP restarts is retried, but a path
+    /// that never existed is not.
+    #[test]
+    fn a_vanished_node_is_retried_after_not_ready() {
+        let flag = AtomicBool::new(false);
+        let missing = || edgefirst_camera::Error::new(ErrorKind::NotFound, "gone");
+        let mut calls = 0u32;
+        let opened = retry_while_not_ready("/dev/video3", far_deadline(), FAST, &flag, || {
+            calls += 1;
+            match calls {
+                1 => Err(not_ready()),
+                2 => Err(missing()),
+                _ => Ok(7u32),
+            }
+        })
+        .unwrap();
+        assert_eq!((opened, calls), (Some(7), 3));
+        let mut calls = 0u32;
+        let err = retry_while_not_ready("/dev/video9", far_deadline(), FAST, &flag, || {
+            calls += 1;
+            Err::<u32, _>(missing())
+        })
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert!(err.to_string().contains("gone"), "{err}");
     }
 
     #[test]

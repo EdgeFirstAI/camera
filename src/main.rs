@@ -54,23 +54,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         unsafe { env::set_var("TOKIO_CONSOLE_BIND", "localhost:7000") };
     }
 
-    // The runtime serves signals and the tokio console only. Capture runs
-    // on this thread, outside it: the image crate's GL converter blocks,
-    // which a runtime thread may not.
+    // SIGTERM and SIGINT are blocked in every thread and taken by one
+    // thread with sigwait, so a library that installs its own handler (the
+    // Vivante GL driver does) cannot kill the process before it shuts down.
+    // Threads inherit the mask, so this runs before any is spawned.
+    shutdown_on_signals()?;
+
+    // The runtime serves the tokio console only. Capture runs on this
+    // thread, outside it: the image crate's GL converter blocks, which a
+    // runtime thread may not.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.spawn(async {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("Failed to register SIGTERM handler");
-        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-            .expect("Failed to register SIGINT handler");
-        tokio::select! {
-            _ = sigterm.recv() => info!("Received SIGTERM, initiating graceful shutdown"),
-            _ = sigint.recv() => info!("Received SIGINT, initiating graceful shutdown"),
-        }
-        SHUTDOWN.store(true, Ordering::SeqCst);
-    });
 
     args.tracy.then(tracy_client::Client::start);
     let stdout_log = tracing_subscriber::fmt::layer()
@@ -135,6 +130,41 @@ fn main() -> Result<(), Box<dyn Error>> {
         &SHUTDOWN,
     )?;
     info!("Shutdown complete");
+    Ok(())
+}
+
+/// Blocks SIGTERM and SIGINT in this thread, and so in every thread it
+/// spawns, and sets [`SHUTDOWN`] from a thread that waits for them.
+fn shutdown_on_signals() -> std::io::Result<()> {
+    // SAFETY: the set is initialised by sigemptyset before use, and
+    // pthread_sigmask only reads it.
+    let set = unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::sigaddset(&mut set, libc::SIGINT);
+        let rc = libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        if rc != 0 {
+            return Err(std::io::Error::from_raw_os_error(rc));
+        }
+        set
+    };
+    std::thread::Builder::new()
+        .name("signals".into())
+        .spawn(move || loop {
+            let mut signal = 0;
+            // SAFETY: `set` and `signal` are valid for the call.
+            if unsafe { libc::sigwait(&set, &mut signal) } != 0 {
+                continue;
+            }
+            let name = if signal == libc::SIGTERM {
+                "SIGTERM"
+            } else {
+                "SIGINT"
+            };
+            info!("Received {name}, initiating graceful shutdown");
+            SHUTDOWN.store(true, Ordering::SeqCst);
+        })?;
     Ok(())
 }
 
