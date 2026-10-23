@@ -142,7 +142,7 @@ pub struct Mode {
 
 /// Standard sizes with their names, used to name modes and to pick sizes
 /// out of a stepwise range.
-const NAMED_SIZES: [(&str, u32, u32); 6] = [
+pub(crate) const NAMED_SIZES: [(&str, u32, u32); 6] = [
     ("VGA", 640, 480),
     ("WVGA", 800, 480),
     ("540p", 960, 540),

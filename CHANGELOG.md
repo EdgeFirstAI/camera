@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The application captures from libcamera cameras (`--source libcamera:<id>`) in NV12 into libcamera's buffers, and accepts `CAMERA_MODE` for them through the libcamera probe (EDGEAI-1540).
 - `edgefirst-camera` SDK crate (`crates/camera`): a camera capture API that delivers frames as `edgefirst-tensor` tensors with capture metadata and wall-clock acquisition time, plus the `mock` backend (EDGEAI-1518). The V4L2, file and libcamera backends follow.
 - `SlotTable`: slot ownership shared by every backend. A buffer is never handed back to the driver while a frame references it, frames keep their memory across `stop()` and closing the camera, and caller-provided pools are validated at `start()` with a reason and slot for any refusal (EDGEAI-1519).
 - V4L2 capture backend for the SDK (`/dev/videoN`, feature `v4l2`, default on Linux) over `edgefirst-v4l2` (EDGEAI-1520).
@@ -16,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Frames carry the capture clock and source from the buffer flags and their acquisition time; drops are counted from timestamp gaps. Frames held across `stop()` or close keep their memory, and the device reopens at once.
   - Mirror, exposure, gain, white balance, frame rate and any V4L2 control by ID; the i.MX 8M Plus ISP flip quirk.
   - The `probe` example reports what a camera negotiates and delivers on a platform.
+- libcamera backend for the SDK (`libcamera:<id>`, feature `libcamera`, default on Linux) for libcamera 0.5 and newer (EDGEAI-1540).
+  - `edgefirst-libcamera-sys` (`crates/libcamera-sys`): a C shim over libcamera with a stable ABI (`shim/`, built with meson), its run-time loader, which picks the shim built for the installed libcamera minor, and a mock of the ABI for tests without libcamera.
+  - libcamera's own buffers (Export), as one tensor or two planes; requeue with `Request::reuse`; completions through an eventfd that is the `WaitHandle`.
+  - Controls checked against the camera's `ControlInfoMap` and reported, mirroring through `orientation`, and the delivered frame rate measured from sensor timestamps, since some pipelines ignore the requested rate.
+  - `SensorTimestamp` as `CLOCK_MONOTONIC`, at frame start on the RPi and frame end elsewhere; `probe()` reads each size's `FrameDurationLimits`; `set_libcamera_pipelines` for the i.MX 95 `nxp/neo` match list.
+  - CI builds the shim for libcamera 0.5, 0.6 and 0.7 on x86_64 and aarch64 in Debian bookworm and checks its imports against each libcamera.
 - Caller-pool validation rejects memory the tensor crate reports as non-contiguous while contiguity is required (EDGEAI-1520).
 - `schemas` feature: `schema::FrameTensor` maps a `Frame` to an `edgefirst_msgs/CameraFrame` tensor (addressing-grid shape, byte strides at the real pitch, tensor-ABI storage kind and dtype, one plane per buffer plane, colorimetry), with `schema::stamp` and `schema::ntp64` giving the header stamp and the Zenoh sample timestamp of the same instant (EDGEAI-1521).
 - V4L2 ioctl ABI check: every pull request runs the SDK's vivid tests under `strace` and fails on an unexpected `ENOTTY`, the symptom of an ioctl argument laid out differently from the kernel's (`make abi-check`) (EDGEAI-1530).

@@ -12,11 +12,14 @@ categories = ["multimedia::video", "hardware-support"]
 include = ["src/**", "tests/**", "benches/**", "README.md", "ARCHITECTURE.md", "TESTING.md"]
 
 [features]
-default = ["v4l2"]
+default = ["v4l2", "libcamera"]
 # Synthetic frame source for tests, CI and as the worked example for backends.
 mock = []
 # V4L2 capture backend (Linux).
 v4l2 = ["dep:edgefirst-v4l2"]
+# libcamera capture backend (Linux). Loads libcamera at run time through
+# the edgefirst-libcamera-sys shim; nothing is linked at build time.
+libcamera = ["dep:edgefirst-libcamera-sys"]
 # `Frame` → `edgefirst_msgs/CameraFrame` mapping.
 schemas = ["dep:edgefirst-schemas"]
 # Recorded H.264 playback (`file:<path>.h264` with its JSON sidecar). Decodes
@@ -35,6 +38,10 @@ libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 edgefirst-v4l2 = { version = "0.2.2", optional = true }
+edgefirst-libcamera-sys = { version = "3.0.0-dev", path = "../libcamera-sys", optional = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+edgefirst-libcamera-sys = { version = "3.0.0-dev", path = "../libcamera-sys", features = ["mock"] }
 
 [dev-dependencies]
 criterion = "0.8.2"

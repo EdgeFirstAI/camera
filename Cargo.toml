@@ -28,7 +28,7 @@ strip = false
 debug = true
 
 [workspace]
-members = ["crates/camera"]
+members = ["crates/camera", "crates/libcamera-sys"]
 resolver = "2"
 
 [[test]]

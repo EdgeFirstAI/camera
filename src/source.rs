@@ -59,11 +59,17 @@ const MAX_BUFFERS: usize = 32;
 /// The format requested from camera devices.
 pub(crate) const CAPTURE_FORMAT: PixelFormat = PixelFormat::Yuyv;
 
+/// The format libcamera cameras capture: what the i.MX 95 and RPi 5 ISPs
+/// produce, and what the encoders take.
+pub(crate) const LIBCAMERA_FORMAT: PixelFormat = PixelFormat::Nv12;
+
 /// What kind of source a spec names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SourceKind {
-    /// A camera device.
+    /// A V4L2 camera device.
     Device,
+    /// A libcamera camera.
+    Libcamera,
     /// A recording.
     File,
     /// Synthetic frames.
@@ -71,9 +77,16 @@ pub(crate) enum SourceKind {
 }
 
 impl SourceKind {
+    /// Whether the source is a live camera.
+    pub(crate) fn is_camera(self) -> bool {
+        matches!(self, Self::Device | Self::Libcamera)
+    }
+
     pub(crate) fn of(spec: &str) -> Self {
         if spec.starts_with("file:") {
             Self::File
+        } else if spec.starts_with("libcamera:") {
+            Self::Libcamera
         } else if spec == "mock" || spec.starts_with("mock:") {
             Self::Synthetic
         } else {
@@ -120,7 +133,7 @@ impl Request {
         let mut size = args.explicit_size();
         let mut fps = args.explicit_fps();
         if let Some(mode) = &args.capture.camera_mode {
-            if kind != SourceKind::Device {
+            if !kind.is_camera() {
                 return Err(Failure::new(
                     Status::InvalidArgs,
                     format!(
@@ -167,13 +180,19 @@ impl Request {
         Ok(Self {
             // Packed YUV is what the encoders and converters take directly
             // on the i.MX 8M Plus; a device keeps its last format otherwise.
-            format: (kind == SourceKind::Device).then_some(CAPTURE_FORMAT),
+            format: match kind {
+                SourceKind::Device => Some(CAPTURE_FORMAT),
+                SourceKind::Libcamera => Some(LIBCAMERA_FORMAT),
+                _ => None,
+            },
             spec,
             kind,
             size,
             fps,
             buffers: pool_depth(args),
             memory: match args.capture.memory {
+                // libcamera captures into its own buffers.
+                _ if kind == SourceKind::Libcamera => MemoryStrategy::Export,
                 MemorySetting::Auto => MemoryStrategy::Auto,
                 MemorySetting::Import => MemoryStrategy::Import,
                 MemorySetting::Export => MemoryStrategy::Export,
@@ -231,9 +250,14 @@ fn controls(args: &Args) -> Vec<Control> {
     out
 }
 
-/// Probes a V4L2 device's modes.
-pub(crate) fn probe_device(path: &str) -> edgefirst_camera::Result<Vec<FormatInfo>> {
-    edgefirst_camera::probe(&CameraDescriptor::new(Backend::V4l2, path, "", ""))
+/// Probes the modes of a camera spec: a V4L2 device path or
+/// `libcamera:<id>`.
+pub(crate) fn probe_camera(spec: &str) -> edgefirst_camera::Result<Vec<FormatInfo>> {
+    let d = match spec.strip_prefix("libcamera:") {
+        Some(id) => CameraDescriptor::new(Backend::Libcamera, id, "", ""),
+        None => CameraDescriptor::new(Backend::V4l2, spec, "", ""),
+    };
+    edgefirst_camera::probe(&d)
 }
 
 /// Accepts `mode` when some format offers its size at its rate; otherwise
@@ -626,6 +650,22 @@ mod tests {
     }
 
     #[test]
+    fn libcamera_captures_nv12_into_its_own_buffers_and_takes_modes() {
+        let r = request(&[
+            "--source",
+            "libcamera:/base/axi/pcie@1000120000/rp1/i2c@88000/imx708@1a",
+            "--camera-mode",
+            "720p30",
+        ])
+        .unwrap();
+        assert_eq!(r.kind, SourceKind::Libcamera);
+        assert_eq!(r.format, Some(PixelFormat::Nv12));
+        assert_eq!(r.memory, MemoryStrategy::Export);
+        assert_eq!((r.size, r.fps), (Some((1280, 720)), Some(30.0)));
+        assert!(r.kind.is_camera());
+    }
+
+    #[test]
     fn a_mode_expands_to_size_and_rate() {
         let r = request(&["--camera-mode", "720p30"]).unwrap();
         assert_eq!((r.size, r.fps), (Some((1280, 720)), Some(30.0)));
@@ -705,6 +745,10 @@ mod tests {
     #[test]
     fn source_kinds() {
         assert_eq!(SourceKind::of("/dev/video3"), SourceKind::Device);
+        assert_eq!(
+            SourceKind::of("libcamera:/base/imx708@1a"),
+            SourceKind::Libcamera
+        );
         assert_eq!(SourceKind::of("file:a.h264"), SourceKind::File);
         assert_eq!(SourceKind::of("mock"), SourceKind::Synthetic);
         assert_eq!(SourceKind::of("mock:64x64@5"), SourceKind::Synthetic);

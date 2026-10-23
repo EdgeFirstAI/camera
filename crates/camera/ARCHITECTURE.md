@@ -16,7 +16,7 @@ The design lives in Confluence, under [EdgeFirst Camera SDK](https://au-zone.atl
 | `timestamp.rs` | `Timestamp`, `CaptureClock`, `TimestampSource`, `RealtimeClock` |
 | `enumerate.rs` | `CameraDescriptor`, `FormatInfo`, `Sizes`, `Rates`, `Mode`, `modes()` |
 | `error.rs` | `Error`, `ErrorKind`, `Rejection` |
-| `backend/` | Backend dispatch; `mock.rs`, `v4l2/` on Linux, and `file/` |
+| `backend/` | Backend dispatch; `mock.rs`, `v4l2/` and `libcamera/` on Linux, and `file/` |
 
 ## Rules every backend follows
 
@@ -82,6 +82,35 @@ It behaves like an Import backend:
 **Stop and close.** `stop()` is `STREAMOFF` then `REQBUFS(0)`. Import keeps its tensors and re-queues them on `start()`, so held frames requeue when they drop. Export's buffers are orphaned by `REQBUFS(0)`, so the table detaches and its frames keep their `EXPBUF` fds. Dropping the camera does the same and releases the lock, so the device reopens at once. A driver without `V4L2_BUF_CAP_SUPPORTS_ORPHANED_BUFS` cannot do that: when it holds Export frames at close, the camera keeps its open file (and the lock) in the slot table with `SlotTable::keep_alive`, and the device closes when the last frame drops.
 
 **Testing hooks.** `CameraBuilder::fault` injects `import-qbuf` (the first Import `QBUF` is refused) and `no-orphan` (the driver is treated as unable to orphan buffers). It is honoured only in debug builds and is not part of the stable API.
+
+## The libcamera backend
+
+`backend/libcamera/` (feature `libcamera`, Linux) implements design §4.3 over [`edgefirst-libcamera-sys`](../libcamera-sys), which loads a C shim built for the installed libcamera at run time. Nothing links libcamera, so one binary runs with or without it; without it, `enumerate()` lists no libcamera cameras and opening one is `NotFound`.
+
+| File | Contents |
+|---|---|
+| `manager.rs` | The process-wide `CameraManager`: started by the first camera or enumeration that needs it, stopped when the last drops it; the shim loaded once; the pipeline match list |
+| `describe.rs` | DRM fourcc ↔ `PixelFormat`, descriptors, capture drivers from `properties::SystemDevices` and sysfs, and `probe()` |
+| `mod.rs` | `Handle` (an acquired shim camera) and the `Camera`: buffers, `start()`, the dequeue loop, controls, `stop()` and close |
+| `tests.rs` | The backend on the shim's mock (memfd buffers, completions on dequeue, cancelled completions at stop) |
+
+**Configuration.** One stream in the `VideoRecording` role. A requested format libcamera replaces is `UnsupportedFormat`; an adjusted size is reported in `StreamConfig` and logged. Mirroring is `CameraConfiguration::orientation`, so it is applied at configuration: `set_control(Mirror)` reconfigures while stopped, and a pipeline that cannot mirror (the i.MX 95 `nxp/neo`) leaves the stream as it was and reports `Unsupported(Camera)`.
+
+**Buffers.** Export only: libcamera's allocator creates the buffers with V4L2 `MMAP` + `EXPBUF` and orphans them at once, so each plane's dma-buf lives as long as a duplicate of its fd. The backend duplicates every plane fd and wraps them: one tensor when the planes share a dma-buf at consecutive offsets (RPi `pisp`), or a two-plane tensor through `Tensor::from_planes` when they are separate dma-bufs (i.MX 95 `nxp/neo`). `MemoryStrategy::Import` is `InvalidConfig` at open, and a caller pool is `BuffersRejected` at `start()` and goes back through `take_buffers`.
+
+**Requests and completions.** Each buffer has one request whose cookie is its slot. libcamera's thread only queues completions in the shim and signals an eventfd, which is the `WaitHandle`; every call into libcamera is made from the thread that owns the camera. A dropped frame's slot is requeued with `Request::reuse(ReuseBuffers)`, carrying any controls set since the previous request.
+
+**Controls.** The `ControlSet` comes from the camera's `ControlInfoMap` after configuration: `FrameDurationLimits` as `FrameRate`, `ExposureTime` as `Exposure` (µs), `AnalogueGain` as `Gain` (a `Float` multiplier) and `ColourTemperature` as `WhiteBalance`. Values outside the range are clamped and reported as `Clamped`; a control the camera lacks is `Unsupported(Camera)`. Manual exposure and gain use `ExposureTimeMode` and `AnalogueGainMode` where the pipeline has them and `AeEnable` elsewhere. Manual white balance needs a settable colour temperature; neo takes only `ColourGains`, which would need a calibration, so it is reported unsupported.
+
+**Frame rate.** A requested rate is sent as `FrameDurationLimits`, but some pipelines ignore it (neo runs the OS08A20 at 60 fps), and neo's `FrameDuration` metadata does not match its frame interval either (15.97 ms at 60 fps). `config().frame_rate` is therefore measured from sensor timestamps: from the first two frames at `start()`, then from the median of the first ten intervals, which also become the period for drop counting. A delivered rate more than 1 % from the request is logged.
+
+**Timestamps.** `SensorTimestamp`, which the pipelines copy from the capture node's V4L2 buffer timestamp: `CLOCK_MONOTONIC`, at frame start on the RPi receivers (`rp1-cfe`, `unicam`) and at frame end elsewhere. The capture drivers come from `properties::SystemDevices` through `/sys/dev/char`.
+
+**`probe()`.** Opens the camera, configures each size once and reads the `FrameDurationLimits` the pipeline then reports, as `rpicam-hello --list-cameras` does. Sizes offered as a range become the standard sizes inside it. Each size is configured in NV12 (or YUYV), and its rates apply to every format: the rate follows the sensor mode, and the RPi 5 `pisp` pipeline lists VYUY but aborts the process when asked to validate it.
+
+**Stop and close.** `stop()` stops the camera, drains the cancelled completions and frees the buffers; the table detaches and held frames keep their duplicated fds, so nothing writes into them and the camera restarts at once. Dropping the camera does the same and releases it.
+
+**Pipelines.** On the i.MX 95, the raw-only `imx8-isi` pipeline claims the camera unless `LIBCAMERA_PIPELINES_MATCH_LIST=nxp/neo` is set; enumeration warns when a camera offers only raw formats. `set_libcamera_pipelines` sets the list for library users before the `CameraManager` starts; the SDK never switches pipelines on its own.
 
 ## The file backend
 

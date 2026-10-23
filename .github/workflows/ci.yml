@@ -8,6 +8,7 @@
 # - actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 (v7.0.1)
 # - dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d (v4.0.3)
 # - taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 (v2.87.12)
+# - actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a (v7.0.1)
 
 name: CI
 
@@ -49,6 +50,7 @@ jobs:
       pull-requests: read
     outputs:
       code: ${{ steps.f.outputs.code }}
+      shim: ${{ steps.f.outputs.shim }}
       full: ${{ steps.mode.outputs.full }}
       hardware: ${{ steps.mode.outputs.hardware }}
     steps:
@@ -68,6 +70,9 @@ jobs:
               - 'NOTICE'
               - 'camera.default'
               - '.github/**'
+            shim:
+              - 'crates/libcamera-sys/shim/**'
+              - '.github/workflows/ci.yml'
       - id: mode
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -94,7 +99,7 @@ jobs:
     uses: EdgeFirstAI/.github/.github/workflows/rust-quick.yml@9e296f92996b38683c684b9091ed59cb27562770
     with:
       pre-command: bash .github/scripts/ci-setup.sh
-      nextest-args: --workspace --locked --features edgefirst-camera/mock,edgefirst-camera/schemas,edgefirst-camera/file --lib --bin edgefirst-camera --test env_scrub --test on_target --test board --test publish --test subcommands --test mock --test schema --test file --test v4l2_vivid
+      nextest-args: --workspace --locked --features edgefirst-camera/mock,edgefirst-camera/schemas,edgefirst-camera/file --lib --bin edgefirst-camera --test env_scrub --test on_target --test board --test publish --test subcommands --test mock --test schema --test file --test v4l2_vivid --test layout
       clippy-args: --workspace --all-targets --all-features --locked -- -D warnings
       clippy-report: true
       cross-targets: aarch64-unknown-linux-gnu
@@ -145,6 +150,39 @@ jobs:
           fi
           bash .github/scripts/ioctl-abi-check.sh "$RUNNER_TEMP/ioctl-abi"
 
+  # One prebuilt shim per supported libcamera minor and architecture, as
+  # the release ships them: built in Debian bookworm (GCC 12) against the
+  # upstream vX.Y.0 tag, then import-checked against that libcamera and
+  # loaded natively.
+  libcamera-shim:
+    name: libcamera shim ${{ matrix.libcamera }} ${{ matrix.arch }}
+    needs: changes
+    if: needs.changes.outputs.shim == 'true' || needs.changes.outputs.full == 'true'
+    runs-on: ${{ matrix.runner }}
+    container: debian:bookworm
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        libcamera: [v0.5.0, v0.6.0, v0.7.0]
+        arch: [x86_64, aarch64]
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Build and check the shim
+        run: crates/libcamera-sys/shim/build-prebuilt.sh "${{ matrix.libcamera }}" "$RUNNER_TEMP/shim"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: libcamera-shim-${{ matrix.arch }}-${{ matrix.libcamera }}
+          path: ${{ runner.temp }}/shim
+          if-no-files-found: error
+
   full:
     needs: changes
     if: needs.changes.outputs.full == 'true' || needs.changes.outputs.hardware == 'true'
@@ -169,7 +207,7 @@ jobs:
       # The boards need no setup; unset, the board lane runs pre-command.
       board-pre-command: "true"
       board-extra-args: -j 1 --no-fail-fast -- --include-ignored
-      nextest-args: --workspace --locked --features edgefirst-camera/mock,edgefirst-camera/schemas,edgefirst-camera/file --lib --bin edgefirst-camera --test env_scrub --test on_target --test board --test publish --test subcommands --test mock --test schema --test file --test v4l2_vivid
+      nextest-args: --workspace --locked --features edgefirst-camera/mock,edgefirst-camera/schemas,edgefirst-camera/file --lib --bin edgefirst-camera --test env_scrub --test on_target --test board --test publish --test subcommands --test mock --test schema --test file --test v4l2_vivid --test layout
       archive-args: --locked --bin edgefirst-camera --test on_target --test board
     secrets: inherit
 
@@ -190,7 +228,7 @@ jobs:
 
   ci-gate:
     if: always()
-    needs: [changes, quick, notice, ioctl-abi, full, camera-full, sonar]
+    needs: [changes, quick, notice, ioctl-abi, libcamera-shim, full, camera-full, sonar]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     permissions: {}

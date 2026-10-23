@@ -1,0 +1,4 @@
+EFCAM_LC_1 {
+  global: efcam_lc_*;
+  local: *;
+};

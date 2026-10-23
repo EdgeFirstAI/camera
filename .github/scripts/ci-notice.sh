@@ -4,7 +4,7 @@ set -euo pipefail
 
 # One dependency SBOM per workspace package: the application at the root
 # and each crate under crates/. NOTICE covers their union.
-SBOMS=("edgefirst-camera-app.cdx.json" "crates/camera/edgefirst-camera.cdx.json")
+SBOMS=("edgefirst-camera-app.cdx.json" "crates/camera/edgefirst-camera.cdx.json" "crates/libcamera-sys/edgefirst-libcamera-sys.cdx.json")
 
 if ! command -v cargo >/dev/null 2>&1; then
   echo "::error::Rust toolchain required for cargo cyclonedx"

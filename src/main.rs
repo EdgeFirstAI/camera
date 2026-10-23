@@ -197,7 +197,7 @@ fn run(
     session: &Session,
     adjust: impl FnOnce(&mut Settings),
 ) -> Result<(), Box<dyn Error>> {
-    let request = Request::from_args(args, source::probe_device)?;
+    let request = Request::from_args(args, source::probe_camera)?;
     let processor = match request.kind {
         SourceKind::File => None,
         _ => ImageProcessor::new()
@@ -213,8 +213,7 @@ fn run(
     // A camera that stops delivering (an ISP daemon restart on vvcam, a
     // USB reset) is opened again in this process, with the startup retry.
     let mut reopen = || source::open(&request, processor.as_ref(), &SHUTDOWN);
-    let reopen: Option<pipeline::Reopen<'_>> =
-        (request.kind == SourceKind::Device).then_some(&mut reopen);
+    let reopen: Option<pipeline::Reopen<'_>> = request.kind.is_camera().then_some(&mut reopen);
     pipeline::run(
         opened,
         session,

@@ -471,10 +471,11 @@ impl V4l2Camera {
         } else {
             h
         };
+        // Raw planes carry no format, so their pitch is set unchecked.
         let mut luma = Tensor::<u8>::from_fd(fd(0)?, &[h, w], None)?;
-        luma.set_row_stride(self.neg.strides[0])?;
+        luma.set_row_stride_unchecked(self.neg.strides[0]);
         let mut chroma = Tensor::<u8>::from_fd(fd(1)?, &[chroma_rows, w], None)?;
-        chroma.set_row_stride(self.neg.strides[1])?;
+        chroma.set_row_stride_unchecked(self.neg.strides[1]);
         let handle = |t: &Tensor<u8>| t.dmabuf().map_or(-1, |b| i64::from(b.as_raw_fd()));
         let handles = vec![handle(&luma), handle(&chroma)];
         let t = Tensor::<u8>::from_planes(luma, chroma, format)?;

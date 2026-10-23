@@ -51,6 +51,9 @@
 //! ## Features
 //!
 //! - `v4l2` (default): the V4L2 capture backend on Linux (`/dev/videoN`).
+//! - `libcamera` (default): the libcamera backend on Linux
+//!   (`libcamera:<id>`), loaded at run time through the
+//!   `edgefirst-libcamera-sys` shim, so binaries run without libcamera.
 //! - `mock`: the synthetic frame source (`mock[:WxH@fps]`).
 //! - `file`: recorded H.264 playback (`file:<name>.h264` with its
 //!   `<name>.json` sidecar), decoded by the platform's V4L2 decoder.
@@ -99,6 +102,24 @@ pub use timestamp::{CaptureClock, RealtimeClock, Timestamp, TimestampSource};
 /// A backend failure while scanning devices.
 pub fn enumerate() -> Result<Vec<CameraDescriptor>> {
     backend::enumerate()
+}
+
+/// Restricts the libcamera pipeline handlers, as the
+/// `LIBCAMERA_PIPELINES_MATCH_LIST` environment variable does; `None` leaves
+/// libcamera's default. On the i.MX 95, `Some("nxp/neo")` makes the ISP
+/// pipeline claim the camera instead of the raw-only `imx8-isi` one. The
+/// SDK never switches pipelines on its own.
+///
+/// Applies when libcamera's `CameraManager` starts: call it before the
+/// first libcamera [`enumerate`] or open.
+///
+/// # Errors
+///
+/// [`ErrorKind::InvalidConfig`] when a libcamera camera is open with a
+/// different list.
+#[cfg(all(target_os = "linux", feature = "libcamera"))]
+pub fn set_libcamera_pipelines(list: Option<&str>) -> Result<()> {
+    backend::libcamera::set_match_list(list)
 }
 
 /// Probes a camera's full size and rate table.

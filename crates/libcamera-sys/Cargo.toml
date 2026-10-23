@@ -1,0 +1,27 @@
+[package]
+name = "edgefirst-libcamera-sys"
+description = "Run-time bindings to the EdgeFirst libcamera shim, a stable C ABI over libcamera"
+repository = "https://github.com/EdgeFirstAI/camera"
+license = "Apache-2.0"
+version = "3.0.0-dev"
+edition = "2021"
+rust-version = "1.94"
+readme = "README.md"
+keywords = ["libcamera", "camera", "ffi", "edge"]
+categories = ["multimedia::video", "hardware-support", "external-ffi-bindings"]
+include = ["src/**", "shim/**", "tests/**", "README.md"]
+
+[features]
+# An in-process implementation of the shim ABI for tests (Linux).
+mock = []
+
+[dependencies]
+libloading = "0.9.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[lints.rust]
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unsafe_op_in_unsafe_fn = "deny"

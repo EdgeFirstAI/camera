@@ -312,7 +312,7 @@ edgefirst-camera --help
 
 **Essential Options:**
 
-- `--source <SOURCE>` - Frame source: a V4L2 device path (`/dev/video3`), `file:<name>.h264` for a recording with its `<name>.json` sidecar, or `mock[:WxH@fps]` for synthetic frames. Unset uses `--camera`.
+- `--source <SOURCE>` - Frame source: a V4L2 device path (`/dev/video3`), `libcamera:<id>` for a libcamera camera (ids are listed by `devices`), `file:<name>.h264` for a recording with its `<name>.json` sidecar, or `mock[:WxH@fps]` for synthetic frames. Unset uses `--camera`.
 - `--camera <PATH>` - Camera device path, used when `--source` is unset (default: `/dev/video3`)
 - `--memory <auto|import|export>` - Capture buffer allocation: `import` this service's contiguous buffers, `export` the driver's own, or `auto` to import and fall back to the driver's buffers when it refuses them (default: `auto`)
 - `--camera-size <WIDTH> <HEIGHT>` - Requested capture resolution. Unset keeps the camera's current size.
