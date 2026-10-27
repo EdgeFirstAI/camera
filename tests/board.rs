@@ -2,13 +2,14 @@
 // Copyright (c) 2026 Au-Zone Technologies. All Rights Reserved.
 
 //! Platform validation of the SDK with the image and codec crates on a
-//! board with a V4L2 camera: the i.MX 8M Plus with an ISI sensor or the
-//! vvcam ISP that Maivin and Raivin use.
+//! board's camera: a V4L2 camera on the i.MX 8M Plus (an ISI sensor or the
+//! vvcam ISP that Maivin and Raivin use), or a libcamera camera on the
+//! i.MX 95 neo ISP.
 //!
 //! Every test is ignored; run them on a board with `--include-ignored`.
 //!
-//! - `EDGEFIRST_CAMERA_DEVICE`: the capture node, default `/dev/video3`.
-//!   Without it the tests print `SKIPPED` and pass.
+//! - `EDGEFIRST_CAMERA_SOURCE`: the camera, default `/dev/video3`; see
+//!   `common::source`. Without it the tests print `SKIPPED` and pass.
 //! - `EDGEFIRST_SOAK_SECS`: how long the 1080p30 soak runs, default 20;
 //!   600 for the ten-minute platform run.
 //! - `EDGEFIRST_RECORDING`: a camera 2.x recording (`.h264` with its
@@ -28,8 +29,8 @@ use std::{
 };
 
 use edgefirst_camera::{
-    Backend, Camera, CameraBuilder, CaptureClock, ErrorKind, Frame, MemoryStrategy, Mirror,
-    ResolvedMemory,
+    Backend, Camera, CameraBuilder, CaptureClock, ControlId, ControlValue, ErrorKind, Frame,
+    MemoryStrategy, Mirror, ResolvedMemory,
 };
 use edgefirst_codec::video::{EncoderConfig, FrameOptions, VideoEncoder};
 use edgefirst_image::{
@@ -38,10 +39,13 @@ use edgefirst_image::{
 use edgefirst_tensor::{CpuAccess, DType, ImageDesc, PixelFormat, TensorDyn, TensorMemory};
 use serial_test::serial;
 
+mod common;
+
 type TestResult = Result<(), Box<dyn Error>>;
 
 const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
+/// The rate requested; pipelines that ignore it report what they deliver.
 const FPS: f64 = 30.0;
 const BUFFERS: usize = 4;
 const TIMEOUT: Option<Duration> = Some(Duration::from_secs(3));
@@ -50,14 +54,29 @@ const ISP_SERVICE: &str = "imx8-isp.service";
 /// The H.264 latency target, capture to encoded access unit.
 const ENCODE_TARGET: Duration = Duration::from_millis(100);
 
-fn device() -> Option<String> {
-    let device = std::env::var("EDGEFIRST_CAMERA_DEVICE").unwrap_or_else(|_| "/dev/video3".into());
-    if Path::new(&device).exists() {
-        Some(device)
-    } else {
-        eprintln!("SKIPPED: no camera at {device}; set EDGEFIRST_CAMERA_DEVICE");
-        None
-    }
+/// The camera under test and what its backend captures.
+struct Target {
+    source: String,
+    /// YUYV from V4L2, as the service captures; NV12 from libcamera, which
+    /// the i.MX 95 ISP produces.
+    format: PixelFormat,
+    /// Whether the driver imports the caller's pool. libcamera captures only
+    /// into its own buffers.
+    import: bool,
+}
+
+fn target() -> Option<Target> {
+    let source = common::source()?;
+    let libcamera = source.starts_with("libcamera:");
+    Some(Target {
+        source,
+        format: if libcamera {
+            PixelFormat::Nv12
+        } else {
+            PixelFormat::Yuyv
+        },
+        import: !libcamera,
+    })
 }
 
 /// Whether `device` is the vvcam ISP's node.
@@ -87,28 +106,43 @@ fn monotonic_ns() -> i64 {
     ts.tv_sec * 1_000_000_000 + ts.tv_nsec
 }
 
-/// A contiguous YUYV pool from the image crate, as the service allocates.
-fn pool(processor: &ImageProcessor, n: usize) -> Result<Vec<TensorDyn>, Box<dyn Error>> {
-    let desc = ImageDesc::new(
-        WIDTH as usize,
-        HEIGHT as usize,
-        PixelFormat::Yuyv,
-        DType::U8,
-    )
-    .with_access(CpuAccess::ReadWrite)
-    .with_memory(Some(TensorMemory::DmaBuf))
-    .with_contiguous(true);
+/// A contiguous pool from the image crate, as the service allocates.
+fn pool(
+    processor: &ImageProcessor,
+    format: PixelFormat,
+    n: usize,
+) -> Result<Vec<TensorDyn>, Box<dyn Error>> {
+    let desc = ImageDesc::new(WIDTH as usize, HEIGHT as usize, format, DType::U8)
+        .with_access(CpuAccess::ReadWrite)
+        .with_memory(Some(TensorMemory::DmaBuf))
+        .with_contiguous(true);
     Ok((0..n)
         .map(|_| processor.create_image_desc(&desc))
         .collect::<Result<_, _>>()?)
 }
 
-fn builder(device: &str) -> CameraBuilder {
-    CameraBuilder::source(device)
-        .expect("a device source")
+fn builder(t: &Target) -> CameraBuilder {
+    CameraBuilder::source(&t.source)
+        .expect("a camera source")
         .size(WIDTH, HEIGHT)
-        .format(PixelFormat::Yuyv)
+        .format(t.format)
         .frame_rate(FPS)
+}
+
+/// [`builder`] with `n` tensors of the caller's pool when the backend
+/// imports one, else with the camera's own buffers.
+fn pooled(t: &Target, processor: &ImageProcessor, n: usize) -> CameraBuilder {
+    if t.import {
+        builder(t).with_buffers(pool(processor, t.format, n).unwrap())
+    } else {
+        builder(t)
+    }
+}
+
+/// The rate the camera reports, which a pipeline that ignores the request
+/// measures from what it delivers.
+fn rate(camera: &dyn Camera) -> f64 {
+    camera.config().frame_rate.unwrap_or(FPS)
 }
 
 /// Opens and starts `builder`, retrying while the ISP is not ready.
@@ -166,22 +200,33 @@ fn isp_active() -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// 1080p YUYV at 30 fps into the caller's image-crate pool, each frame
-/// converted to RGBA by the GL backend: no unexpected drops, every frame in
-/// a pool tensor, and after warm-up every import a cache hit.
+/// 1080p at 30 fps (or the rate a pipeline holds to) into the caller's
+/// image-crate pool where the backend imports one, each frame converted to
+/// RGBA by the GL backend: no unexpected drops, every frame in the pool, and
+/// after warm-up every import a cache hit.
 #[test]
 #[serial]
-#[ignore = "requires a V4L2 camera (run with --include-ignored on a board)"]
+#[ignore = "requires a camera (run with --include-ignored on a board)"]
 fn soak_1080p30_into_the_callers_pool_without_drops() -> TestResult {
-    let Some(device) = device() else {
+    let Some(t) = target() else {
         return Ok(());
     };
     let soak = env_secs("EDGEFIRST_SOAK_SECS", 20);
     let mut processor = gl_processor()?;
-    let mut camera = start(|| builder(&device).with_buffers(pool(&processor, BUFFERS).unwrap()))?;
+    let mut camera = start(|| pooled(&t, &processor, BUFFERS))?;
     // Import with a caller pool means the driver fills the caller's tensors.
-    assert_eq!(camera.config().memory, ResolvedMemory::Import);
-    assert_eq!(camera.config().format, PixelFormat::Yuyv);
+    let memory = if t.import {
+        ResolvedMemory::Import
+    } else {
+        ResolvedMemory::Export
+    };
+    assert_eq!(camera.config().memory, memory);
+    assert_eq!(camera.config().format, t.format);
+    let buffers = if t.import {
+        BUFFERS
+    } else {
+        camera.config().buffer_count
+    };
     let mut rgba = processor.create_image(
         WIDTH as usize,
         HEIGHT as usize,
@@ -207,8 +252,8 @@ fn soak_1080p30_into_the_callers_pool_without_drops() -> TestResult {
         let frame = camera.next_frame(TIMEOUT)?;
         let id = frame.tensor().buffer_identity().id();
         assert!(
-            pool_ids.contains(&id) || pool_ids.len() < BUFFERS,
-            "frame outside the caller's pool"
+            pool_ids.contains(&id) || pool_ids.len() < buffers,
+            "frame outside the capture pool"
         );
         pool_ids.insert(id);
         processor.convert(frame.tensor(), &mut rgba, Default::default())?;
@@ -218,18 +263,20 @@ fn soak_1080p30_into_the_callers_pool_without_drops() -> TestResult {
     let dropped = camera.stats().dropped - dropped_before;
     let steady = cache_stats(&processor)?;
     let fps = frames as f64 / elapsed;
+    let expected = rate(camera.as_ref());
     eprintln!(
-        "soak: {frames} frames in {elapsed:.1} s ({fps:.2} fps), {dropped} dropped, \
-         pool of {}, cache warm {warm:?} steady {steady:?}",
-        pool_ids.len()
+        "soak: {frames} frames in {elapsed:.1} s ({fps:.2} fps, {expected:.2} reported), \
+         {dropped} dropped, pool of {} {:?}, cache warm {warm:?} steady {steady:?}",
+        pool_ids.len(),
+        camera.config().memory,
     );
     assert_eq!(
         pool_ids.len(),
-        BUFFERS,
-        "frames land in the caller's {BUFFERS} tensors"
+        buffers,
+        "frames land in the {buffers} capture buffers"
     );
     assert_eq!(dropped, 0, "unexpected drops");
-    assert!(fps > FPS - 0.5, "{fps:.2} fps");
+    assert!(fps > expected - 0.5, "{fps:.2} fps");
     assert_eq!(
         steady.total_misses(),
         warm.total_misses(),
@@ -242,9 +289,15 @@ fn soak_1080p30_into_the_callers_pool_without_drops() -> TestResult {
     Ok(())
 }
 
-/// Mean luma of a `cols` x `rows` grid over a YUYV frame.
+/// Mean luma of a `cols` x `rows` grid over a YUYV or NV12 frame.
 fn luma_grid(frame: &Frame, cols: usize, rows: usize) -> Result<Vec<f64>, Box<dyn Error>> {
     let stride = frame.planes()[0].stride;
+    // Luma is every other byte of YUYV, and NV12's whole first plane.
+    let step = if frame.tensor().format() == Some(PixelFormat::Yuyv) {
+        2
+    } else {
+        1
+    };
     let bytes = frame.tensor().map_bytes(CpuAccess::Read)?;
     let (w, h) = (WIDTH as usize, HEIGHT as usize);
     let mut grid = vec![0.0; cols * rows];
@@ -255,7 +308,7 @@ fn luma_grid(frame: &Frame, cols: usize, rows: usize) -> Result<Vec<f64>, Box<dy
         let mut sum = 0u64;
         for y in (y0..y1).step_by(4) {
             for x in (x0..x1).step_by(4) {
-                sum += u64::from(bytes[y * stride + x * 2]);
+                sum += u64::from(bytes[y * stride + x * step]);
             }
         }
         *value = sum as f64 / (((y1 - y0) / 4) * ((x1 - x0) / 4)) as f64;
@@ -268,25 +321,35 @@ fn mean_abs_diff(a: &[f64], b: &[f64]) -> f64 {
 }
 
 /// `Mirror::Both` turns the image by 180 degrees: on vvcam through the
-/// VIV flip quirk. Compares a still scene captured both ways.
+/// VIV flip quirk. Compares a still scene captured both ways. A pipeline
+/// that cannot mirror (the i.MX 95 neo) must still stream and say so.
 #[test]
 #[serial]
-#[ignore = "requires a V4L2 camera (run with --include-ignored on a board)"]
+#[ignore = "requires a camera (run with --include-ignored on a board)"]
 fn mirror_both_turns_the_image() -> TestResult {
-    let Some(device) = device() else {
+    let Some(t) = target() else {
         return Ok(());
     };
     let (cols, rows) = (16, 9);
-    let capture = |mirror: Mirror| -> Result<Vec<f64>, Box<dyn Error>> {
-        let mut camera = start(|| builder(&device).mirror(mirror))?;
+    let capture = |mirror: Mirror| -> Result<(Vec<f64>, ControlValue), Box<dyn Error>> {
+        let mut camera = start(|| builder(&t).mirror(mirror))?;
         // Let exposure settle and the flip reach the frames.
         for _ in 0..30 {
             camera.next_frame(TIMEOUT)?;
         }
-        luma_grid(&camera.next_frame(TIMEOUT)?, cols, rows)
+        let grid = luma_grid(&camera.next_frame(TIMEOUT)?, cols, rows)?;
+        Ok((grid, camera.get_control(ControlId::Mirror)?))
     };
-    let plain = capture(Mirror::None)?;
-    let turned = capture(Mirror::Both)?;
+    let (plain, _) = capture(Mirror::None)?;
+    let (turned, applied) = capture(Mirror::Both)?;
+    // `ControlId::Mirror` reads back 3 for both axes.
+    if applied != ControlValue::Int(3) {
+        eprintln!(
+            "SKIPPED: {} cannot mirror (reads back {applied:?}) and kept streaming",
+            t.source
+        );
+        return Ok(());
+    }
     let mut rotated = plain.clone();
     rotated.reverse();
     let mean = plain.iter().sum::<f64>() / plain.len() as f64;
@@ -300,7 +363,7 @@ fn mirror_both_turns_the_image() -> TestResult {
     eprintln!(
         "mirror: vvcam={} spread {spread:.1}, |plain-turned| {same:.1}, \
          |rot180(plain)-turned| {flipped:.1}",
-        is_vvcam(&device)
+        is_vvcam(&t.source)
     );
     assert!(
         flipped < same / 2.0,
@@ -313,13 +376,13 @@ fn mirror_both_turns_the_image() -> TestResult {
 /// serves again, and the camera then opens and delivers.
 #[test]
 #[serial]
-#[ignore = "requires a V4L2 camera (run with --include-ignored on a board)"]
+#[ignore = "requires a camera (run with --include-ignored on a board)"]
 fn not_ready_across_an_isp_restart() -> TestResult {
-    let Some(device) = device() else {
+    let Some(t) = target() else {
         return Ok(());
     };
-    if !is_vvcam(&device) {
-        eprintln!("SKIPPED: {device} is not the vvcam ISP");
+    if !is_vvcam(&t.source) {
+        eprintln!("SKIPPED: {} is not the vvcam ISP", t.source);
         return Ok(());
     }
     isp("restart")?;
@@ -328,7 +391,7 @@ fn not_ready_across_an_isp_restart() -> TestResult {
     let mut messages = Vec::new();
     loop {
         let attempt = (|| {
-            let mut camera = builder(&device).open()?;
+            let mut camera = builder(&t).open()?;
             camera.start()?;
             camera.next_frame(TIMEOUT).map(|_| ())
         })();
@@ -354,13 +417,13 @@ fn not_ready_across_an_isp_restart() -> TestResult {
 /// daemon running.
 #[test]
 #[serial]
-#[ignore = "requires a V4L2 camera (run with --include-ignored on a board)"]
+#[ignore = "requires a camera (run with --include-ignored on a board)"]
 fn stop_start_cycles_keep_delivering() -> TestResult {
-    let Some(device) = device() else {
+    let Some(t) = target() else {
         return Ok(());
     };
-    let vvcam = is_vvcam(&device);
-    let mut camera = start(|| builder(&device))?;
+    let vvcam = is_vvcam(&t.source);
+    let mut camera = start(|| builder(&t))?;
     for cycle in 0..20 {
         camera.stop()?;
         camera.start()?;
@@ -377,20 +440,23 @@ fn stop_start_cycles_keep_delivering() -> TestResult {
     Ok(())
 }
 
-/// H.264 of 1080p YUYV frames from capture to access unit within the
-/// target, the encoder fed the capture buffers directly.
+/// H.264 of 1080p frames from capture to access unit within the target,
+/// the encoder fed the capture buffers directly.
 #[test]
 #[serial]
-#[ignore = "requires a V4L2 camera (run with --include-ignored on a board)"]
+#[ignore = "requires a camera (run with --include-ignored on a board)"]
 fn h264_encodes_within_the_latency_target() -> TestResult {
-    let Some(device) = device() else {
+    let Some(t) = target() else {
         return Ok(());
     };
     let processor = ImageProcessor::new()?;
-    let mut camera =
-        start(|| builder(&device).with_buffers(pool(&processor, BUFFERS + 2).unwrap()))?;
-    let mut encoder =
-        VideoEncoder::new(EncoderConfig::h264(WIDTH, HEIGHT, PixelFormat::Yuyv, FPS))?;
+    let mut camera = start(|| pooled(&t, &processor, BUFFERS + 2))?;
+    let mut encoder = VideoEncoder::new(EncoderConfig::h264(
+        WIDTH,
+        HEIGHT,
+        t.format,
+        rate(camera.as_ref()),
+    ))?;
     let mut latencies = Vec::new();
     for i in 0..300 {
         let frame = camera.next_frame(TIMEOUT)?;
@@ -466,20 +532,26 @@ fn decodes_a_2x_recording() -> TestResult {
 }
 
 /// Frames held across `close()` stay readable and unchanged, and the device
-/// reopens at once; for the caller's pool and for driver buffers.
+/// reopens at once; for the caller's pool where the backend imports one, and
+/// for driver buffers.
 #[test]
 #[serial]
-#[ignore = "requires a V4L2 camera (run with --include-ignored on a board)"]
+#[ignore = "requires a camera (run with --include-ignored on a board)"]
 fn frames_held_across_close_stay_readable_and_the_device_reopens() -> TestResult {
-    let Some(device) = device() else {
+    let Some(t) = target() else {
         return Ok(());
     };
     let processor = ImageProcessor::new()?;
-    for memory in [MemoryStrategy::Import, MemoryStrategy::Export] {
+    let memories: &[MemoryStrategy] = if t.import {
+        &[MemoryStrategy::Import, MemoryStrategy::Export]
+    } else {
+        &[MemoryStrategy::Export]
+    };
+    for &memory in memories {
         let make = || {
-            let b = builder(&device).memory(memory);
+            let b = builder(&t).memory(memory);
             if memory == MemoryStrategy::Import {
-                b.with_buffers(pool(&processor, BUFFERS).unwrap())
+                b.with_buffers(pool(&processor, t.format, BUFFERS).unwrap())
             } else {
                 b
             }

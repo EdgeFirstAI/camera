@@ -1,20 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Au-Zone Technologies. All Rights Reserved.
 
-//! End-to-end runs of the `edgefirst-camera` binary on a board with a V4L2
-//! camera. Each run is stopped with SIGTERM so the binary shuts down through
-//! its normal path, which is also what writes its coverage profile.
+//! End-to-end runs of the `edgefirst-camera` binary on a board's camera,
+//! named by `EDGEFIRST_CAMERA_SOURCE` (see `common::source`). Each run is
+//! stopped with SIGTERM so the binary shuts down through its normal path,
+//! which is also what writes its coverage profile.
 
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 
 use serial_test::serial;
 use std::{
     error::Error,
+    ffi::OsStr,
+    fmt::Debug,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
+
+mod common;
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
@@ -39,7 +44,7 @@ fn wait_with_deadline(child: &mut Child, limit: Duration) -> Option<ExitStatus> 
 
 /// Runs the binary for `duration`, requires it to still be running at the
 /// end, then requires a clean exit after SIGTERM.
-fn run_for(args: &[&str], duration: Duration) -> Result<(), Box<dyn Error>> {
+fn run_for<S: AsRef<OsStr> + Debug>(args: &[S], duration: Duration) -> Result<(), Box<dyn Error>> {
     let mut child = Command::new(camera_bin())
         .args(args)
         .stdin(Stdio::null())
@@ -72,11 +77,14 @@ fn scratch_dir(name: &str) -> Result<PathBuf, Box<dyn Error>> {
     Ok(dir)
 }
 
-/// `args` with a 1080p capture size requested. Unset, the app keeps the
-/// sensor's current size, which after a reboot can be smaller than the
-/// default 1080p stream (the OV5640 comes up at 640x480).
-fn capture(args: &[&'static str]) -> Vec<&'static str> {
-    [&["--camera-size", "1920", "1080"][..], args].concat()
+/// `args` capturing from the board's camera at 1080p, or `None` without a
+/// camera. Unset, the app keeps the sensor's current size, which after a
+/// reboot can be smaller than the default 1080p stream (the OV5640 comes up
+/// at 640x480).
+fn capture(args: &[&str]) -> Option<Vec<String>> {
+    let source = common::source()?;
+    let size = ["--source", &source, "--camera-size", "1920", "1080"];
+    Some(size.iter().chain(args).map(|s| s.to_string()).collect())
 }
 
 fn sidecar(recording: &Path) -> PathBuf {
@@ -95,27 +103,35 @@ fn help_exits_cleanly() -> Result<(), Box<dyn Error>> {
 
 #[test]
 #[serial]
-#[ignore = "requires a V4L2 camera (run with --include-ignored on a board)"]
+#[ignore = "requires a camera (run with --include-ignored on a board)"]
 fn jpeg_capture() -> Result<(), Box<dyn Error>> {
-    run_for(&capture(&["--jpeg"]), Duration::from_secs(15))
+    let Some(args) = capture(&["--jpeg"]) else {
+        return Ok(());
+    };
+    run_for(&args, Duration::from_secs(15))
 }
 
 #[test]
 #[serial]
-#[ignore = "requires a V4L2 camera (run with --include-ignored on a board)"]
+#[ignore = "requires a camera (run with --include-ignored on a board)"]
 fn h264_capture() -> Result<(), Box<dyn Error>> {
-    run_for(&capture(&["--h264"]), Duration::from_secs(15))
+    let Some(args) = capture(&["--h264"]) else {
+        return Ok(());
+    };
+    run_for(&args, Duration::from_secs(15))
 }
 
 #[test]
 #[serial]
-#[ignore = "requires a V4L2 camera (run with --include-ignored on a board)"]
+#[ignore = "requires a camera (run with --include-ignored on a board)"]
 fn record_then_replay() -> Result<(), Box<dyn Error>> {
     let dir = scratch_dir("record")?;
     let recording = dir.join("record.h264");
     let result = (|| -> Result<(), Box<dyn Error>> {
         let path = recording.to_str().ok_or("non-UTF-8 temp path")?;
-        let record = [&capture(&["--h264", "--record"])[..], &[path]].concat();
+        let Some(record) = capture(&["--h264", "--record", path]) else {
+            return Ok(());
+        };
         run_for(&record, Duration::from_secs(10))?;
 
         let size = std::fs::metadata(&recording)?.len();
@@ -135,13 +151,18 @@ fn record_then_replay() -> Result<(), Box<dyn Error>> {
 
 #[test]
 #[serial]
-#[ignore = "requires a V4L2 camera (run with --include-ignored on a board)"]
+#[ignore = "requires a camera (run with --include-ignored on a board)"]
 fn record_subcommand_writes_a_playable_recording() -> Result<(), Box<dyn Error>> {
     let dir = scratch_dir("record-sub")?;
     let recording = dir.join("record.h264");
     let result = (|| -> Result<(), Box<dyn Error>> {
         let path = recording.to_str().ok_or("non-UTF-8 temp path")?;
-        let args = [&["record", path, "--frames", "90"][..], &capture(&[])].concat();
+        let Some(camera) = capture(&[]) else {
+            return Ok(());
+        };
+        let mut args: Vec<String> =
+            vec!["record".into(), path.into(), "--frames".into(), "90".into()];
+        args.extend(camera);
         let mut child = Command::new(camera_bin())
             .args(&args)
             .stdin(Stdio::null())
@@ -168,8 +189,15 @@ fn record_subcommand_writes_a_playable_recording() -> Result<(), Box<dyn Error>>
 
 #[test]
 #[serial]
-#[ignore = "requires a V4L2 camera (run with --include-ignored on a board)"]
+#[ignore = "requires a camera (run with --include-ignored on a board)"]
 fn devices_reports_the_cameras_modes() -> Result<(), Box<dyn Error>> {
+    let Some(source) = common::source() else {
+        return Ok(());
+    };
+    let (backend, id) = match source.strip_prefix("libcamera:") {
+        Some(id) => ("libcamera", id),
+        None => ("v4l2", source.as_str()),
+    };
     let out = Command::new(camera_bin())
         .args(["devices", "--json"])
         .output()?;
@@ -182,11 +210,20 @@ fn devices_reports_the_cameras_modes() -> Result<(), Box<dyn Error>> {
     let cameras = devices["cameras"].as_array().ok_or("no cameras array")?;
     let modes: Vec<&str> = cameras
         .iter()
-        .filter(|c| c["backend"] == "v4l2")
+        .filter(|c| c["backend"] == backend && c["id"] == id)
         .flat_map(|c| c["formats"].as_array().into_iter().flatten())
         .flat_map(|f| f["modes"].as_array().into_iter().flatten())
         .filter_map(|m| m.as_str())
         .collect();
-    assert!(modes.contains(&"1080p30"), "{devices}");
+    // The i.MX 95 neo pipeline offers 1080p only at the rate it holds to.
+    let wanted = if backend == "libcamera" {
+        "1080p"
+    } else {
+        "1080p30"
+    };
+    assert!(
+        modes.iter().any(|m| m.starts_with(wanted)),
+        "{source}: {devices}"
+    );
     Ok(())
 }

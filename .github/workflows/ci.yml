@@ -153,11 +153,14 @@ jobs:
   # One prebuilt shim per supported libcamera minor and architecture, as
   # the release ships them: built in Debian bookworm (GCC 12) against the
   # upstream vX.Y.0 tag, then import-checked against that libcamera and
-  # loaded natively.
+  # loaded natively. The libcamera board takes the aarch64 ones.
   libcamera-shim:
     name: libcamera shim ${{ matrix.libcamera }} ${{ matrix.arch }}
     needs: changes
-    if: needs.changes.outputs.shim == 'true' || needs.changes.outputs.full == 'true'
+    if: >-
+      needs.changes.outputs.shim == 'true' ||
+      needs.changes.outputs.full == 'true' ||
+      needs.changes.outputs.hardware == 'true'
     runs-on: ${{ matrix.runner }}
     container: debian:bookworm
     timeout-minutes: 20
@@ -184,14 +187,14 @@ jobs:
           if-no-files-found: error
 
   full:
-    needs: changes
+    needs: [changes, libcamera-shim]
     if: needs.changes.outputs.full == 'true' || needs.changes.outputs.hardware == 'true'
     uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@9e296f92996b38683c684b9091ed59cb27562770
     with:
       lanes: ${{ needs.changes.outputs.full == 'true' && 'all' || 'hardware' }}
-      # Any board with a working V4L2 capture path; libcamera-only boards
-      # cannot run the camera.
-      boards: camera-v4l2
+      # Any board with a working V4L2 capture path, and the i.MX 95 through
+      # libcamera; board-setup.sh points the tests at each board's camera.
+      boards: camera-v4l2, camera-libcamera+imx95
       sonar: false
       scancode: true
       # macOS and Windows lanes live in camera-full.yml: these lanes would
@@ -204,8 +207,8 @@ jobs:
       runner-class-linux: larger
       runner-class-linux-arm: larger
       pre-command: bash .github/scripts/ci-setup.sh
-      # The boards need no setup; unset, the board lane runs pre-command.
-      board-pre-command: "true"
+      # Unset, the board lane would run pre-command.
+      board-pre-command: bash .github/scripts/board-setup.sh
       board-extra-args: -j 1 --no-fail-fast -- --include-ignored
       nextest-args: --workspace --locked --features edgefirst-camera/mock,edgefirst-camera/schemas,edgefirst-camera/file --lib --bin edgefirst-camera --test env_scrub --test on_target --test board --test publish --test subcommands --test mock --test schema --test file --test v4l2_vivid --test layout
       archive-args: --locked --bin edgefirst-camera --test on_target --test board

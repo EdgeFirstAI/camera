@@ -508,12 +508,14 @@ cargo test --test env_scrub
 
 **Hardware-Dependent Tests (on device):**
 
+Both suites run against `EDGEFIRST_CAMERA_SOURCE`: a V4L2 node (default `/dev/video3`), `libcamera:<id>`, or `libcamera` for the first libcamera camera. On the i.MX 95, also set `LIBCAMERA_PIPELINES_MATCH_LIST=nxp/neo`, and `EDGEFIRST_CAMERA_LIBCAMERA_SHIM_DIR` unless the shim is installed. In CI, `.github/scripts/board-setup.sh` sets these per board.
+
 ```bash
 cargo test --test on_target -- --include-ignored
 
 # Platform validation of the SDK with the image and codec crates; see the
-# file's header for EDGEFIRST_CAMERA_DEVICE, EDGEFIRST_SOAK_SECS (600 for
-# the ten-minute run) and EDGEFIRST_RECORDING (a 2.x recording to decode).
+# file's header for EDGEFIRST_SOAK_SECS (600 for the ten-minute run) and
+# EDGEFIRST_RECORDING (a 2.x recording to decode).
 cargo test --test board -- --include-ignored --test-threads 1
 ```
 
