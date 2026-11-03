@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The application logs the frame rate the camera delivers once measured, warns when it differs from the rate the driver reports or the encoders were set up for, and corrects a recording's sidecar to it, so the recording plays back at the speed it was captured (EDGEAI-1538).
 - The application captures from libcamera cameras (`--source libcamera:<id>`) in NV12 into libcamera's buffers, and accepts `CAMERA_MODE` for them through the libcamera probe (EDGEAI-1540).
 - `edgefirst-camera` SDK crate (`crates/camera`): a camera capture API that delivers frames as `edgefirst-tensor` tensors with capture metadata and wall-clock acquisition time, plus the `mock` backend (EDGEAI-1518). The V4L2, file and libcamera backends follow.
 - `SlotTable`: slot ownership shared by every backend. A buffer is never handed back to the driver while a frame references it, frames keep their memory across `stop()` and closing the camera, and caller-provided pools are validated at `start()` with a reason and slot for any refusal (EDGEAI-1519).

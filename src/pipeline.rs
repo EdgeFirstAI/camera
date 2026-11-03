@@ -116,6 +116,49 @@ struct Progress {
     since_open: u64,
     /// When `max_duration` runs out.
     deadline: Option<Instant>,
+    /// Whether the current camera's measured rate was reported.
+    measured: bool,
+    /// The recording's sidecar, corrected to the measured rate.
+    sidecar: Option<SidecarFile>,
+}
+
+/// A recording's sidecar and the stream it describes.
+#[derive(Debug)]
+struct SidecarFile {
+    stream: PathBuf,
+    sidecar: Sidecar,
+}
+
+/// Relative difference between two frame rates that is reported.
+const RATE_TOLERANCE: f64 = 0.01;
+
+fn rates_differ(a: f64, b: f64) -> bool {
+    (a - b).abs() > b * RATE_TOLERANCE
+}
+
+/// Reports the rate the camera delivers against the one its driver
+/// reports and the one the encoders were set up for, and corrects the
+/// recording's sidecar to it, so a recording plays back at the speed it
+/// was captured.
+fn report_rate(measured: f64, reported: Option<f64>, used: f64, sidecar: Option<&mut SidecarFile>) {
+    info!("Measured {measured} fps");
+    match reported {
+        Some(r) if rates_differ(r, measured) => {
+            warn!("the camera reports {r} fps but delivers {measured} fps");
+        }
+        None => warn!("the camera reports no frame rate; it delivers {measured} fps"),
+        Some(_) => {}
+    }
+    if rates_differ(used, measured) {
+        warn!("the encoders were set up for {used} fps; the camera delivers {measured} fps");
+    }
+    if let Some(file) = sidecar.filter(|f| rates_differ(f.sidecar.fps, measured)) {
+        file.sidecar.fps = measured;
+        match file.sidecar.write(&file.stream) {
+            Ok(path) => info!("Recording sidecar {} set to {measured} fps", path.display()),
+            Err(e) => error!("cannot correct the recording sidecar: {e}"),
+        }
+    }
 }
 
 /// Runs the pipeline until `shutdown` is set, the camera fails, or a file
@@ -178,15 +221,14 @@ pub(crate) fn run(
     let mut threads: Vec<JoinHandle<()>> = Vec::new();
     let mut sinks: Vec<(Sender<Job>, &'static str)> = Vec::new();
 
+    let mut sidecar = None;
     let recorder = match &settings.record {
-        Some(path) if settings.h264 && !file => Some(open_recording(
-            path,
-            fps,
-            stream,
-            &config,
-            &settings.info,
-            &settings.tf,
-        )?),
+        Some(path) if settings.h264 && !file => {
+            let (writer, file) =
+                open_recording(path, fps, stream, &config, &settings.info, &settings.tf)?;
+            sidecar = Some(file);
+            Some(writer)
+        }
         _ => None,
     };
 
@@ -277,6 +319,8 @@ pub(crate) fn run(
         captured: 0,
         since_open: 0,
         deadline: settings.max_duration.map(|d| Instant::now() + d),
+        measured: false,
+        sidecar,
     };
     let mut camera = Some(camera);
     let result = loop {
@@ -319,6 +363,7 @@ pub(crate) fn run(
                 info!("Camera reopened; capturing again");
                 progress.seq_base = progress.next_seq;
                 progress.since_open = 0;
+                progress.measured = false;
                 camera = Some(next);
             }
             Ok(None) => break Ok(()),
@@ -440,7 +485,7 @@ fn open_recording(
     config: &StreamConfig,
     info: &CameraInfoFields,
     tf: &TfStaticFields,
-) -> Result<BufWriter<File>, Box<dyn Error>> {
+) -> Result<(BufWriter<File>, SidecarFile), Box<dyn Error>> {
     let file = File::create(path)
         .map_err(|e| format!("cannot create recording file {}: {e}", path.display()))?;
     let mut sidecar = Sidecar::new(fps, stream.0, stream.1);
@@ -452,7 +497,13 @@ fn open_recording(
         path.display(),
         written.display()
     );
-    Ok(BufWriter::with_capacity(256 * 1024, file))
+    Ok((
+        BufWriter::with_capacity(256 * 1024, file),
+        SidecarFile {
+            stream: path.clone(),
+            sidecar,
+        },
+    ))
 }
 
 /// A topic and the `frame_id` its messages carry.
@@ -570,6 +621,17 @@ fn capture(
         };
         progress.captured += 1;
         progress.since_open += 1;
+        if !progress.measured {
+            if let Some(measured) = camera.measured_frame_rate() {
+                progress.measured = true;
+                report_rate(
+                    measured,
+                    camera.config().frame_rate,
+                    fps,
+                    progress.sidecar.as_mut(),
+                );
+            }
+        }
         let seq = progress.seq_base + frame.seq();
         progress.next_seq = seq + 1;
         if settings.tracy {
@@ -1294,6 +1356,28 @@ mod tests {
         let extras: serde_json::Value = serde_json::from_str(&sidecar.extras).unwrap();
         assert_eq!(extras["camera_info"]["frame_id"], "rec");
         assert_eq!(extras["tf_static"]["child_frame_id"], "rec");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_measured_rate_corrects_the_recording_sidecar() {
+        let dir =
+            std::env::temp_dir().join(format!("edgefirst-camera-rate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stream = dir.join("rec.h264");
+        let mut file = SidecarFile {
+            stream: stream.clone(),
+            sidecar: Sidecar::new(30.0, 64, 48),
+        };
+        file.sidecar.write(&stream).unwrap();
+        report_rate(30.1, Some(30.0), 30.0, Some(&mut file));
+        assert_eq!(
+            Sidecar::load(&stream).unwrap().fps,
+            30.0,
+            "within tolerance"
+        );
+        report_rate(60.02, Some(30.0), 30.0, Some(&mut file));
+        assert_eq!(Sidecar::load(&stream).unwrap().fps, 60.02);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
