@@ -9,8 +9,6 @@
 //! ignores a requested pitch and returns a packed one, ISI honours padding,
 //! and SDK pools are allocated at whatever it returns.
 
-use std::time::Duration;
-
 use edgefirst_tensor::{Colorimetry, PixelFormat};
 use edgefirst_v4l2::device::{Device, Fraction};
 use edgefirst_v4l2::queue::BufType;
@@ -45,11 +43,6 @@ impl Negotiated {
     /// Frames per second, from the frame interval.
     pub(crate) fn frame_rate(&self) -> Option<f64> {
         self.interval.and_then(|f| f.fps())
-    }
-
-    /// The frame period, for counting drops from timestamp gaps.
-    pub(crate) fn period(&self) -> Option<Duration> {
-        self.interval.and_then(duration_of)
     }
 }
 
@@ -233,6 +226,43 @@ pub(crate) fn negotiate(
     })
 }
 
+/// Whether the node takes `fourcc` at `width`x`height` unchanged, asked
+/// with `VIDIOC_TRY_FMT`, which configures nothing.
+pub(crate) fn takes_size(
+    dev: &Device,
+    buf_type: BufType,
+    fourcc: u32,
+    mem_planes: usize,
+    width: u32,
+    height: u32,
+) -> bool {
+    let multiplanar = buf_type.is_multiplanar();
+    let mut fmt = uapi::v4l2_format {
+        type_: buf_type.raw(),
+        ..Default::default()
+    };
+    // SAFETY: `type_` selects the payload each branch writes.
+    unsafe {
+        if multiplanar {
+            let p = fmt.pix_mp();
+            p.width = width;
+            p.height = height;
+            p.pixelformat = fourcc;
+            p.field = uapi::V4L2_FIELD_NONE;
+            p.num_planes = mem_planes as u8;
+        } else {
+            let p = fmt.pix();
+            p.width = width;
+            p.height = height;
+            p.pixelformat = fourcc;
+            p.field = uapi::V4L2_FIELD_NONE;
+        }
+    }
+    dev.try_format(&mut fmt).is_ok()
+        && size_of(&mut fmt, multiplanar) == (width, height)
+        && current_fourcc(&mut fmt, multiplanar) == fourcc
+}
+
 fn size_of(fmt: &mut uapi::v4l2_format, multiplanar: bool) -> (u32, u32) {
     // SAFETY: the buffer type selects the payload that is read.
     unsafe {
@@ -297,11 +327,6 @@ pub(crate) fn interval_for(fps: f64) -> Fraction {
     )
 }
 
-fn duration_of(f: Fraction) -> Option<Duration> {
-    (f.denominator != 0 && f.numerator != 0)
-        .then(|| Duration::from_secs_f64(f64::from(f.numerator) / f64::from(f.denominator)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,8 +334,8 @@ mod tests {
     #[test]
     fn interval_round_trips_common_rates() {
         for fps in [15.0, 29.97, 30.0, 60.0, 120.0] {
-            let d = duration_of(interval_for(fps)).unwrap();
-            assert!((1.0 / d.as_secs_f64() - fps).abs() < 0.01, "{fps}");
+            let got = interval_for(fps).fps().unwrap();
+            assert!((got - fps).abs() < 0.01, "{fps}");
         }
     }
 

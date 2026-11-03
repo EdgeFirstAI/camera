@@ -36,6 +36,7 @@ use edgefirst_libcamera_sys as sys;
 use edgefirst_tensor::{DType, PixelFormat, Tensor, TensorDyn};
 
 use self::manager::{c_id, errno_error, Manager};
+use super::rate::{round_fps, RateMeter};
 use crate::builder::Source;
 use crate::{
     Applied, BufferPool, Camera, CameraBuilder, CameraDescriptor, CaptureClock, CaptureStats,
@@ -51,8 +52,6 @@ const MIN_BUFFERS: usize = 2;
 const MAX_BUFFERS: usize = 32;
 /// How long `start()` waits for the first frame before `NotReady`.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
-/// Frames whose sensor-timestamp intervals give the delivered rate.
-const RATE_FRAMES: usize = 10;
 /// Poll slice while every buffer is held, so slots released on other
 /// threads go back to libcamera promptly.
 const STARVED_POLL: Duration = Duration::from_millis(20);
@@ -267,11 +266,8 @@ struct LibcameraCamera {
     clock: RealtimeClock,
     seq: u64,
     stats: CaptureStats,
-    last_nanos: Option<i64>,
-    /// Sensor-timestamp intervals until the delivered rate is measured.
-    intervals: Vec<i64>,
-    /// The measured frame interval, once known.
-    period_ns: Option<f64>,
+    /// Drops against libcamera's frame duration, and the delivered rate.
+    rate: RateMeter,
     // Declared last: released after the pool's frames are detached.
     handle: Handle,
 }
@@ -396,11 +392,10 @@ pub(crate) fn open_on(manager: Arc<Manager>, builder: CameraBuilder) -> Result<B
         clock: RealtimeClock::new(),
         seq: 0,
         stats: CaptureStats::default(),
-        last_nanos: None,
-        intervals: Vec::new(),
-        period_ns: None,
+        rate: RateMeter::default(),
         handle,
     };
+    camera.rate.claim(camera.config.frame_rate);
     if let Some(m) = camera.request.mirror {
         if mirror_of(camera.stream.orientation) != Some(m) {
             tracing::warn!("{id}: the pipeline cannot mirror {m:?}");
@@ -416,10 +411,6 @@ pub(crate) fn open_on(manager: Arc<Manager>, builder: CameraBuilder) -> Result<B
         }
     }
     Ok(Box::new(camera))
-}
-
-fn round_fps(fps: f64) -> f64 {
-    (fps * 100.0).round() / 100.0
 }
 
 fn config_of(s: &sys::efcam_lc_stream_info, format: PixelFormat) -> StreamConfig {
@@ -624,9 +615,7 @@ impl LibcameraCamera {
     fn halt(&mut self) -> Result<()> {
         self.streaming = false;
         self.early.clear();
-        self.last_nanos = None;
-        self.intervals.clear();
-        self.period_ns = None;
+        self.rate.restart();
         let stop = self.handle.stop();
         while self.handle.dequeue().is_some() {}
         let free = self.handle.free();
@@ -663,38 +652,11 @@ impl LibcameraCamera {
         }
     }
 
-    /// Reports the rate libcamera's frame duration claims, until frames
-    /// measure it.
+    /// Reports the rate libcamera's frame duration claims.
     fn note_rate(&mut self, c: &sys::efcam_lc_completion) {
         if c.frame_duration_us > 0 {
             self.config.frame_rate = Some(round_fps(1e6 / c.frame_duration_us as f64));
-        }
-    }
-
-    /// Measures the delivered rate from the median sensor-timestamp
-    /// interval of the first frames, which pipelines report more reliably
-    /// than their frame-duration metadata, and warns when it is not the
-    /// rate asked for.
-    fn measure_rate(&mut self, interval: i64) {
-        if self.period_ns.is_some() || interval <= 0 {
-            return;
-        }
-        self.intervals.push(interval);
-        if self.intervals.len() < RATE_FRAMES {
-            return;
-        }
-        self.intervals.sort_unstable();
-        let median = self.intervals[self.intervals.len() / 2] as f64;
-        self.period_ns = Some(median);
-        let fps = round_fps(1e9 / median);
-        self.config.frame_rate = Some(fps);
-        if let Some(asked) = self.asked_fps {
-            if (fps - asked).abs() > asked * 0.01 {
-                tracing::warn!(
-                    "{}: {asked} fps requested; the camera delivers {fps} fps",
-                    self.id()
-                );
-            }
+            self.rate.claim(self.config.frame_rate);
         }
     }
 
@@ -724,20 +686,23 @@ impl LibcameraCamera {
                 nanos: i64::try_from(c.buffer_timestamp_ns).unwrap_or(i64::MAX),
             }
         };
-        let period = self
-            .period_ns
-            .or_else(|| (c.frame_duration_us > 0).then_some(c.frame_duration_us as f64 * 1e3));
-        if let Some(last) = self.last_nanos {
-            let interval = timestamp.nanos - last;
-            if let Some(period) = period {
-                let periods = (interval as f64 / period).round() as i64;
-                if periods > 1 {
-                    self.stats.dropped += (periods - 1) as u64;
-                }
-            }
-            self.measure_rate(interval);
+        let measuring = self.rate.measured().is_none();
+        let tick = self.rate.frame(timestamp.nanos);
+        self.stats.dropped += tick.dropped;
+        if let Some((claimed, fps)) = tick.disagrees {
+            tracing::warn!(
+                "{}: libcamera reports {claimed} fps; the camera delivers {fps} fps",
+                self.id()
+            );
         }
-        self.last_nanos = Some(timestamp.nanos);
+        if let (true, Some(fps), Some(asked)) = (measuring, self.rate.measured(), self.asked_fps) {
+            if (fps - asked).abs() > asked * 0.01 {
+                tracing::warn!(
+                    "{}: {asked} fps requested; the camera delivers {fps} fps",
+                    self.id()
+                );
+            }
+        }
         self.last = Some(c);
 
         let pool = self.pool.as_ref().expect("frames come from a pool");
@@ -875,6 +840,7 @@ impl Camera for LibcameraCamera {
                 self.asked_fps = Some(fps);
                 if !self.streaming {
                     self.config.frame_rate = Some(got);
+                    self.rate.claim(self.config.frame_rate);
                 }
                 Ok(applied(fps, got, ControlValue::Float(got)))
             }
@@ -970,9 +936,6 @@ impl Camera for LibcameraCamera {
         }
         self.pending = sys::efcam_lc_controls::unset();
         self.streaming = true;
-        // The rate is measured from the first two frames, which libcamera's
-        // frame-duration metadata does not always match (the i.MX 95 neo
-        // reports 15.97 ms at 60 fps).
         let first = match self.first_frame() {
             Ok(c) => c,
             Err(e) => {
@@ -982,15 +945,6 @@ impl Camera for LibcameraCamera {
         };
         self.note_rate(&first);
         self.early.push_back(first);
-        if self.config.buffer_count > 1 {
-            if let Ok(second) = self.first_frame() {
-                let interval = second.sensor_timestamp_ns - first.sensor_timestamp_ns;
-                if first.sensor_timestamp_ns >= 0 && interval > 0 {
-                    self.config.frame_rate = Some(round_fps(1e9 / interval as f64));
-                }
-                self.early.push_back(second);
-            }
-        }
         Ok(())
     }
 
@@ -1078,6 +1032,10 @@ impl Camera for LibcameraCamera {
                 ));
             }
         }
+    }
+
+    fn measured_frame_rate(&self) -> Option<f64> {
+        self.rate.measured()
     }
 
     fn stats(&self) -> CaptureStats {

@@ -40,6 +40,7 @@ use edgefirst_v4l2::uapi;
 use self::controls::Controls;
 use self::device::{errno, v4l2_error};
 use self::negotiate::{interval_for, negotiate, Negotiated};
+use super::rate::RateMeter;
 use crate::builder::Source;
 use crate::pool::{self, BufferInfo, PoolRequirements};
 use crate::{
@@ -111,10 +112,11 @@ pub(crate) fn open(builder: CameraBuilder) -> Result<Box<dyn Camera>> {
         clock: RealtimeClock::new(),
         seq: 0,
         stats: CaptureStats::default(),
-        last_nanos: None,
+        rate: RateMeter::default(),
         logged_clock: false,
         faults: builder.faults,
     };
+    camera.rate.claim(camera.config.frame_rate);
     let mut requested = builder.controls;
     if let Some(m) = camera.request.mirror {
         requested.insert(0, Control::Mirror(m));
@@ -215,7 +217,8 @@ struct V4l2Camera {
     clock: RealtimeClock,
     seq: u64,
     stats: CaptureStats,
-    last_nanos: Option<i64>,
+    /// Drops against the driver's rate, and the delivered rate.
+    rate: RateMeter,
     logged_clock: bool,
     /// Injected faults (debug builds only; see `CameraBuilder::fault`).
     faults: Vec<String>,
@@ -589,7 +592,7 @@ impl V4l2Camera {
     fn halt(&mut self) -> Result<()> {
         self.streaming = false;
         self.pending = None;
-        self.last_nanos = None;
+        self.rate.restart();
         let off = self.queue.stream_off();
         let free = self.queue.free();
         if let Some(pool) = &self.pool {
@@ -659,13 +662,14 @@ impl V4l2Camera {
             }
         }
         let nanos = i64::try_from(d.timestamp.as_nanos()).unwrap_or(i64::MAX);
-        if let (Some(last), Some(interval)) = (self.last_nanos, self.neg.period()) {
-            let periods = ((nanos - last) as f64 / interval.as_nanos() as f64).round() as i64;
-            if periods > 1 {
-                self.stats.dropped += (periods - 1) as u64;
-            }
+        let tick = self.rate.frame(nanos);
+        self.stats.dropped += tick.dropped;
+        if let Some((claimed, fps)) = tick.disagrees {
+            tracing::warn!(
+                "{}: the driver reports {claimed} fps; the camera delivers {fps} fps",
+                self.path()
+            );
         }
-        self.last_nanos = Some(nanos);
         let timestamp = Timestamp {
             clock,
             source,
@@ -867,6 +871,7 @@ impl Camera for V4l2Camera {
         self.neg.unapplied_fps = None;
         self.neg.interval = (got.numerator != 0 && got.denominator != 0).then_some(got);
         self.config.frame_rate = self.neg.frame_rate();
+        self.rate.claim(self.config.frame_rate);
         Ok(match self.config.frame_rate {
             Some(applied) if (applied - fps).abs() < 0.01 => Applied::Driver,
             Some(applied) => Applied::Clamped(ControlValue::Float(applied)),
@@ -1034,6 +1039,10 @@ impl Camera for V4l2Camera {
         s
     }
 
+    fn measured_frame_rate(&self) -> Option<f64> {
+        self.rate.measured()
+    }
+
     fn wait_handle(&self) -> Option<WaitHandle> {
         Some(WaitHandle::new(self.dev.as_fd().as_raw_fd()))
     }
@@ -1131,6 +1140,7 @@ impl V4l2Camera {
                 tracing::debug!("{}: {fps} fps through the ISP", self.path());
                 self.neg.interval = Some(interval_for(fps));
                 self.config.frame_rate = self.neg.frame_rate();
+                self.rate.claim(self.config.frame_rate);
                 Ok(())
             }
             Some(Err(e)) => Err(e),

@@ -9,6 +9,8 @@ mod file;
 pub(crate) mod libcamera;
 #[cfg(feature = "mock")]
 pub(crate) mod mock;
+#[cfg(all(target_os = "linux", any(feature = "v4l2", feature = "libcamera")))]
+mod rate;
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 pub(crate) mod v4l2;
 

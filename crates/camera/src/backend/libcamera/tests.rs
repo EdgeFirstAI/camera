@@ -9,6 +9,7 @@ use edgefirst_libcamera_sys::mock::{self, Event, Layout};
 use edgefirst_libcamera_sys::Shim;
 
 use super::*;
+use crate::backend::rate::RATE_FRAMES;
 
 const T: Option<Duration> = Some(Duration::from_secs(1));
 const ID: &str = "/base/soc/i2c@42530000/os08a20@36";
@@ -160,7 +161,7 @@ fn the_requested_rate_goes_out_at_start_and_is_reported() {
 }
 
 #[test]
-fn a_pipeline_ignoring_the_rate_reports_what_it_delivers() {
+fn a_pipeline_ignoring_the_rate_reports_its_claim_and_measures_the_rest() {
     let mut cam = mock::Camera::new(ID, Layout::Separate);
     cam.honours_frame_duration = false;
     cam.frame_duration_us = 16_666;
@@ -168,11 +169,17 @@ fn a_pipeline_ignoring_the_rate_reports_what_it_delivers() {
     let mut c = open_with(vec![cam], |b| b.frame_rate(30.0)).unwrap();
     assert_eq!(c.config().frame_rate, Some(30.0));
     c.start().unwrap();
-    assert_eq!(c.config().frame_rate, Some(60.0), "from the first interval");
+    assert_eq!(
+        c.config().frame_rate,
+        Some(62.61),
+        "libcamera's frame duration"
+    );
+    assert_eq!(c.measured_frame_rate(), None);
     for _ in 0..=RATE_FRAMES {
         c.next_frame(T).unwrap();
     }
-    assert_eq!(c.config().frame_rate, Some(60.0), "from the timestamps");
+    assert_eq!(c.config().frame_rate, Some(62.61));
+    assert_eq!(c.measured_frame_rate(), Some(60.0), "from the timestamps");
     assert_eq!(c.stats().dropped, 0);
 }
 

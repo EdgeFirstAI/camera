@@ -213,19 +213,18 @@ fn devices_reports_the_cameras_modes() -> Result<(), Box<dyn Error>> {
         .filter(|c| c["backend"] == backend && c["id"] == id)
         .flat_map(|c| c["formats"].as_array().into_iter().flatten())
         .collect();
-    let found = if backend == "libcamera" {
-        // Pipelines differ in rates: neo offers 1080p only at the rate it
-        // holds to, and imx8-isi reports none, which leaves no modes.
-        formats
-            .iter()
-            .flat_map(|f| f["sizes"].as_array().into_iter().flatten())
-            .any(|s| s["width"] == 1920 && s["height"] == 1080)
-    } else {
-        formats
-            .iter()
-            .flat_map(|f| f["modes"].as_array().into_iter().flatten())
-            .any(|m| m == "1080p30")
-    };
-    assert!(found, "{source}: {devices}");
+    // Rates differ by camera: neo offers 1080p only at the rate it holds to,
+    // and imx8-isi and NXP's mxc-isi_v1 report none, which names no mode
+    // but still lists the size. Stepwise ranges list modes only.
+    let mode = formats
+        .iter()
+        .flat_map(|f| f["modes"].as_array().into_iter().flatten())
+        .filter_map(|m| m.as_str())
+        .any(|m| m.starts_with("1080p"));
+    let size = formats
+        .iter()
+        .flat_map(|f| f["sizes"].as_array().into_iter().flatten())
+        .any(|s| s["width"] == 1920 && s["height"] == 1080);
+    assert!(mode || size, "{source} offers no 1080p: {devices}");
     Ok(())
 }

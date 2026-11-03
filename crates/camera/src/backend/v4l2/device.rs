@@ -10,6 +10,8 @@ use edgefirst_v4l2::device::{self as v4l2dev, Device, FrameIntervals, FrameSizes
 use edgefirst_v4l2::queue::BufType;
 
 use super::format;
+use super::negotiate::takes_size;
+use crate::enumerate::NAMED_SIZES;
 use crate::{Backend, CameraDescriptor, Error, ErrorKind, FormatInfo, Rates, SizeRates, Sizes};
 
 /// Converts an `edgefirst-v4l2` error, naming what the backend was doing.
@@ -135,7 +137,9 @@ pub(crate) fn formats(dev: &Device, buf_type: BufType) -> Vec<FormatInfo> {
         if out.iter().any(|f| f.format == m.format) {
             continue;
         }
-        if let Some(sizes) = sizes(dev, desc.fourcc) {
+        if let Some(sizes) = sizes(dev, desc.fourcc)
+            .or_else(|| tried_sizes(dev, buf_type, desc.fourcc, m.mem_planes))
+        {
             out.push(FormatInfo {
                 format: m.format,
                 sizes,
@@ -165,6 +169,21 @@ fn sizes(dev: &Device, fourcc: u32) -> Option<Sizes> {
             rates: rates(dev, fourcc, r.max),
         }),
     }
+}
+
+/// The standard sizes the node takes, for drivers that list formats but
+/// answer `VIDIOC_ENUM_FRAMESIZES` with an error (NXP's `mxc-isi_v1`).
+fn tried_sizes(dev: &Device, buf_type: BufType, fourcc: u32, mem_planes: usize) -> Option<Sizes> {
+    let list: Vec<SizeRates> = NAMED_SIZES
+        .iter()
+        .filter(|(_, w, h)| takes_size(dev, buf_type, fourcc, mem_planes, *w, *h))
+        .map(|&(_, width, height)| SizeRates {
+            width,
+            height,
+            rates: rates(dev, fourcc, Size { width, height }),
+        })
+        .collect();
+    (!list.is_empty()).then_some(Sizes::Discrete(list))
 }
 
 fn rates(dev: &Device, fourcc: u32, size: Size) -> Rates {

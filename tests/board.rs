@@ -263,9 +263,12 @@ fn soak_1080p30_into_the_callers_pool_without_drops() -> TestResult {
     let dropped = camera.stats().dropped - dropped_before;
     let steady = cache_stats(&processor)?;
     let fps = frames as f64 / elapsed;
-    let expected = rate(camera.as_ref());
+    let reported = rate(camera.as_ref());
+    let measured = camera
+        .measured_frame_rate()
+        .ok_or("no measured frame rate after the soak")?;
     eprintln!(
-        "soak: {frames} frames in {elapsed:.1} s ({fps:.2} fps, {expected:.2} reported), \
+        "soak: {frames} frames in {elapsed:.1} s ({fps:.2} fps, {reported:.2} reported, {measured:.2} measured), \
          {dropped} dropped, pool of {} {:?}, cache warm {warm:?} steady {steady:?}",
         pool_ids.len(),
         camera.config().memory,
@@ -276,7 +279,12 @@ fn soak_1080p30_into_the_callers_pool_without_drops() -> TestResult {
         "frames land in the {buffers} capture buffers"
     );
     assert_eq!(dropped, 0, "unexpected drops");
-    assert!(fps > expected - 0.5, "{fps:.2} fps");
+    // Drops are counted against the reported rate, so a camera slower than
+    // it reports fails above; the measured rate is what it delivers.
+    assert!(
+        (fps - measured).abs() <= (measured * 0.02).max(0.5),
+        "{fps:.2} fps delivered, {measured:.2} measured"
+    );
     assert_eq!(
         steady.total_misses(),
         warm.total_misses(),
