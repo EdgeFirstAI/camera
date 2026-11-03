@@ -153,6 +153,28 @@ fn parse_positive_fps(raw: &str) -> Result<f64, String> {
     Ok(fps)
 }
 
+/// The frame rate the H.264 encoder is set up for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum H264Fps {
+    /// The preset (15, 30 or 60 fps) nearest the rate the camera reports.
+    Auto,
+    /// The rate the camera delivers, watched for up to a few seconds
+    /// before the encoder is set up.
+    Measure,
+    /// This rate.
+    Fixed(f64),
+}
+
+fn parse_h264_fps(raw: &str) -> Result<H264Fps, String> {
+    match raw.trim() {
+        "auto" => Ok(H264Fps::Auto),
+        "measure" => Ok(H264Fps::Measure),
+        other => parse_positive_fps(other)
+            .map(H264Fps::Fixed)
+            .map_err(|e| format!("{e}; or 'auto' or 'measure'")),
+    }
+}
+
 fn parse_seconds(raw: &str) -> Result<f64, String> {
     let seconds: f64 = raw
         .trim()
@@ -286,6 +308,13 @@ pub struct CaptureArgs {
     /// H.264 encoding bitrate preset
     #[arg(long, env = "H264_BITRATE", default_value = "auto")]
     pub h264_bitrate: H264Bitrate,
+
+    /// Frame rate the H.264 encoder is set up for: `auto` takes the preset
+    /// (15, 30 or 60 fps) nearest the rate the camera reports, `measure`
+    /// watches the camera for up to 3 s first and takes the rate it
+    /// delivers, and a number sets the rate.
+    #[arg(long, env = "H264_FPS", default_value = "auto", value_parser = parse_h264_fps)]
+    pub h264_fps: H264Fps,
 
     /// Output streaming resolution in pixels (width height)
     #[arg(
@@ -726,6 +755,7 @@ pub(crate) const FLAG_ENV: &[(&str, &str, &str)] = &[
     ("h264", "H264", "false"),
     ("h264-topic", "H264_TOPIC", "cam/h264"),
     ("h264-bitrate", "H264_BITRATE", "mbps5"),
+    ("h264-fps", "H264_FPS", "25"),
     ("h264-tiles", "H264_TILES", "true"),
     ("h264-tiles-topics", "H264_TILES_TOPICS", "a b c d"),
     ("h264-tiles-fps", "H264_TILES_FPS", "5"),
@@ -765,6 +795,7 @@ mod tests {
         "H264",
         "H264_TOPIC",
         "H264_BITRATE",
+        "H264_FPS",
         "H264_TILES_TOPICS",
         "H264_TILES_FPS",
         "REPLAY_LOOP",
@@ -852,6 +883,21 @@ mod tests {
     fn unbound_env_vars_are_never_selected() {
         let env = [("EDGEFIRST_CAMERA_NOT_AN_ARG", ""), ("PATH", "")];
         assert!(empty_env_vars::<Args>(KEEP, lookup(&env)).is_empty());
+    }
+
+    #[test]
+    fn h264_fps_takes_auto_measure_or_a_rate() {
+        let fps = |v: &str| {
+            Args::try_parse_from(["edgefirst-camera", "--h264-fps", v]).map(|a| a.capture.h264_fps)
+        };
+        assert_eq!(
+            Args::parse_from(["edgefirst-camera"]).capture.h264_fps,
+            H264Fps::Auto
+        );
+        assert_eq!(fps("measure").unwrap(), H264Fps::Measure);
+        assert_eq!(fps("25").unwrap(), H264Fps::Fixed(25.0));
+        assert!(fps("0").is_err());
+        assert!(fps("fast").is_err());
     }
 
     #[test]

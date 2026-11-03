@@ -217,6 +217,7 @@ All options can be set via command line or environment variables. Environment va
 | `--jpeg` | `JPEG` | false | Enable JPEG streaming |
 | `--h264` | `H264` | true | Enable H.264 streaming |
 | `--h264-bitrate` | `H264_BITRATE` | `auto` | Bitrate preset (auto/mbps5/mbps25/mbps50/mbps100) |
+| `--h264-fps` | `H264_FPS` | `auto` | Encoder rate: nearest of 15/30/60 to the reported rate, `measure`, or a rate |
 | `--h264-tiles` | `H264_TILES` | false | Enable 4K tiling |
 | `--h264-tiles-fps` | `H264_TILES_FPS` | `15` | Tile FPS limit |
 | `--record` | `RECORD` | unset | Record H.264 (Annex-B + JSON sidecar); needs `H264` and a camera source |

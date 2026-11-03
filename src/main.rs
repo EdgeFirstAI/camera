@@ -393,6 +393,7 @@ pub(crate) fn settings(args: &Args, request: &Request, extras: Option<&str>) -> 
         stream_size: (args.capture.stream_size[0], args.capture.stream_size[1]),
         record: args.record.clone(),
         requested_fps: request.fps,
+        h264_fps: args.capture.h264_fps,
         info,
         tf,
         tracy: args.tracy,

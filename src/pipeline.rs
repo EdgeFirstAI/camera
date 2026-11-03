@@ -40,6 +40,7 @@ use zenoh::{
 };
 
 use crate::{
+    args::H264Fps,
     encode::{self, OpenEncoder, Plan, Stage, TILE_NAMES},
     exit::{Failure, Status},
     jpeg::JpegStage,
@@ -61,6 +62,12 @@ const DROP_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 
 /// The rate assumed when neither the camera nor the command line gives one.
 const FALLBACK_FPS: f64 = 30.0;
+
+/// The rates `--h264-fps auto` sets the encoders up for.
+const PRESET_FPS: [f64; 3] = [15.0, 30.0, 60.0];
+
+/// How long `--h264-fps measure` watches the camera.
+const MEASURE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Interval between `tf_static` republishes.
 const TF_INTERVAL: Duration = Duration::from_secs(1);
@@ -87,6 +94,8 @@ pub(crate) struct Settings {
     pub(crate) record: Option<PathBuf>,
     /// The rate requested, for a camera that cannot report its own.
     pub(crate) requested_fps: Option<f64>,
+    /// The rate the encoders are set up for.
+    pub(crate) h264_fps: H264Fps,
     pub(crate) info: CameraInfoFields,
     pub(crate) tf: TfStaticFields,
     pub(crate) tracy: bool,
@@ -127,6 +136,61 @@ struct Progress {
 struct SidecarFile {
     stream: PathBuf,
     sidecar: Sidecar,
+}
+
+/// The rate the encoders are set up for, from `--h264-fps`.
+fn encoder_rate(choice: H264Fps, reported: Option<f64>, camera: &mut dyn Camera) -> f64 {
+    match choice {
+        H264Fps::Fixed(fps) => fps,
+        H264Fps::Auto => preset_for(reported),
+        H264Fps::Measure => match measure(camera) {
+            Some(fps) => {
+                debug!("measured {fps} fps before setting up the encoders");
+                snap(fps)
+            }
+            None => {
+                warn!(
+                    "the frame rate was not measured within {MEASURE_TIMEOUT:?}; \
+                     using the preset for the reported rate"
+                );
+                preset_for(reported)
+            }
+        },
+    }
+}
+
+/// The preset nearest the reported rate.
+fn preset_for(reported: Option<f64>) -> f64 {
+    let Some(fps) = reported else {
+        warn!("the camera reports no frame rate; assuming {FALLBACK_FPS} fps");
+        return FALLBACK_FPS;
+    };
+    PRESET_FPS
+        .into_iter()
+        .min_by(|a, b| (a - fps).abs().total_cmp(&(b - fps).abs()))
+        .unwrap_or(FALLBACK_FPS)
+}
+
+/// A measured rate, as the preset it is within the tolerance of.
+fn snap(fps: f64) -> f64 {
+    PRESET_FPS
+        .into_iter()
+        .find(|p| !rates_differ(fps, *p))
+        .unwrap_or(fps)
+}
+
+/// Reads frames, discarding them, until the camera has measured its rate.
+fn measure(camera: &mut dyn Camera) -> Option<f64> {
+    let deadline = Instant::now() + MEASURE_TIMEOUT;
+    loop {
+        if let Some(fps) = camera.measured_frame_rate() {
+            return Some(fps);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || camera.next_frame(Some(left)).is_err() {
+            return None;
+        }
+    }
 }
 
 /// Relative difference between two frame rates that is reported.
@@ -187,16 +251,19 @@ pub(crate) fn run(
         software_mirror,
     } = opened;
     let config = camera.config().clone();
-    let fps = match config.frame_rate.or(settings.requested_fps) {
-        Some(fps) => fps,
-        None => {
-            warn!("the camera reports no frame rate; assuming {FALLBACK_FPS} fps");
-            FALLBACK_FPS
-        }
-    };
-    info!("Capturing {}x{} at {fps} fps", config.width, config.height);
-
     let file = kind == SourceKind::File;
+    let reported = config.frame_rate.or(settings.requested_fps);
+    let fps = if file {
+        // A recording plays at the rate it was recorded at.
+        reported.unwrap_or(FALLBACK_FPS)
+    } else {
+        encoder_rate(settings.h264_fps, reported, camera.as_mut())
+    };
+    info!(
+        "Capturing {}x{}; encoders at {fps} fps",
+        config.width, config.height
+    );
+
     // A recording's H.264 is forwarded as recorded, and its other outputs
     // keep its size.
     let stream = if file {
@@ -1357,6 +1424,23 @@ mod tests {
         assert_eq!(extras["camera_info"]["frame_id"], "rec");
         assert_eq!(extras["tf_static"]["child_frame_id"], "rec");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn auto_takes_the_nearest_preset_and_measure_snaps_only_when_close() {
+        assert_eq!(preset_for(Some(62.61)), 60.0, "the i.MX 95 neo pipeline");
+        assert_eq!(preset_for(Some(29.97)), 30.0);
+        assert_eq!(preset_for(Some(12.0)), 15.0);
+        assert_eq!(preset_for(None), FALLBACK_FPS);
+        assert_eq!(snap(60.02), 60.0);
+        assert_eq!(snap(29.98), 30.0);
+        assert_eq!(snap(25.0), 25.0);
+    }
+
+    #[test]
+    fn measure_sets_the_encoders_up_for_the_delivered_rate() {
+        let (_, settings) = settings(&["--source", "mock:64x48@30", "--h264-fps", "measure"]);
+        assert_eq!(settings.h264_fps, H264Fps::Measure);
     }
 
     #[test]

@@ -124,6 +124,14 @@ H264="true"
 # 10 Mbps at 1080p30.
 H264_BITRATE="auto"
 
+# Frame rate the H.264 encoder is set up for.
+# Accepted values: auto, measure, or a rate such as 25
+# "auto" takes 15, 30 or 60 fps, whichever is nearest the rate the camera
+# reports. "measure" watches the camera for up to 3 s before encoding and
+# takes the rate it delivers, for cameras that misreport their rate. The
+# service logs the measured rate either way, and warns when it differs.
+H264_FPS="auto"
+
 # ---------------------------------------------------------------------------
 # H.264 4K Tiling
 # ---------------------------------------------------------------------------

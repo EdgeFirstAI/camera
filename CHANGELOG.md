@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `--h264-fps` (`H264_FPS`): the rate the H.264 encoder is set up for. `auto`, the default, takes 15, 30 or 60 fps, whichever is nearest the rate the camera reports (60 for the i.MX 95 `nxp/neo` pipeline, which reports 62.61); `measure` watches the camera for up to 3 s first and takes the rate it delivers; a number sets it (EDGEAI-1538).
 - The application logs the frame rate the camera delivers once measured, warns when it differs from the rate the driver reports or the encoders were set up for, and corrects a recording's sidecar to it, so the recording plays back at the speed it was captured (EDGEAI-1538).
 - The application captures from libcamera cameras (`--source libcamera:<id>`) in NV12 into libcamera's buffers, and accepts `CAMERA_MODE` for them through the libcamera probe (EDGEAI-1540).
 - `edgefirst-camera` SDK crate (`crates/camera`): a camera capture API that delivers frames as `edgefirst-tensor` tensors with capture metadata and wall-clock acquisition time, plus the `mock` backend (EDGEAI-1518). The V4L2, file and libcamera backends follow.
