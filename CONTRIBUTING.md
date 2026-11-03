@@ -576,7 +576,7 @@ fn jpeg_capture() -> Result<(), Box<dyn Error>> {
 - **Public APIs**: 100%
 - **Hardware paths**: Best effort (requires device)
 
-**Coverage is measured in CI** by the nightly **Full** run, which covers host, board and SonarCloud every day `main` changes. Every PR runs the **Quick** tier (`ci-gate`), **including draft PRs** — CI is not gated on “Ready for review”; the expected flow is a green `ci-gate` before reviewers start. Full and hardware runs on a PR are opt-in, decided per change: apply `ci:full` for host coverage, board tests and Sonar when a change warrants it. Apply `ci:hardware` when on-target validation alone is needed: it runs on a board with a V4L2 camera (runner label `camera-v4l2`) and covers JPEG/H.264 capture, record and replay (`tests/on_target.rs`) and the platform checks in `tests/board.rs` with a 20-second soak.
+**Coverage is measured in CI** by the nightly **Full** run, which covers host, board and SonarCloud every day `main` changes. Every PR runs the **Quick** tier (`ci-gate`), **including draft PRs** — CI is not gated on “Ready for review”; the expected flow is a green `ci-gate` before reviewers start. Full and hardware runs on a PR are opt-in, decided per change: apply `ci:full` for host coverage, board tests and Sonar when a change warrants it. Apply `ci:hardware` when on-target validation alone is needed: it runs on an i.MX 8M Plus through V4L2 (runner labels `camera-v4l2` and `imx8mp`) and on the i.MX 95 through libcamera (`camera-libcamera` and `imx95`), and covers JPEG/H.264 capture, record and replay (`tests/on_target.rs`) and the platform checks in `tests/board.rs` with a 20-second soak.
 
 ---
 
