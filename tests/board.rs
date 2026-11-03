@@ -282,8 +282,11 @@ fn soak_1080p30_into_the_callers_pool_without_drops() -> TestResult {
         warm.total_misses(),
         "a steady-state frame re-imported its buffer"
     );
+    // The HAL imports a frame whole (src) or plane by plane (nv_r8, nv_uv),
+    // depending on what the GPU accepts.
+    let source_hits = |s: &edgefirst_image::GlCacheStats| s.src.hits + s.nv_r8.hits + s.nv_uv.hits;
     assert!(
-        steady.src.hits >= warm.src.hits + frames,
+        source_hits(&steady) >= source_hits(&warm) + frames,
         "imports missed the cache"
     );
     Ok(())

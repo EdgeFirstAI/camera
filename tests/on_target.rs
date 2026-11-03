@@ -208,22 +208,24 @@ fn devices_reports_the_cameras_modes() -> Result<(), Box<dyn Error>> {
     );
     let devices: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     let cameras = devices["cameras"].as_array().ok_or("no cameras array")?;
-    let modes: Vec<&str> = cameras
+    let formats: Vec<&serde_json::Value> = cameras
         .iter()
         .filter(|c| c["backend"] == backend && c["id"] == id)
         .flat_map(|c| c["formats"].as_array().into_iter().flatten())
-        .flat_map(|f| f["modes"].as_array().into_iter().flatten())
-        .filter_map(|m| m.as_str())
         .collect();
-    // The i.MX 95 neo pipeline offers 1080p only at the rate it holds to.
-    let wanted = if backend == "libcamera" {
-        "1080p"
+    let found = if backend == "libcamera" {
+        // Pipelines differ in rates: neo offers 1080p only at the rate it
+        // holds to, and imx8-isi reports none, which leaves no modes.
+        formats
+            .iter()
+            .flat_map(|f| f["sizes"].as_array().into_iter().flatten())
+            .any(|s| s["width"] == 1920 && s["height"] == 1080)
     } else {
-        "1080p30"
+        formats
+            .iter()
+            .flat_map(|f| f["modes"].as_array().into_iter().flatten())
+            .any(|m| m == "1080p30")
     };
-    assert!(
-        modes.iter().any(|m| m.starts_with(wanted)),
-        "{source}: {devices}"
-    );
+    assert!(found, "{source}: {devices}");
     Ok(())
 }
