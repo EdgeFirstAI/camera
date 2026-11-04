@@ -63,11 +63,19 @@ mkdir -p "$OUT"
 on() { ssh -o ConnectTimeout=10 "$HOST" "$@"; }
 log() { printf '[parity] %s\n' "$*" >&2; }
 
-# Reboots the board and waits for camera.service to come back.
+# Reboots the board and waits up to five minutes for camera.service to come back.
 reboot_board() {
     on "sudo systemctl reboot" || true
     sleep 30
-    until on "systemctl is-active --quiet camera" 2>/dev/null; do sleep 5; done
+    local waited=0
+    until on "systemctl is-active --quiet camera" 2>/dev/null; do
+        if (( waited >= 270 )); then
+            log "camera.service did not come back after the reboot"
+            exit 1
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
 }
 
 restore() {
