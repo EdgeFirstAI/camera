@@ -6,7 +6,7 @@
 # by side under its own camera.service, and writes the results to a
 # directory on this host.
 #
-#   scripts/parity.sh [-s seconds] [--no-clock-step] <ssh-host> <output-dir>
+#   scripts/parity.sh [-s seconds] [--no-clock-step] [--reboot] <ssh-host> <output-dir>
 #
 # Build first:
 #   cargo zigbuild --target aarch64-unknown-linux-gnu.2.35 --release --locked \
@@ -23,22 +23,28 @@
 # and after a manual step one hour ahead chronyd steps it back.
 #
 # The service override lives in /run, so a reboot also restores the board.
+# With --reboot, every run starts from a fresh boot instead of a service
+# restart, for an installed version that cannot restart on the vvcam ISP
+# (2.x leaves its buffers allocated when it stops). The override then lives
+# in /etc to survive the reboots, and restoring removes it and reboots.
 # Needs passwordless sudo on the board, and ffprobe here.
 
 set -euo pipefail
 
 SECONDS_PER_RUN=60
 CLOCK_STEP=1
+REBOOT=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
     -s) SECONDS_PER_RUN="$2"; shift 2 ;;
     --no-clock-step) CLOCK_STEP=0; shift ;;
+    --reboot) REBOOT=1; shift ;;
     -*) echo "unknown option $1" >&2; exit 2 ;;
     *) break ;;
     esac
 done
 if [[ $# -ne 2 ]]; then
-    echo "usage: $0 [-s seconds] [--no-clock-step] <ssh-host> <output-dir>" >&2
+    echo "usage: $0 [-s seconds] [--no-clock-step] [--reboot] <ssh-host> <output-dir>" >&2
     exit 2
 fi
 HOST="$1"
@@ -51,13 +57,26 @@ DEVICE="${DEVICE:-/dev/video3}"
 WARMUP=15
 DIR=parity
 DROPIN=/run/systemd/system/camera.service.d/parity.conf
+[[ $REBOOT == 1 ]] && DROPIN=/etc/systemd/system/camera.service.d/parity.conf
 
 mkdir -p "$OUT"
 on() { ssh -o ConnectTimeout=10 "$HOST" "$@"; }
 log() { printf '[parity] %s\n' "$*" >&2; }
 
+# Reboots the board and waits for camera.service to come back.
+reboot_board() {
+    on "sudo systemctl reboot" || true
+    sleep 30
+    until on "systemctl is-active --quiet camera" 2>/dev/null; do sleep 5; done
+}
+
 restore() {
     log "restoring the installed service and clock sync"
+    if [[ $REBOOT == 1 ]]; then
+        on "sudo rm -f $DROPIN; sudo systemctl daemon-reload" || true
+        reboot_board
+        return
+    fi
     on "sudo rm -f $DROPIN; sudo systemctl daemon-reload; sudo systemctl start chronyd; sudo systemctl restart camera" || true
 }
 trap restore EXIT
@@ -65,7 +84,7 @@ trap restore EXIT
 for f in "$REL/edgefirst-camera" "$REL/examples/parity" "$REL/examples/probe"; do
     [[ -x "$f" ]] || { echo "missing $f; build it first" >&2; exit 2; }
 done
-on "mkdir -p $DIR && rm -f $DIR/*.json $DIR/*.h264"
+on "mkdir -p $DIR && rm -f $DIR/*.json $DIR/*.h264 $DIR/edgefirst-camera $DIR/parity $DIR/probe"
 scp -q "$REL/edgefirst-camera" "$REL/examples/parity" "$REL/examples/probe" "$HOST:$DIR/"
 AFTER_BIN="$(on 'echo $HOME')/$DIR/edgefirst-camera"
 BEFORE_VERSION="$(on "$BEFORE_BIN --version" | awk '{print $2}')"
@@ -76,7 +95,12 @@ log "comparing $BEFORE_VERSION ($BEFORE_BIN) with $AFTER_VERSION ($AFTER_BIN)"
 # warm-up has passed.
 start_service() {
     local exec="$1"
-    on "sudo mkdir -p $(dirname $DROPIN) && printf '[Service]\nExecStart=\nExecStart=%s\n' '$exec' | sudo tee $DROPIN >/dev/null && sudo systemctl daemon-reload && sudo systemctl restart camera"
+    on "sudo mkdir -p $(dirname $DROPIN) && printf '[Service]\nExecStart=\nExecStart=%s\n' '$exec' | sudo tee $DROPIN >/dev/null && sudo systemctl daemon-reload"
+    if [[ $REBOOT == 1 ]]; then
+        reboot_board
+    else
+        on "sudo systemctl restart camera"
+    fi
     sleep "$WARMUP"
     on "systemctl is-active --quiet camera" || { on "journalctl -u camera -n 30 --no-pager" >&2; exit 1; }
     on "systemctl show -p MainPID --value camera"
