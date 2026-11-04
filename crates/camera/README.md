@@ -2,7 +2,7 @@
 
 `edgefirst-camera` is a portable camera capture API for the EdgeFirst stack. Cameras deliver frames as [`edgefirst-tensor`](https://crates.io/crates/edgefirst-tensor) tensors, so they go straight to `edgefirst-image` for conversion, to `edgefirst-codec` for encoding, and onto the wire as `edgefirst-schemas` `CameraFrame` messages without a copy.
 
-> **Status:** in development on the 3.0 integration branch. The public API and the `mock`, V4L2, libcamera and file backends are in place.
+> **Status:** in development; the API is not yet stable.
 
 ## Quick start
 
@@ -76,7 +76,7 @@ tensor.with_fields(|fields| {
 
 - `header.stamp` is the frame's acquisition time; give the Zenoh sample the timestamp `schema::ntp64(stamp)` so both denote the same instant. Times before the Unix epoch clamp to it and times past 2038 saturate, identically for both.
 - `shape` is the format's addressing grid (NV12 is `[h, w]`, YUYV `[h, w, 2]`), `strides` are byte strides at the frame's real pitch, and `storage_kind` and `dtype` are the HAL tensor-ABI codes, taken from `TensorMemory::code()` and `DType::code()` rather than written out.
-- DMA-BUF planes travel by reference: subscribers on the same machine open the producer's fds through `pidfd_getfd` using `pid` and `handle`, and the frame stays valid only while the producer holds it. Frames in process memory (`mock`) have no shareable handle, so their planes are copied into the message.
+- DMA-BUF planes travel by reference, and the frame stays valid only while the producer holds it. How a subscriber opens them, and the permissions that needs, are in the service README under [Reading Camera Frames](../../README.md#reading-camera-frames). Frames in process memory (`mock`) have no shareable handle, so their planes are copied into the message.
 - Colorimetry the driver leaves unspecified is sent as empty strings.
 
 ## Platforms

@@ -39,9 +39,9 @@ sudo modprobe vivid n_devs=3 node_types=0x1,0x1,0x1 multiplanar=1,2,1
 cargo test -p edgefirst-camera --test v4l2_vivid
 ```
 
-The user needs read-write access to `/dev/video*` and `/dev/dma_heap/system` (usually the `video` group). Tests that share a vivid instance serialise on a lock file, so they are safe under `cargo test` threads and `cargo nextest` processes. Without vivid every test prints `SKIPPED` and passes; `EDGEFIRST_CAMERA_REQUIRE_VIVID=1` makes that a failure. The fault-injection tests need a debug build.
+The user needs read-write access to `/dev/video*` and `/dev/dma_heap/system` (usually the `video` group). Tests that share a vivid instance serialise on a lock file, so they are safe under `cargo test` threads and `cargo nextest` processes. Without vivid every test prints `SKIPPED` and passes. Hosted CI must provide vivid, so when `EDGEFIRST_CAMERA_REQUIRE_VIVID` or `EDGEFIRST_CAMERA_REQUIRE_BOARD` is set the tests fail rather than skip. The fault-injection tests need a debug build.
 
-In CI, `.github/scripts/vivid-setup.sh` (run from `ci-setup.sh` on GitHub-hosted Linux runners) installs `linux-modules-extra` for the runner's kernel, loads vivid, opens the vivid nodes and the system DMA heap, and sets `EDGEFIRST_CAMERA_REQUIRE_VIVID=1` only when the nodes appear.
+In CI, `.github/scripts/vivid-setup.sh` (run from `ci-setup.sh` on GitHub-hosted Linux runners) loads vivid from the runner kernel's modules, installing `linux-modules-extra` for that kernel only when vivid is not already there, opens the vivid nodes and the system DMA heap, and sets `EDGEFIRST_CAMERA_REQUIRE_VIVID=1`. When vivid cannot be loaded the step fails, unless the repository variable `CAMERA_ALLOW_NO_VIVID=true` or the PR label `ci:no-vivid` allows the skip. Instances shared between tests serialise on `/run/lock/edgefirst-camera-vivid-N.lock`, falling back to the temp directory, so separate target directories and concurrent jobs on one runner do not collide.
 
 | Acceptance criterion | Test |
 |---|---|
@@ -58,11 +58,11 @@ In CI, `.github/scripts/vivid-setup.sh` (run from `ci-setup.sh` on GitHub-hosted
 | Close with frames held | `exported_frames_held_across_close_stay_readable_and_the_device_reopens`, `close_is_deferred_when_the_driver_cannot_orphan_buffers` |
 | Drops, wait handle, exclusivity | `drops_are_counted_from_timestamp_gaps`, `the_wait_handle_polls_ready`, `an_exclusive_device_is_busy_for_a_second_user` |
 
-vivid has neither a CMA-backed import path nor the i.MX quirks, so contiguous Import, the vvcam flip and `NotReady` after an ISP restart are validated on the boards (T1.21–T1.24). vivid stamps a frame with its simulated end-of-frame time, about one period ahead of delivery, so the `probe` example reports a negative latency on it.
+vivid has neither a CMA-backed import path nor the i.MX quirks, so contiguous Import, the vvcam flip and `NotReady` after an ISP restart are validated on the boards by the board test suite (`tests/board.rs`). vivid stamps a frame with its simulated end-of-frame time, about one period ahead of delivery, so the `probe` example reports a negative latency on it.
 
 ## File source on a board
 
-`tests/file.rs` plays a real recording when `EDGEFIRST_CAMERA_RECORDING` names a camera 2.x `.h264` file with its `.json` sidecar beside it, on a target with a V4L2 H.264 decoder (i.MX 8M Plus, i.MX 95). It checks one frame per access unit, a rate within 2% of the sidecar's, `extras()`, `EndOfStream` at the end, and `seq` across two loops. Without the variable those tests print a note and pass. Build it optimised: a debug build splits a high-bitrate recording (the 2.x app records 1080p at about 64 Mbit/s) too slowly to keep 30 fps.
+`tests/file.rs` plays a real recording when `EDGEFIRST_CAMERA_RECORDING` names a camera 2.x `.h264` file with its `.json` sidecar beside it, on a target with a V4L2 H.264 decoder (i.MX 8M Plus, i.MX 95). It checks one frame per access unit, a rate within 2% of the sidecar's, `extras()`, `EndOfStream` at the end, and `seq` across two loops. Without the variable those tests print a note and pass, except on the board lanes (below), where CI points it at `tests/data/testsrc-160x120.h264`. Build it optimised: a debug build splits a high-bitrate recording (the 2.x app records 1080p at about 64 Mbit/s) too slowly to keep 30 fps.
 
 ```bash
 EDGEFIRST_CAMERA_RECORDING=/home/root/run01.h264 cargo test --release -p edgefirst-camera --features file --test file
@@ -100,4 +100,16 @@ CI runs it on every pull request in the `V4L2 ioctl ABI` job on `ubuntu-24.04`; 
 EDGEFIRST_CAMERA_BENCH_SOURCE=/dev/video3 cargo bench -p edgefirst-camera --bench capture
 ```
 
-On the board fleet, run the `Camera benchmarks` workflow (`camera-bench.yml`) by hand with the board runner labels and, optionally, the source, size and format. It builds the benchmark once for aarch64, runs it on each board, and summarises the bencher-format results; each board's artifact also records the kernel, governors, clocks and temperatures. Conversion and encoding benchmarks over SDK frames follow once the application converts and encodes through the HAL; until then the application's `benches/convert.rs` and `benches/encode.rs` cover them.
+On the board fleet, run the `Camera benchmarks` workflow (`camera-bench.yml`) by hand with the board runner labels and, optionally, the source, size and format. It builds the benchmark once for aarch64, runs it on each board, and summarises the bencher-format results; each board's artifact also records the kernel, governors, clocks and temperatures.
+
+## Board test variables
+
+`.github/scripts/board-setup.sh` sets these on the board lanes, and they work the same when running `tests/board.rs` or `tests/on_target.rs` by hand:
+
+| Variable | Effect |
+|---|---|
+| `EDGEFIRST_CAMERA_REQUIRE_BOARD=1` | Every test that would print `SKIPPED` fails instead, naming the reason |
+| `EDGEFIRST_CAMERA_ALLOW_SKIPS` | Comma-separated skip reasons this board may still take: `no-camera`, `no-mirror`, `uniform-scene`, `not-vvcam`, `not-monotonic`, `no-recording`. The i.MX 95 lane allows `not-vvcam,no-mirror` |
+| `EDGEFIRST_CAMERA_RECORDING` | A recording with its `.json` sidecar, for the decode and playback tests |
+| `EDGEFIRST_CAMERA_FPS` | The rate `on_target` requests and expects at least 90% of (default 30) |
+| `EDGEFIRST_SOAK_SECS` | How long the soak runs (default 20; nightly runs 600) |

@@ -25,7 +25,7 @@ This file provides **project-specific** guidelines for the EdgeFirst Camera proj
 
 **Branch:** `<type>/EDGEAI-###[-desc]` (feature/bugfix/hotfix/release, JIRA key required)
 **Commit:** `EDGEAI-###: Brief description` (50-72 chars, what done not how)
-**PR:** main=2 approvals, develop=1. Link JIRA, squash features, merge commits for releases.
+**PR:** trunk-based from `main`, 2 approvals. Link JIRA, squash features, merge commits for releases. Sign commits with `-s`.
 
 ---
 
@@ -36,8 +36,9 @@ This file provides **project-specific** guidelines for the EdgeFirst Camera proj
 ```bash
 # Modern tools work from project root
 cargo build --release
-cargo test --workspace
-cargo clippy -- -D warnings
+make test   # the nextest set CI runs
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo hack clippy -p edgefirst-camera --each-feature --all-targets -- -D warnings   # CI's sdk-features job
 
 # AI loses context with cd
 cd src && cargo build  # Where are we now?
@@ -45,7 +46,7 @@ cd src && cargo build  # Where are we now?
 
 ### #2: Code Quality Standards
 
-- **Rust:** Latest stable (edition 2021), `cargo fmt`, `cargo clippy -- -D warnings`
+- **Rust:** Latest stable (edition 2021), `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`
 - **Performance:** Edge-first (512MB-2GB RAM, ARM64, <50ms latency, 5-10yr lifecycle)
 - **Testing:** 70% min coverage, 80%+ for core modules (pipeline, encode, source)
 - **Hardware:** Profile on target NXP i.MX8 platforms
@@ -88,7 +89,8 @@ cd src && cargo build  # Where are we now?
 - **Key dependencies**:
   - `zenoh 1.10.1` - Transport and ROS2 bridge compatibility
   - `tokio 1.53.1` - Async runtime with multi-threaded executor
-  - `edgefirst-camera` (workspace crate `crates/camera`) - Camera SDK: V4L2, `file:` and `mock` sources, capture buffers, frame-to-`CameraFrame` mapping
+  - `edgefirst-camera` (workspace crate `crates/camera`) - Camera SDK: V4L2, libcamera, `file:` and `mock` backends, capture buffers, frame-to-`CameraFrame` mapping
+  - `edgefirst-libcamera-sys` (workspace crate `crates/libcamera-sys`) - run-time loader for the C shim over libcamera
   - `edgefirst-image 0.39` - HAL image conversion (`ImageProcessor` picks OpenGL, then G2D, then CPU)
   - `edgefirst-codec 0.39` - HAL H.264 `VideoEncoder` over V4L2 memory-to-memory (vsi_v4l2 on i.MX 8M Plus); the SDK uses its decoder for `file:` sources
   - `edgefirst-tensor 0.39` - HAL tensors that frames are delivered as
@@ -102,7 +104,7 @@ cd src && cargo build  # Where are we now?
   - Secondary: Linux x86_64 (development and testing)
   - Development: macOS and Windows, on the `mock` source with `--h264 false`
   - **Not supported**: RISC-V
-- **Cross-platform**: Camera capture and H.264 need Linux (V4L2 capture, a V4L2 H.264 encoder); image conversion uses whatever the HAL finds (OpenGL, G2D or CPU). On macOS and Windows the application runs on the `mock` source; keep journald behind `cfg(target_os = "linux")` and Unix signal code behind `cfg(unix)`
+- **Cross-platform**: Camera capture and H.264 need Linux (V4L2 or libcamera capture, a V4L2 H.264 encoder); image conversion uses whatever the HAL finds (OpenGL, G2D or CPU). On macOS and Windows the application runs on the `mock` source; keep journald behind `cfg(target_os = "linux")` and Unix signal code behind `cfg(unix)`
 
 ### Architecture
 
@@ -111,19 +113,8 @@ cd src && cargo build  # Where are we now?
   - Source (SDK) → Capture loop → Encoder threads → Publishing
   - The capture loop runs on the main thread, outside the tokio runtime (which serves signals and tokio-console only); JPEG, H.264 and each 4K tile encoder run on threads of their own, fed over bounded channels
 - **Data flow**:
-  - Camera (SDK, V4L2) → DMA-BUF frame → `camera/frame` by reference, and → HAL conversion where needed → JPEG (turbojpeg) / H.264 (HAL `VideoEncoder`) → Zenoh
-- **Key source files** (the application is binary-only, package `edgefirst-camera-app`, binary `edgefirst-camera`):
-  - `src/main.rs` - Startup, argument validation, logging, Zenoh session
-  - `src/args.rs` - CLI arguments with clap (env var support for all options)
-  - `src/source.rs` - Opening the source, ISP-not-ready retry, capture pool, mirroring (camera first, encoders when the camera cannot)
-  - `src/pipeline.rs` - Capture loop, publishers, encoder threads, drop reports, tf_static
-  - `src/encode.rs` - H.264 main stream and 4K tiles
-  - `src/jpeg.rs` - JPEG compression
-  - `src/messages.rs` - camera/info, tf_static, compressed payloads, Zenoh sample timestamps
-  - `src/devices.rs` - `devices` and `info` subcommands
-  - `src/convert.rs` - `convert` subcommand (Annex-B to MP4)
-  - `src/exit.rs` - exit statuses (the videostream CLI table) and the error mapping
-  - `crates/camera/` - The `edgefirst-camera` SDK (see its README and ARCHITECTURE)
+  - Camera (SDK: V4L2 or libcamera) → DMA-BUF frame → `camera/frame` by reference, and → HAL conversion where needed → JPEG (turbojpeg) / H.264 (HAL `VideoEncoder`) → Zenoh
+- **Key source files**: the application is binary-only (package `edgefirst-camera-app`, binary `edgefirst-camera`). Its modules are listed in [ARCHITECTURE.md](../ARCHITECTURE.md#system-overview), and `src/exit.rs` holds the exit statuses (systemd-named statuses, not the videostream CLI's). The SDK is in `crates/camera/`; see its [README](../crates/camera/README.md) and [ARCHITECTURE](../crates/camera/ARCHITECTURE.md).
 - **Error handling**:
   - Uses `Result<T, Box<dyn Error>>` pattern
   - Logging via `tracing` with a journald layer on Linux
@@ -136,10 +127,10 @@ cd src && cargo build  # Where are we now?
 ```bash
 # ALWAYS run before committing:
 cargo fmt
-cargo clippy -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 
 # Build for target (use zigbuild on non-Linux or when cross-compiling):
-cargo zigbuild --target aarch64-unknown-linux-gnu --release  # cross-compile (macOS/x86_64 → aarch64)
+cargo zigbuild --target aarch64-unknown-linux-gnu.2.35 --release  # cross-compile (macOS/x86_64 → aarch64, glibc 2.35 floor)
 cargo build --release                                        # native build (Linux x86_64 or aarch64)
 
 # Run tests (hardware tests are ignored by default)
@@ -155,7 +146,7 @@ cargo doc --no-deps --open
 cargo bench -p edgefirst-camera --bench capture
 
 # Build with profiling enabled
-cargo zigbuild --target aarch64-unknown-linux-gnu --release --profile=profiling --features=profiling
+cargo zigbuild --target aarch64-unknown-linux-gnu.2.35 --release --profile=profiling --features=profiling
 
 # Generate SBOM and check license policy
 make sbom
@@ -167,7 +158,7 @@ make pre-release
 cargo llvm-cov --all-features --workspace --html
 ```
 
-**Build Verification:** Always run `cargo fmt` and `cargo clippy -- -D warnings` before building. Use `cargo zigbuild --target aarch64-unknown-linux-gnu` when developing on a non-Linux platform (macOS, Windows) or when cross-compiling for the aarch64 target. Native `cargo build` works on Linux, macOS and Windows; off Linux the application runs only on the `mock` source with `--h264 false`.
+**Build Verification:** Always run `cargo fmt` and `cargo clippy --workspace --all-targets -- -D warnings` before building. Use `cargo zigbuild --target aarch64-unknown-linux-gnu.2.35` when developing on a non-Linux platform (macOS, Windows) or when cross-compiling for the aarch64 target. Native `cargo build` works on Linux, macOS and Windows; off Linux the application runs only on the `mock` source with `--h264 false`.
 
 **Yocto Integration:**
 
@@ -191,23 +182,23 @@ cargo llvm-cov --all-features --workspace --html
 - Optional `tokio-console` for async task debugging
 - Most hardware-dependent tests are `#[ignore]` by default - use `cargo test -- --ignored` on device
 - Cross-compilation uses `cargo-zigbuild` (`.cargo/config.toml` is no longer used)
-- **Always run `cargo fmt` and `cargo clippy -- -D warnings`** before building or committing
-- **Always use `cargo zigbuild --target aarch64-unknown-linux-gnu`** when on a non-Linux platform or cross-compiling
+- **Always run `cargo fmt` and `cargo clippy --workspace --all-targets -- -D warnings`** before building or committing
+- **Always use `cargo zigbuild --target aarch64-unknown-linux-gnu.2.35`** when on a non-Linux platform or cross-compiling
 
 ### CLI Arguments and Environment Variables
 
-All options can be set via command line or environment variables. Environment variables use short names (no prefix). See `camera.default` for the complete reference.
+All options can be set via command line or environment variables. Environment variables use short names (no prefix). The README's [options tables](../README.md#command-line-options-and-environment-variables) list every flag, and `camera.default` is the commented reference. `LIBCAMERA_PIPELINES_MATCH_LIST` and `EDGEFIRST_CODEC_V4L2_ENCODER` are read by libcamera and the HAL, not by clap.
 
-**Key environment variable mapping:**
+**Main flags and their variables** (not exhaustive):
 
 | CLI Flag | Env Var | Default | Description |
 |----------|---------|---------|-------------|
-| `--source` | `SOURCE` | unset (uses `CAMERA`) | Device path, `file:<name>.h264` or `mock[:WxH@fps]` |
+| `--source` | `SOURCE` | unset (uses `CAMERA`) | Device path, `libcamera:<id>`, `file:<name>.h264` or `mock[:WxH@fps]` |
 | `--camera` | `CAMERA` | `/dev/video3` | V4L2 device path, used when `SOURCE` is unset |
 | `--memory` | `MEMORY` | `auto` | Capture buffer allocation (auto/import/export) |
 | `--camera-size` | `CAMERA_SIZE` | unset (keep device's) | Requested capture resolution |
 | `--camera-fps` | `CAMERA_FPS` | unset (keep device's) | Requested capture rate; playback rate for `file:` sources |
-| `--camera-mode` | `CAMERA_MODE` | unset | `SIZE+FPS` such as `1080p30`, checked against the camera's probed modes; devices only |
+| `--camera-mode` | `CAMERA_MODE` | unset | `SIZE+FPS` such as `1080p30`, checked against the camera's probed modes; `30FPS` is a deprecated alias of `CAMERA_FPS` |
 | `--camera-buffers` | `CAMERA_BUFFERS` | `4` | Capture buffers (2-32); 2 more are added while H.264, tiles or JPEG is on |
 | `--exposure` | `EXPOSURE` | unset | `auto` or microseconds |
 | `--gain` | `GAIN` | unset | `auto` or a multiplier |
@@ -269,15 +260,7 @@ All options can be set via command line or environment variables. Environment va
 - **DMA Buffers**:
   - Capture pool allocated contiguous by the service through the HAL and imported by the camera (`MEMORY=import`), or the driver's own exported buffers (`MEMORY=export`); `auto` falls back from import to export
   - Subscribers open the producer's DMA-BUF fds with `pidfd_getfd` for zero-copy between processes
-- **Timestamp / Clock Management**:
-  - **CLOCK_REALTIME** for all ROS2 Header stamps (ROS2 convention, human-readable, log-correlatable)
-  - **CLOCK_MONOTONIC** only for internal duration/interval measurements (FPS tracking, rate limiting via `Instant::now()`)
-  - V4L2 provides frame timestamps in CLOCK_MONOTONIC; the SDK converts them to CLOCK_REALTIME with `RealtimeClock::to_realtime` and exposes the result as `Frame::realtime()`
-  - Offset formula: `offset = CLOCK_REALTIME - CLOCK_MONOTONIC`, measured at every conversion (monotonic read bracketed by two realtime reads, midpoint used); **never cache the offset**, since CLOCK_REALTIME can step after the service starts
-  - Conversion: `wall_time = v4l2_monotonic_timestamp + offset`
-  - Convert once per frame in the capture loop and pass the resulting `Time` to every encoder and topic, so all representations of a frame carry an identical stamp; the Zenoh sample timestamp must equal `header.stamp`
-  - On embedded systems without battery-backed RTC (i.MX8MP), CLOCK_REALTIME may step after boot when NTP or GNSS syncs, possibly after the camera service has started
-  - **Never use CLOCK_MONOTONIC_RAW** for message timestamps — it is not NTP-adjusted and not compatible with ROS2
+- **Timestamp / Clock Management**: header stamps are `CLOCK_REALTIME` acquisition times, converted once per frame by the SDK's `RealtimeClock` and never from a cached offset; `CLOCK_MONOTONIC` is for durations only; never use `CLOCK_MONOTONIC_RAW`. The contract and its mechanics are in [ARCHITECTURE.md](../ARCHITECTURE.md#timestamps)
 - **Platform quirks**:
   - Hardware conversion and encoding need physically contiguous (CMA) capture buffers
   - H264 encoder requires specific V4L2 controls for bitrate/GOP
@@ -285,10 +268,12 @@ All options can be set via command line or environment variables. Environment va
 
 **Supported Hardware:**
 
-- **Maivin & Raivin**: NXP i.MX8M Plus, MIPI CSI-2 cameras
-- **NXP i.MX 8M Plus EVK**: i.MX8M Plus evaluation kits
+- **Maivin & Raivin**: NXP i.MX8M Plus, MIPI CSI-2 cameras (V4L2)
+- **NXP i.MX 8M Plus EVK**: i.MX8M Plus evaluation kits (V4L2)
+- **NXP i.MX 95 EVK**: libcamera, `nxp/neo` pipeline
+- **Raspberry Pi 5**: libcamera `pisp` (no CI lane yet)
 - **Testing**: x86_64 for host tests (`mock` source; the SDK's V4L2 tests need the vivid module)
-- **CI**: Native `ubuntu-24.04-arm` runners for aarch64 builds, `camera-v4l2` boards for on-target hardware tests
+- **CI**: Native `ubuntu-24.04-arm` runners for aarch64 builds, `camera-v4l2` (i.MX 8M Plus) and `camera-libcamera` (i.MX 95) boards for on-target hardware tests
 
 ### Testing Conventions
 
@@ -358,7 +343,7 @@ cargo llvm-cov --all-features --workspace --html
 **Hardware Testing:**
 
 - **CI**: Native aarch64 testing on `ubuntu-24.04-arm` runner
-- **On-target**: self-hosted boards labelled `camera-v4l2` for JPEG, H.264, and integration tests; libcamera-only boards are not supported
+- **On-target**: self-hosted boards labelled `camera-v4l2` and `camera-libcamera` for JPEG, H.264, and integration tests
 - **Coverage**: Collected from on-target tests via `cargo llvm-cov`
 
 ---
@@ -374,9 +359,9 @@ cargo llvm-cov --all-features --workspace --html
 ## Quick Reference
 
 **Branch:** `feature/EDGEAI-123-desc`
-**Commit:** `EDGEAI-123: Brief description`
-**PR:** 2 approvals (main), 1 (develop)
-**Build:** `cargo fmt`, `cargo clippy -- -D warnings`, `cargo zigbuild --target aarch64-unknown-linux-gnu --release`
+**Commit:** `EDGEAI-123: Brief description` (signed with `-s`)
+**PR:** 2 approvals on `main`
+**Build:** `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo zigbuild --target aarch64-unknown-linux-gnu.2.35 --release`
 **Test:** `cargo test --bins` (unit), `cargo test --workspace` (all host tests), `cargo test -- --ignored` (hardware)
 **Licenses:** MIT/Apache/BSD/EPL-2.0 | GPL/AGPL BLOCKED
 **Security:** support@au-zone.com

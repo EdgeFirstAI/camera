@@ -1,5 +1,13 @@
 # Security Policy
 
+## Supported Versions
+
+| Version | Supported |
+|---|---|
+| 3.x | Yes |
+| 2.12 | Security fixes only, until 3.0 ships to the field |
+| Earlier than 2.12 | No |
+
 ## Reporting a Vulnerability
 
 We take the security of EdgeFirst Camera seriously. If you discover a security vulnerability, please report it responsibly.
@@ -59,6 +67,6 @@ We kindly ask security researchers to:
 
 ---
 
-**Last Updated:** 2025-11-24
+**Last Updated:** 2026-11-04
 
-For general questions, see our [Contributing Guide](CONTRIBUTING.md) or visit [EdgeFirst Documentation](https://doc.edgefirst.ai/latest/camera/).
+For general questions, see our [Contributing Guide](CONTRIBUTING.md) or visit [EdgeFirst Documentation](https://doc.edgefirst.ai/test/perception/).

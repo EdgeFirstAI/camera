@@ -2,7 +2,7 @@
 
 **Technical architecture documentation for developers**
 
-This document describes how the EdgeFirst Camera Node is built: its threads, how frames and their buffers move between them, and the design decisions behind them. For user-facing documentation, see [README.md](README.md). The capture library it is built on, the `edgefirst-camera` SDK, has its own [architecture document](crates/camera/ARCHITECTURE.md).
+This document describes how the EdgeFirst Camera Node is built: its threads, how frames and their buffers move between them, and the design decisions behind them. For configuration, upgrading, systemd setup and exit statuses, see [README.md](README.md). The capture library it is built on, the `edgefirst-camera` SDK, has its own [architecture document](crates/camera/ARCHITECTURE.md).
 
 ---
 
@@ -17,19 +17,20 @@ This document describes how the EdgeFirst Camera Node is built: its threads, how
 7. [Timestamps](#timestamps)
 8. [Record and Replay](#record-and-replay)
 9. [Subcommands](#subcommands)
-10. [Instrumentation and Profiling](#instrumentation-and-profiling)
-11. [References](#references)
+10. [Supervision](#supervision)
+11. [Instrumentation and Profiling](#instrumentation-and-profiling)
+12. [References](#references)
 
 ---
 
 ## System Overview
 
-The service captures frames through the `edgefirst-camera` SDK and publishes them on Zenoh: every frame by reference as an `edgefirst_msgs/CameraFrame`, and compressed as JPEG and H.264. The SDK owns the camera: device negotiation, buffer pools, controls, and the acquisition time of each frame. The HAL does the pixel work: `edgefirst-image` converts and scales (OpenGL, G2D or CPU, chosen per conversion), and `edgefirst-codec` encodes H.264 on the platform's V4L2 memory-to-memory encoder. JPEG compression is turbojpeg.
+The service captures frames through the `edgefirst-camera` SDK and publishes them on Zenoh: every frame by reference as an `edgefirst_msgs/CameraFrame`, and compressed as JPEG and H.264. The SDK owns the camera: device negotiation, buffer pools, controls, and the acquisition time of each frame. The HAL does the pixel work: `edgefirst-image` converts and scales (OpenGL, G2D or CPU, chosen per conversion; the capture pool creates no GL context, so in the default direct H.264 configuration GL is never initialised), and `edgefirst-codec` encodes H.264 on the platform's V4L2 memory-to-memory encoder. JPEG compression is turbojpeg.
 
 ```mermaid
 graph LR
     subgraph Source["edgefirst-camera SDK"]
-        Cam["Box&lt;dyn Camera&gt;<br/>V4L2 device, file:, mock"]
+        Cam["Box&lt;dyn Camera&gt;<br/>V4L2, libcamera, file:, mock"]
     end
     subgraph Capture["Capture thread"]
         Loop["next_frame<br/>stamp once<br/>publish camera/frame, camera/info"]
@@ -65,16 +66,16 @@ graph LR
 | `convert.rs` | The `convert` subcommand: Annex B to MP4 |
 | `exit.rs` | Exit statuses and the mapping from errors to them |
 
-The application and the SDK also build and run on macOS and Windows, where only the `mock` source exists so far and there is no H.264 encoder: `--h264` stops the application at startup. There, journald logging is left out, and on Windows Ctrl+C and Ctrl+Break take the place of SIGINT and SIGTERM.
+The application and the SDK also build and run on macOS and Windows, where only the `mock` source exists and there is no H.264 encoder: `--h264` stops the application at startup. There, journald logging is left out, and on Windows Ctrl+C and Ctrl+Break take the place of SIGINT and SIGTERM.
 
 ---
 
 ## Startup
 
 1. **Arguments.** Empty environment variables are removed before parsing, so `KEY=""` in `/etc/default/camera` means unset. Combinations that cannot work (`--record` without `--h264`, or with a `file:` source) fail before anything opens.
-2. **Request.** `source::Request` resolves the source (`--source`, else the hidden 2.x `--replay` as a `file:` source, else `--camera`), the requested size and rate, the pool depth, the memory strategy, mirroring and controls. A `CAMERA_MODE` is checked against the modes the camera reports (`edgefirst_camera::probe`) and expands to a size and rate; explicit `CAMERA_SIZE` and `CAMERA_FPS` win over it with a warning. File and mock sources cannot report modes, so a mode there is an error. Devices are asked for YUYV, which the encoders and converters take directly; a device that does not offer it is captured in its current format.
+2. **Request.** `source::Request` resolves the source (`--source`, else the hidden 2.x `--replay` as a `file:` source, else `--camera`), the requested size and rate, the pool depth, the memory strategy, mirroring and controls. A `CAMERA_MODE` is checked against the modes the camera reports (`edgefirst_camera::probe`) and expands to a size and rate; explicit `CAMERA_SIZE` and `CAMERA_FPS` win over it with a warning. The 2.x rate-only form (`30FPS`) is read as `CAMERA_FPS` with a warning. File and mock sources cannot report modes, so a mode there is an error. Devices are asked for YUYV, which the encoders and converters take directly; a device that does not offer it is captured in its current format.
 3. **Open.** `source::open` opens the camera, applies mirroring, provides the capture pool and starts streaming (see [Buffers](#buffers-and-backpressure)). It retries while the SDK reports `NotReady` (`ENOENT` on open, `EAGAIN` on `S_FMT`, or no first frame within the SDK's timeout, as when `isp_media_server` has not started serving the device), within a 15 s budget and six attempts, so a wedged ISP lands the unit in `failed` within systemd's start limit instead of hammering it. Every other error fails startup. A shutdown during the retry exits cleanly.
-4. **Pipeline.** `pipeline::run` opens the encoders, the recording if any, and the publishers, then runs the capture loop. An encoder that cannot open is a startup error.
+4. **Pipeline.** `pipeline::run` opens the encoders, the recording if any, and the publishers, then runs the capture loop. An encoder that cannot open is a startup error. Readiness is reported once the first `camera/frame` is published (see [Supervision](#supervision)).
 
 **Recovery.** A camera that delivered frames and then stops (read timeouts past the five-retry budget, a disconnect, `NotReady` or an I/O error) is stopped, closed and opened again with step 3 while the encoders, recorder and publishers keep running. On vvcam that is what an `isp_media_server` restart needs: the old stream delivers nothing until the device is reopened. `seq` continues from the last published frame. Frames held by the encoders keep their buffers across the close. When the reopened camera delivers a different size, format or software mirroring, or fails before delivering a frame, the service exits for systemd to restart. File sources are not reopened.
 
@@ -110,11 +111,11 @@ On camera devices the service allocates the capture pool itself, through `ImageP
 
 A `Frame` holds its capture buffer until it drops; the SDK never hands a buffer back to the driver while a frame references it. The capture loop wraps each frame in an `Arc` and sends a clone to each encoder, so a buffer returns to the driver once the last encoder is done with it. Converting stages drop the frame as soon as the conversion has read it; the direct H.264 path holds it until the encoder has read it.
 
-Because queued and in-flight frames hold buffers, the pool is `CAMERA_BUFFERS` plus two while any encoder runs. `CAMERA_BUFFERS` keeps its meaning for subscribers to `camera/frame`: they have about `CAMERA_BUFFERS - 1` frame periods to read a frame. Each encoder queue holds one frame: one absorbs encoder jitter at the H.264 encoder, and keeps the JPEG compressor, which takes longer than a frame period at 1080p, busy without waiting for the next frame. Measured on the i.MX 8M Plus at 1080p30 with H.264 and JPEG, four buffers without the encoder headroom held capture to about 25 fps; with it, capture holds 30 fps.
+Because queued and in-flight frames hold buffers, the pool is `CAMERA_BUFFERS` plus two while any encoder runs. `CAMERA_BUFFERS` keeps its meaning for subscribers to `camera/frame`: they have about `CAMERA_BUFFERS - 1` frame periods to read a frame. Each encoder queue holds one frame. At the H.264 encoder, one absorbs encoder jitter. The JPEG queue is latest-wins: the compressor takes longer than a frame period at 1080p, so a frame that arrives while one waits replaces it, and the replaced frame counts as a drop. JPEG therefore always compresses the newest frame. Measured on the i.MX 8M Plus at 1080p30 with H.264 and JPEG, four buffers without the encoder headroom held capture to about 25 fps; with it, capture holds 30 fps.
 
 ### Drops
 
-`try_send` never blocks capture: a full queue drops the frame for that encoder. kanal reports a full channel as `Ok(false)` and a closed one as `Err`, and both count as drops. Frames the camera lost are counted by the SDK from timestamp gaps against the negotiated rate (`CaptureStats::dropped`), which needs a camera that reports its rate. Both are summarised in one warning per 10 s window.
+`try_send` never blocks capture: a full queue drops the frame for that encoder. kanal reports a full channel as `Ok(false)` and a closed one as `Err`, and both count as drops. Frames the camera lost are counted by the SDK from timestamp gaps against the negotiated rate (`CaptureStats::dropped`), which needs a camera that reports its rate. Both are summarised in one warning per 10 s window, with each output reported against the frames offered to it (`jpeg=127/300` is 127 frames accepted of 300 offered).
 
 At startup, the frames the camera captured while the encoders opened are discarded before the loop begins: they are stale, and the gap behind them is not a capture loss.
 
@@ -132,11 +133,11 @@ The encoder may return an access unit for an earlier frame, so each stage keeps 
 
 ### Tiles
 
-Above 1080p (or with `--h264-tiles`), four more stages encode the quadrants of the frame at their own size, up to 1920x1080, on `camera/h264/{tl,tr,bl,br}` with `frame_id` suffixes `topleft`, `topright`, `bottomleft` and `bottomright`. A tile is encoded from the capture through the encoder's crop where the device can express it, which on a 4K capture is three of the four: the device reads `stride x rows` from the plane offset, which for the bottom-right quadrant runs past the end of a tightly sized buffer, so that tile converts instead. A tile pacer limits tiles to `H264_TILES_FPS`, advancing its deadline by whole intervals so the rate stays phase locked.
+For live capture above 1080p (turned on automatically, except for `record`) or with `--h264-tiles`, four more stages encode the quadrants of the frame at their own size, up to 1920x1080, on `camera/h264/{tl,tr,bl,br}` with `frame_id` suffixes `topleft`, `topright`, `bottomleft` and `bottomright`. A tile is encoded from the capture through the encoder's crop where the device can express it, which on a 4K capture is three of the four: the device reads `stride x rows` from the plane offset, which for the bottom-right quadrant runs past the end of a tightly sized buffer, so that tile converts instead. A tile pacer limits tiles to `H264_TILES_FPS`, advancing its deadline by whole intervals so the rate stays phase locked.
 
 ### JPEG
 
-The JPEG stage converts to RGBA at the stream size (mirroring there when needed) and compresses with turbojpeg at `JPEG_QUALITY`, 4:2:0.
+The JPEG stage converts to RGBA at the stream size (mirroring there when needed) and compresses with turbojpeg at `JPEG_QUALITY`, 4:2:0. It always compresses the newest frame: a frame that arrives while another waits replaces it (see [Drops](#drops)). Compression is in software, about one core and a p95 of about 122 ms at 1080p on the i.MX 8M Plus, which has no hardware JPEG encoder.
 
 ### Mirroring
 
@@ -161,13 +162,7 @@ All messages are ROS 2 CDR, and every message about a frame carries that frame's
 
 `camera/frame` is built by the SDK's `schemas` mapping (`edgefirst_camera::schema::FrameTensor`), the one definition of a `Frame` as a `CameraFrame`: the tensor-ABI storage kind and dtype codes, the format's addressing shape and C byte strides at the frame's row stride, the HAL wire name of the format (`YUYV`, `NV12`, ...), the stream's colorimetry (empty when unspecified), and one plane per image plane, so NV12 carries its chroma plane. Frames in process memory (the mock source) have no handle another process can open, so their planes travel inline.
 
-Consumers:
-
-1. Decode the `CameraFrame` and read its tensor.
-2. Wait on `fence_fd` when it is non-negative.
-3. Map each plane with `handle >= 0` through `pidfd_getfd` on the producer `pid`, then `mmap`.
-4. Read `[0, used)` of each plane within about `CAMERA_BUFFERS - 1` frame periods, before the buffer is captured into again.
-5. Unmap and close the imported descriptors.
+Consumers read a frame through `pidfd_getfd` on the producer's `pid`, within about `CAMERA_BUFFERS - 1` frame periods. The steps and the permissions they need are in the README under [Reading Camera Frames](README.md#reading-camera-frames).
 
 ### Camera info and transform
 
@@ -256,19 +251,22 @@ Without a subcommand the program runs the service. The subcommands are tools for
 
 JSON output names pixel formats by their HAL wire names (`YUYV`, `rgba8`), as `CameraFrame.format` does. Logs go to stderr so stdout holds only the output.
 
-Every failure, of the service or a subcommand, exits with a status systemd names for its meaning in the journal: 1 and 2 are LSB statuses (`FAILURE`, `INVALIDARGUMENT`), the rest are `sysexits.h` codes. The videostream CLI's 3 to 6 would read as `NOTIMPLEMENTED`, `NOPERMISSION`, `NOTINSTALLED` and `NOTCONFIGURED`. A missing codec anywhere in an error's source chain wins over the camera error that carries it, so a `file:` source without a decoder exits with 69.
-
-| Status | Meaning |
-|---|---|
-| 0 | Success |
-| 1 | Any other failure |
-| 2 | Invalid arguments or configuration |
-| 66 (`NOINPUT`) | The camera or recording is missing, busy or went away |
-| 68 (`NOHOST`) | The Zenoh session could not be opened |
-| 69 (`UNAVAILABLE`) | No H.264 encoder or decoder |
-| 75 (`TEMPFAIL`) | The camera delivered no frames in time |
+Every failure, of the service or a subcommand, exits with a status systemd names for its meaning in the journal: 1 and 2 are LSB statuses (`FAILURE`, `INVALIDARGUMENT`), the rest are `sysexits.h` codes. 3 to 6 are avoided because systemd would name them `NOTIMPLEMENTED`, `NOPERMISSION`, `NOTINSTALLED` and `NOTCONFIGURED`. `exit.rs` maps SDK error kinds and codec errors to the statuses; the table is in the README under [Exit statuses](README.md#exit-statuses).
 
 Explicit service options before a subcommand are a usage error; values from the environment are not, and `record` reads its capture options from them.
+
+---
+
+## Supervision
+
+The service ends rather than running degraded, so systemd can restart it.
+
+- **Encoder failure.** An encoder thread that exits or panics, or that keeps failing, ends the service with status 70 (`SOFTWARE`) instead of leaving it streaming without H.264 or JPEG.
+- **Readiness.** When `NOTIFY_SOCKET` is set, the service sends `READY=1` after publishing the first `camera/frame`. The startup retry for a camera that is not ready runs before that, so readiness means frames are flowing.
+- **Watchdog.** The service sends `WATCHDOG=1` while frames are captured and every enabled encoder (H.264, JPEG, tiles) has accepted a frame within the last 10 s. It also pings while the open retry waits for a camera, so a slow ISP start does not trip a unit's `WatchdogSec`. A stalled capture or encoder stops the pings, and systemd restarts the unit.
+- **Without a notify socket** none of this runs and behaviour is unchanged.
+
+The unit settings that go with this are in the README under [Running under systemd](README.md#running-under-systemd).
 
 ---
 

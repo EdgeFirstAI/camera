@@ -7,11 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+3.0.0 is a major release. It replaces the capture and encoding stack: the `videostream` library gives way to the `edgefirst-camera` SDK (V4L2, libcamera, file and mock backends) and the EdgeFirst HAL, and the service gains libcamera cameras, subcommands, readiness and watchdog support for systemd, and a supervised encoder pipeline. Topics and message types are unchanged apart from the differences listed under Breaking. The application and the SDK share version 3.0.0.
+
+### Breaking
+
+- `camera/frame` YUYV tensors are described as `[H, W, 2]`, where 2.12 used `[H, W]`. The shape is under review.
+- A named `CAMERA_MODE` (`1080p30`) is accepted only when the camera reports it; otherwise startup fails and lists the modes the camera offers. File and mock sources cannot report modes.
+- An explicit `CAMERA_SIZE` or `CAMERA_FPS` wins over `CAMERA_MODE`, with a warning. In 2.x the mode won.
+- The `edgefirst_camera_app` library target is removed.
+- The package is renamed `edgefirst-camera-app`; the binary is still `edgefirst-camera`.
+- The capture pool is `CAMERA_BUFFERS` plus two while any encoder runs, so a unit with the default of 4 uses six capture buffers of contiguous memory.
+- Exit statuses change to ones systemd names correctly in the journal: 2 invalid arguments or configuration, 66 camera or recording missing or busy, 68 Zenoh session failed, 69 no H.264 encoder or decoder, 75 camera delivered no frames in time, 70 an encoder stopped, 1 anything else. Units that match on `SuccessExitStatus=` or `RestartPreventExitStatus=` need reviewing.
+- Under systemd, log lines reach the journal through journald only, no longer also as stdout text.
+- When the unit enables it (`Type=notify` or `WatchdogSec=`), the service reports readiness after the first `camera/frame` and pings the watchdog only while frames are captured and every enabled encoder accepts them, so a stalled pipeline is restarted. Without `NOTIFY_SOCKET` nothing changes.
+
 ### Added
+
 - `--h264-fps` (`H264_FPS`): the rate the H.264 encoder is set up for. `auto`, the default, takes 15, 30 or 60 fps, whichever is nearest the rate the camera reports (60 for the i.MX 95 `nxp/neo` pipeline, which reports 62.61); `measure` watches the camera for up to 3 s first and takes the rate it delivers; a number sets it (EDGEAI-1538).
 - The application logs the frame rate the camera delivers once measured, warns when it differs from the rate the driver reports or the encoders were set up for, and corrects a recording's sidecar to it, so the recording plays back at the speed it was captured (EDGEAI-1538).
 - The application captures from libcamera cameras (`--source libcamera:<id>`) in NV12 into libcamera's buffers, and accepts `CAMERA_MODE` for them through the libcamera probe (EDGEAI-1540).
-- `edgefirst-camera` SDK crate (`crates/camera`): a camera capture API that delivers frames as `edgefirst-tensor` tensors with capture metadata and wall-clock acquisition time, plus the `mock` backend (EDGEAI-1518). The V4L2, file and libcamera backends follow.
+- `edgefirst-camera` SDK crate (`crates/camera`): a camera capture API that delivers frames as `edgefirst-tensor` tensors with capture metadata and wall-clock acquisition time, plus the `mock` backend (EDGEAI-1518).
 - `SlotTable`: slot ownership shared by every backend. A buffer is never handed back to the driver while a frame references it, frames keep their memory across `stop()` and closing the camera, and caller-provided pools are validated at `start()` with a reason and slot for any refusal (EDGEAI-1519).
 - V4L2 capture backend for the SDK (`/dev/videoN`, feature `v4l2`, default on Linux) over `edgefirst-v4l2` (EDGEAI-1520).
   - Exclusive device lock, format and frame-rate negotiation reported in `config()`, enumeration of formats, sizes and rates for `enumerate()`, `probe()` and `modes()`.
@@ -26,12 +41,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - libcamera's own buffers (Export), as one tensor or two planes; requeue with `Request::reuse`; completions through an eventfd that is the `WaitHandle`.
   - Controls checked against the camera's `ControlInfoMap` and reported, mirroring through `orientation`, and the frame rate libcamera's frame duration reports, with the delivered rate measured from sensor timestamps, since some pipelines ignore the requested rate or misreport it.
   - `SensorTimestamp` as `CLOCK_MONOTONIC`, at frame start on the RPi and frame end elsewhere; `probe()` reads each size's `FrameDurationLimits`; `set_libcamera_pipelines` for the i.MX 95 `nxp/neo` match list.
-  - CI builds the shim for libcamera 0.5, 0.6 and 0.7 on x86_64 and aarch64 in Debian bookworm and checks its imports against each libcamera.
-  - The board lane runs the board and on-target suites on the i.MX 95 EVK through libcamera's `nxp/neo` pipeline, with the run's prebuilt shims (EDGEAI-1538). The suites take the camera from `EDGEFIRST_CAMERA_SOURCE` (a V4L2 node, `libcamera:<id>` or `libcamera`), which replaces `EDGEFIRST_CAMERA_DEVICE`, and follow what the backend negotiates: NV12 into libcamera's own buffers, the rate the pipeline delivers, and a mirror the pipeline cannot apply.
+- Systemd integration (`NOTIFY_SOCKET`): `READY=1` after the first `camera/frame` is published, and `WATCHDOG=1` while frames are captured and every enabled encoder (H.264, JPEG, tiles) has accepted a frame within the last 10 s, including while a camera that is not ready is retried. The recommended unit uses `Type=notify`, `WatchdogSec=30`, `Restart=always` and `RestartPreventExitStatus=2 69`, since neither a bad configuration (2) nor a missing codec (69) is fixed by a restart. Without `NOTIFY_SOCKET` (`Type=simple`, or run by hand) nothing changes.
+- `EDGEFIRST_CODEC_V4L2_ENCODER=/dev/videoN` pins the H.264 encoder node; without it the HAL opens every `/dev/video*` node to find one. Boards with fixed devices, such as the Maivin (camera `/dev/video3`, encoder `/dev/video0`), set it together with `CAMERA`.
+- An encoder that fails ends the service: if an encoder thread exits or panics, or keeps failing, the service exits with status 70 so systemd restarts it, instead of streaming on without H.264 or JPEG.
+- The periodic drop line reports each output against the frames offered to it, for example `jpeg=127/300`.
+- H.264 tiles for `file:` sources, encoded from the decoded frames.
+- Development: a Rust 1.94.0 toolchain pin (EDGEAI-1518); the V4L2 ioctl ABI check on every pull request (`make abi-check`) (EDGEAI-1530); SDK capture benchmarks and the on-demand `Camera benchmarks` workflow (`make bench-capture`) (EDGEAI-1530); the platform validation suite `tests/board.rs` and the board lane on the i.MX 8M Plus (V4L2) and i.MX 95 (libcamera) (EDGEAI-1532, EDGEAI-1538); a shim build for libcamera 0.5, 0.6 and 0.7 on x86_64 and aarch64 with an imports check (EDGEAI-1540); and `scripts/parity.sh`, with the `parity` example, which compares the installed service with a new build on a Maivin (EDGEAI-1529).
 - Caller-pool validation rejects memory the tensor crate reports as non-contiguous while contiguity is required (EDGEAI-1520).
 - `schemas` feature: `schema::FrameTensor` maps a `Frame` to an `edgefirst_msgs/CameraFrame` tensor (addressing-grid shape, byte strides at the real pitch, tensor-ABI storage kind and dtype, one plane per buffer plane, colorimetry), with `schema::stamp` and `schema::ntp64` giving the header stamp and the Zenoh sample timestamp of the same instant (EDGEAI-1521).
-- V4L2 ioctl ABI check: every pull request runs the SDK's vivid tests under `strace` and fails on an unexpected `ENOTTY`, the symptom of an ioctl argument laid out differently from the kernel's (`make abi-check`) (EDGEAI-1530).
-- SDK capture benchmarks for frame interval, delivery latency, DMA-BUF import and CPU reads of capture memory (`make bench-capture`), and the on-demand `Camera benchmarks` workflow that runs them across board runners (EDGEAI-1530).
 - File source for the SDK (`file:<name>.h264` with its `<name>.json` sidecar, feature `file`): plays a camera 2.x recording through the platform's V4L2 H.264 decoder (EDGEAI-1524).
   - Frames are paced at the sidecar's rate or a requested one and stamped at delivery like live frames; `config()` reports the size, rate and colorimetry.
   - `Frame::encoded()` carries the access units behind each frame, so forwarding them reproduces the recording byte for byte.
@@ -40,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Frames own their decoded pictures, and `Frame::tensor()` borrows the tensor, so no caller keeps reading a buffer after it goes back to the driver or decoder.
 - `Sidecar` in the SDK (feature `file`) reads and writes the version 1 recording sidecar; whole rates are written as integers and unspecified colorimetry as empty labels, as 2.x reads them (EDGEAI-1525).
 - Application flags (EDGEAI-1526):
-  - `--source` / `SOURCE` selects the frame source: a device path, `file:<name>.h264`, or `mock[:WxH@fps]`. Unset uses `--camera` / `CAMERA`.
+  - `--source` / `SOURCE` selects the frame source: a device path, `libcamera:<id>`, `file:<name>.h264`, or `mock[:WxH@fps]`. Unset uses `--camera` / `CAMERA`.
   - `--camera-fps` / `CAMERA_FPS` requests a capture rate, or sets the playback rate of a `file:` source.
   - `--memory` / `MEMORY` (`auto`, `import`, `export`) selects how capture buffers are allocated.
   - `--exposure`, `--gain` and `--white-balance` (`EXPOSURE`, `GAIN`, `WHITE_BALANCE`) set camera controls to `auto` or a value; a camera without the control logs a warning.
@@ -51,13 +68,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `info [--json]` lists the cameras and whether an H.264 encoder (with its inputs) and decoder are available.
   - `record <out.h264>` captures and records the H.264 stream with its sidecar without publishing, until `--frames`, `--duration` or a signal.
   - `convert <in.h264> <out.mp4>` muxes a recording into MP4 in software, at `--fps` or the sidecar's rate.
-- Platform validation suite `tests/board.rs`, run by the board lane: a 1080p30 soak into an image-crate pool with GL import-cache hits, mirror, `NotReady` across an ISP daemon restart on vvcam, stop/start cycles, H.264 capture-to-access-unit latency, decode of a 2.x recording, and frames held across close (EDGEAI-1532).
 - V4L2 backend on vvcam releases that reject `S_PARM` (Maivin): the requested frame rate is set through the ISP's `s.fps` JSON command once streaming, so 1080p30 is captured at 30 fps instead of the mode's 60, and `EAGAIN` from `S_FMT` while `isp_media_server` restarts is `NotReady`, so callers retry instead of failing (EDGEAI-1532).
 - Exit statuses that systemd names for their meaning in the journal: 2 `INVALIDARGUMENT`, 66 `NOINPUT` (camera not found), 69 `UNAVAILABLE` (no encoder or decoder), 68 `NOHOST` (Zenoh session), 75 `TEMPFAIL` (camera timeout), 1 otherwise (EDGEAI-1527).
-- `scripts/parity.sh` compares the installed service with a new build on a Maivin under its own `camera.service`: topics, encodings, rates, latency, the clock domain, frame and H.264 layout, CPU and memory, what model and fusion publish meanwhile, the driver's delivery delay, and a clock stepped forward and back by chronyd. The `parity` example takes the measurements and compares two of them (EDGEAI-1529).
 - A camera that stops delivering after it started (an ISP daemon restart on vvcam, a USB reset) is opened again in the running service, with the startup retry, while the encoders keep running and `seq` continues; the service exits for systemd only when the reopened camera delivers a different stream or nothing at all (EDGEAI-1532).
 
 ### Changed
+
 - The application captures through the `edgefirst-camera` SDK instead of `videostream`, converts and scales through `edgefirst-image` (OpenGL, G2D or CPU) and encodes H.264 through `edgefirst-codec` (EDGEAI-1525).
   - The capture pool is allocated in contiguous memory through the image crate. A device that refuses it falls back to the SDK's buffers with a warning; contiguous memory that cannot be allocated fails startup with a message naming the shortfall.
   - While any encoder runs, the pool is `CAMERA_BUFFERS` plus two, because frames waiting for or being read by an encoder hold their buffer. `CAMERA_BUFFERS` keeps its meaning for `camera/frame` subscribers and defaults to 4.
@@ -70,17 +86,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Under systemd, log lines reach the journal once, through journald, instead of also as stdout text (EDGEAI-1529).
 - `camera/frame` tensors name their format with the HAL wire names (`YUYV`, `NV12`, ...), and NV12 frames describe their chroma plane (EDGEAI-1525).
 - Replay is the `file:` source: `--source file:<name>.h264` republishes the recorded H.264 verbatim, publishes the decoded frames on `camera/frame`, and takes `camera/info` and `tf_static` from the sidecar. Outputs keep the recording's size, and `MIRROR` and `STREAM_SIZE` do not apply. `--replay` / `REPLAY` remains as a deprecated alias, and `REPLAY_FPS` as an alias of `CAMERA_FPS` (EDGEAI-1525, EDGEAI-1526).
-- `CAMERA_MODE` is shorthand for `CAMERA_SIZE` plus `CAMERA_FPS`, accepted only when the camera reports the mode; otherwise startup fails and lists the modes it offers. Explicit `CAMERA_SIZE` and `CAMERA_FPS` win over it with a warning. The rate-only form (`30FPS`) is removed; use `CAMERA_FPS` (EDGEAI-1526).
-- `camera.default` documents the new variables and carries a commented, i.MX 95-only `LIBCAMERA_PIPELINES_MATCH_LIST=nxp/neo` entry (EDGEAI-1526).
+- `CAMERA_MODE` is shorthand for `CAMERA_SIZE` plus `CAMERA_FPS`, accepted only when the camera reports the mode. The 2.12 rate-only form (`30FPS`) is accepted as a deprecated alias for `CAMERA_FPS`, with a warning (EDGEAI-1526).
+- `camera.default` documents the new variables and carries commented entries for the i.MX 95-only `LIBCAMERA_PIPELINES_MATCH_LIST=nxp/neo` (EDGEAI-1526) and `EDGEFIRST_CODEC_V4L2_ENCODER`.
+- The JPEG stage always compresses the newest frame: a frame that arrives while one is waiting replaces it, and the replaced frame counts as a drop.
+- The capture pool no longer creates a GL context. In the default H.264-direct configuration GL is never initialised, which lowers memory use.
 - The SDK takes every V4L2 code from `edgefirst-v4l2` (EDGEAI-2202).
-- The repository is a Cargo workspace. The application package is renamed `edgefirst-camera-app`; its binary is still `edgefirst-camera`. The application and the SDK share version 3.0.0 (EDGEAI-1518).
-- The Rust toolchain is pinned to 1.94.0 by `rust-toolchain.toml`, matching the HAL (EDGEAI-1518).
-- Documented that `MIRROR` exists to publish the image in its natural
-  orientation, and that downstream consumers such as fusion assume a natural
-  image whose TF and calibration do not encode the mount rotation
-  (EDGEAI-2021).
+- The repository is a Cargo workspace; the application package is renamed `edgefirst-camera-app` (EDGEAI-1518).
+- Documented that `MIRROR` exists to publish the image in its natural orientation, and that downstream consumers such as fusion assume a natural image whose TF and calibration do not encode the mount rotation (EDGEAI-2021).
 
 ### Removed
+
 - The `edgefirst_camera_app` library (`image` module), the G2D and DMA-heap code, the videostream dependency, and the image and encoder benchmarks; the HAL covers them (EDGEAI-1525).
 
 ## [2.12.0] - 2026-10-01
@@ -88,6 +103,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Configurable capture buffer count. Wire format is unchanged from 2.11.0.
 
 ### Added
+
 - `CAMERA_BUFFERS` / `--camera-buffers` sets the number of V4L2 capture buffers (2–32). Unset keeps the videostream default of 4. Subscribers of `FRAME_TOPIC` must read each frame within about `CAMERA_BUFFERS - 1` frame periods before its DMA buffer is overwritten, so a deeper pool gives the model and fusion services more time to convert frames they pair with slower sensors (EDGEAI-1940).
 
 ## [2.11.0] - 2026-09-26
@@ -96,6 +112,7 @@ Camera-mode selection and wall-clock-correct timestamps. Wire format is
 unchanged from 2.10.1.
 
 ### Added
+
 - `CAMERA_MODE` / `--camera-mode` is a first-class capture mode: combined
   `SIZExFPS` values (`VGA30`, `WVGA15`, `540p24`, `720p30`, `1080p30`,
   `4K30`) and FPS-only (`30FPS`). Combined modes override `CAMERA_SIZE`;
@@ -107,6 +124,7 @@ unchanged from 2.10.1.
 - The V4L2 timestamp clock and source (end of frame or start of exposure) reported by the capture driver are logged once at startup, with a warning if the clock is not `CLOCK_MONOTONIC`. Requires videostream 2.6.0 (EDGEAI-1938).
 
 ### Changed
+
 - `CAMERA_SIZE` is optional. Unset `CAMERA_MODE` and `CAMERA_SIZE` probes
   the live camera (`VIDIOC_G_FMT` / `VIDIOC_G_PARM`) and fails only if
   that query cannot answer. The shipped `camera.default` leaves both
@@ -117,6 +135,7 @@ unchanged from 2.10.1.
 - Dependencies updated: videostream 2.6.0, zenoh 1.10.1, clap 4.6.7 and dma-buf 0.5.0; development dependencies criterion 0.8.2 and serial_test 4.0.1.
 
 ### Fixed
+
 - Frame stamps follow wall-clock steps without a restart. The `CLOCK_REALTIME - CLOCK_MONOTONIC` offset was measured once at startup, so on a unit without a working RTC every frame-tied topic stayed in the pre-sync clock domain (475 days behind in the field) until the service restarted. The offset is now measured at every conversion and a step is logged once (EDGEAI-1938).
 - The H.264, JPEG and tile encoders receive the stamp computed once per frame by the capture loop, so every representation of a frame carries an identical `header.stamp` (EDGEAI-1938).
 
@@ -126,6 +145,7 @@ Patch release for EDGEAI-1094. Argument parsing only; no wire-format or
 configuration-key changes from 2.10.0.
 
 ### Fixed
+
 - Empty environment variables in `/etc/default/camera` (`KEY=""`) are now
   treated as unset so the documented default applies instead of failing to
   start. 2.9.1 cleared a hand-written list of five variables, which left
@@ -141,6 +161,7 @@ against an isp_media_server that was running but not yet serving. Wire format
 is unchanged from 2.9.1, and behaviour on the stock NXP BSP is unchanged.
 
 ### Added
+
 - The camera open is retried while the vvcam driver reports `EAGAIN`, meaning
   isp_media_server has not yet subscribed to the device's events. This closes
   a race the `camera.service` ExecStartPre chain cannot cover:
@@ -172,6 +193,7 @@ Fixes a startup failure when the shipped `camera.default` is loaded via
 systemd `EnvironmentFile`. Wire format is unchanged from 2.9.0.
 
 ### Fixed
+
 - Empty environment variables (`RECORD=""`, `REPLAY=""`, `REPLAY_FPS=""` in
   `camera.default`) no longer abort argument parsing at startup. systemd
   exports `KEY=` as an empty string, not as unset; clap treated that as a
@@ -185,6 +207,7 @@ Capture-rate honesty for the H.264 encoder, H.264 on by default, configurable
 JPEG quality, and capture-loop resilience. Wire format is unchanged from 2.8.0.
 
 ### Added
+
 - Dropped-frame counters. Frames discarded because an encoder channel was
   full were previously invisible -- the discard arm was empty -- so an
   operator could not tell a captured frame from a discarded one, or know
@@ -196,6 +219,7 @@ JPEG quality, and capture-loop resilience. Wire format is unchanged from 2.8.0.
   set will fill the filesystem; that is now stated (EDGEAI-1403).
 
 ### Changed
+
 - The H.264 frame queue holds three frames instead of one. This is not
   what fixed the dropped frames above, and it changes nothing while the
   encoder keeps up -- the queue stays empty and latency is unchanged. It
@@ -219,6 +243,7 @@ JPEG quality, and capture-loop resilience. Wire format is unchanged from 2.8.0.
   artifact generation.
 
 ### Fixed
+
 - The H.264 encoder is now told the frame rate the camera is actually
   configured for, read from the driver with `VIDIOC_G_PARM`, instead of a
   hardcoded 30. On a 1080p60 sensor the encoder was being told half the
@@ -273,6 +298,7 @@ layout. Consumers must subscribe to `{hostname}/camera/…` and
 `{hostname}/tf_static`, and parse `CameraFrame` as Header + seq + Tensor.
 
 ### Changed
+
 - Document that `MIRROR=both` (vflip+hflip) is required by default for the
   upside-down Maivin/Raivin sensor mount.
 - Set the Zenoh session namespace to the system hostname and drop the `rt/`
@@ -296,6 +322,7 @@ layout. Consumers must subscribe to `{hostname}/camera/…` and
   `dma-buf` 0.5.0).
 
 ### Removed
+
 - Default key expressions no longer use the `rt/` prefix. Subscribe to
   `{hostname}/camera/…` and `{hostname}/tf_static` instead of
   `rt/camera/…` and `rt/tf_static`.
@@ -312,6 +339,7 @@ migrate to `edgefirst-schemas` 3.1 and subscribe to `camera/frame` to
 ingest camera data from this release forward.
 
 ### Added
+
 - Publish `edgefirst_msgs/CameraFrame` on the new `camera/frame` topic
   (note: no `rt/` prefix per the schemas 3.1 convention for newly
   introduced topics). Each frame carries the V4L2 sequence counter via
@@ -345,6 +373,7 @@ ingest camera data from this release forward.
   schema and the power-loss design rationale.
 
 ### Changed
+
 - Bumped `videostream` dependency from 2.4.0 to 2.5.1 for the sequence
   counter and colorimetry accessors (new in 2.5) and MPLANE V4L2
   decoder support (new in 2.5.1) needed for the i.MX 95 Wave6 VPU.
@@ -356,6 +385,7 @@ ingest camera data from this release forward.
   (previously pulled in transitively via `serde_json`).
 
 ### Removed
+
 - **Breaking**: `--dma-topic` CLI argument and the `rt/camera/dma`
   topic. `DmaBuffer` is deprecated in schemas 3.1 and will be removed
   in 4.0; rather than dual-publish, the producer cuts over cleanly to
@@ -364,6 +394,7 @@ ingest camera data from this release forward.
   continue receiving camera data.
 
 ### Known limitations
+
 - Multi-fd / non-contiguous plane publishing is not yet supported;
   `CameraFrame` is emitted with a single `CameraPlane` entry covering
   the whole dma-buf. For NV12/YU12 on contiguous drivers (current i.MX
@@ -389,6 +420,7 @@ ingest camera data from this release forward.
 ## [2.6.1] - 2026-04-22
 
 ### Fixed
+
 - `rt/camera/dma` now publishes `DmaBuffer.stride` as the exact
   V4L2-negotiated bytes-per-line reported by the driver (plane 0), via
   the new `CameraBuffer::bytes_per_line()` accessor in videostream
@@ -404,12 +436,14 @@ ingest camera data from this release forward.
   timing instead of falling back to recorder receive time.
 
 ### Changed
+
 - Bumped `videostream` dependency from 2.1.4 to 2.4.0 for the
   `CameraBuffer::bytes_per_line()` accessor.
 
 ## [2.6.0] - 2026-03-19
 
 ### Changed
+
 - Use CLOCK_REALTIME for ROS2 Header stamps instead of CLOCK_MONOTONIC,
   matching ROS2 conventions (EDGEAI-1131)
 - Convert V4L2 monotonic timestamps to wall-clock time via cached
@@ -419,6 +453,7 @@ ingest camera data from this release forward.
   version-aware dispatch
 
 ### Fixed
+
 - NV12 plane offsets: correctly set planes[1] for UV data and
   clear unused planes[2] (MVN2-164)
 - Y2038 overflow handling for ROS2 timestamps (EDGEAI-1131)
@@ -427,6 +462,7 @@ ingest camera data from this release forward.
   panicking with todo!() (MVN2-164)
 
 ### Removed
+
 - Local g2d-sys/ workspace crate (replaced by crates.io dependency)
 - ImageManager::g2d_buf_fd() (g2d_buf_export_fd not available in
   crates.io g2d-sys)
@@ -434,11 +470,13 @@ ingest camera data from this release forward.
 ## [2.5.1] - 2026-03-02
 
 ### Fixed
+
 - Handle empty string environment variables in `camera.default` configuration
   (e.g., `CAM_INFO_PATH=""`, `CONNECT=""`, `LISTEN=""`) which caused the service
   to crash with "a value is required for '--cam-info-path'" on startup
 
 ### Changed
+
 - Removed nightly-only options from `rustfmt.toml` so `cargo fmt` works with
   stable Rust toolchain
 - Simplified Makefile format target to use `cargo fmt` directly
@@ -446,16 +484,19 @@ ingest camera data from this release forward.
 ## [2.5.0] - 2026-02-26
 
 ### Changed
+
 - Shortened environment variable names from `EDGEFIRST_CAMERA_*` prefix to direct names
   (e.g., `CAMERA`, `H264`, `JPEG`, `STREAM_SIZE`, `MODE`) for simpler systemd and shell configuration
 
 ### Added
+
 - Complete `camera.default` configuration reference file for systemd EnvironmentFile usage
 - Published `camera.default` as a release artifact alongside platform binaries
 
 ## [2.4.0] - 2026-01-30
 
 ### Changed
+
 - Migrated repository from Bitbucket to GitHub (EdgeFirstAI/camera)
 - Updated all documentation to reference GitHub URLs
 - Renamed project to EdgeFirst Camera
@@ -470,6 +511,7 @@ ingest camera data from this release forward.
 - CI: Added native aarch64 testing on `ubuntu-22.04-arm` runner
 
 ### Added
+
 - Complete GitHub Actions CI/CD workflows (test, build, SBOM, release)
 - GitHub issue templates (bug report, feature request, hardware compatibility)
 - Pull request template with comprehensive checklist
@@ -483,6 +525,7 @@ ingest camera data from this release forward.
 - CI: Coverage collection from on-target hardware tests
 
 ### Fixed
+
 - Handle EINTR (Interrupted system call) during camera read gracefully
 - Improved error propagation during shutdown sequence
 - License compliance: All dependencies now Apache-2.0/MIT/EPL-2.0 compatible
@@ -491,91 +534,108 @@ ingest camera data from this release forward.
 ## [2.3.1] - 2025-10-14
 
 ### Fixed
+
 - Fixed issues with 4K H.264 tile encoding (EDGEAI-717)
 
 ## [2.3.0] - 2025-09-19
 
 ### Added
+
 - 4K H.264 camera support with automatic tiling (EDGEAI-715)
 - Splits 3840x2160 video into 4× 1920x1080 tiles for hardware encoder
 - Frame rate capping at 15 FPS for tiled streams
 
 ### Changed
+
 - Updated dependencies (clippy and formatting fixes)
 - G2D-based tile processing for efficient hardware acceleration
 
 ## [2.2.3] - 2025-05-21
 
 ### Changed
+
 - Changed image dimensions to use u32 instead of i32 (EDGEAI-635)
 - Removed incorrect comments in g2d-sys
 
 ### Added
+
 - Memory-mapped image support
 - G2D updates from maivin-replay integration
 
 ## [2.2.2] - 2025-05-13
 
 ### Changed
+
 - Updated deepview/rust container with videostream installed
 - Build system improvements
 
 ## [2.2.1] - 2025-05-10
 
 ### Changed
+
 - Updated dependencies to latest versions
 
 ## [2.2.0] - 2025-02-24
 
 ### Changed
+
 - Upgraded to Rust 1.84.1
 - Bitbucket Pipelines updates
 
 ## [2.1.5] - 2025-01-25
 
 ### Fixed
+
 - Disabled Sonar audit temporarily until upstream issues resolved (EDGEAI-428)
 
 ## [2.1.4] - 2024-11-27
 
 ### Changed
+
 - Updates from EDGEAI-196 work
 
 ## [2.1.3] - 2024-08-30
 
 ### Changed
+
 - Updates from RVN-291 work
 
 ## [2.1.2] - 2024-05-15
 
 ### Changed
+
 - Use monotonic time for camera info topic publishing
 - Improved timestamp consistency
 
 ## [2.1.1] - 2024-05-04
 
 ### Added
+
 - H.264 bitrate control through environment variable
 - Allows runtime configuration without recompilation
 
 ## [2.1.0] - 2024-05-03
 
 ### Changed
+
 - Applied Clippy suggestions for code quality improvements
 
 ## [2.0.8] - 2024-03-07
 
 ### Changed
+
 - Updates from EDGEAI-171 work
 
 ## [2.0.7] - 2024-03-05
 
 ### Changed
+
 - Updated Cargo dependencies for latest Rust version compatibility
 
 ## [2.0.6] - 2024-03-01
 
 ### Added
+
 - Environment variable control for JPEG streaming
 - Environment variable control for H264 streaming
 - Flexible runtime configuration

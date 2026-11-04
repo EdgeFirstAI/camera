@@ -1,9 +1,11 @@
 # EdgeFirst Camera Configuration
 #
 # This file is loaded by the systemd service as an EnvironmentFile. Every
-# variable here maps to a command-line flag of the same name (lower-case,
-# with dashes replaced by underscores). Command-line flags take precedence
-# over environment variables.
+# variable here, except the two read by other components, maps to a
+# command-line flag of the same name (lower-case, with underscores replaced
+# by dashes). Command-line flags take precedence over environment variables.
+# The exceptions are LIBCAMERA_PIPELINES_MATCH_LIST, which libcamera reads
+# directly, and EDGEFIRST_CODEC_V4L2_ENCODER, which the HAL reads directly.
 #
 # Syntax rules (systemd EnvironmentFile):
 #   - Lines beginning with # or ; are comments.
@@ -16,14 +18,23 @@
 # ---------------------------------------------------------------------------
 # Where frames come from. One of:
 #   /dev/videoN            a V4L2 camera device
+#   libcamera:<id>         a libcamera camera (i.MX 95, Raspberry Pi 5)
 #   file:<name>.h264       a recording made with RECORD, with its <name>.json
 #   mock[:WxH@fps]         synthetic frames, for testing without a camera
+# Run "edgefirst-camera devices" to list the cameras, with their libcamera ids.
 # Leave empty to use CAMERA.
 SOURCE=""
 
 # V4L2 device path for the camera, used when SOURCE is empty. On Maivin boards
 # video3 is typically the ISP output.
 CAMERA="/dev/video3"
+
+# Pins the H.264 encoder to one V4L2 memory-to-memory node. Without it, the HAL
+# opens every /dev/video* node to find an encoder. On a board with fixed
+# devices, set this together with CAMERA. On the Maivin the camera is
+# /dev/video3 and the encoder /dev/video0; its meta layer sets both in
+# camera.service. Read by the HAL, not by this program.
+#EDGEFIRST_CODEC_V4L2_ENCODER="/dev/video0"
 
 # How capture buffers are allocated: "import" this service's contiguous
 # buffers, "export" the driver's own, or "auto" to import and fall back to the
@@ -56,8 +67,9 @@ CAMERA_FPS=""
 #   1080p 1920x1080, 4K 3840x2160.
 # Accepted only when the camera reports that size and rate; otherwise the
 # service fails to start and lists the modes the camera offers. CAMERA_SIZE
-# and CAMERA_FPS win over it when set. The rate-only form (30FPS) is no longer
-# accepted; use CAMERA_FPS. Product images such as Maivin set
+# and CAMERA_FPS win over it when set, with a warning. The 2.x rate-only form
+# (30FPS) is accepted as a deprecated alias for CAMERA_FPS, with a warning.
+# Product images such as Maivin set
 # CAMERA_MODE=1080p30 via a bbappend, not this file.
 CAMERA_MODE=""
 
@@ -106,6 +118,9 @@ STREAM_SIZE="1920 1080"
 # natural orientation. The camera transform (CAM_TF_VEC, CAM_TF_QUAT) and
 # calibration (CAM_INFO_PATH) describe the natural image and must not encode
 # this mount rotation. Mirroring for display belongs in the WebUI view.
+# Set "none" on an upright sensor, for example a Raspberry Pi 5.
+# The i.MX 95 nxp/neo pipeline cannot mirror, so the service mirrors the JPEG
+# and H.264 outputs itself and publishes camera/frame unmirrored.
 # Accepted values: none, horizontal, vertical, both
 MIRROR="both"
 
@@ -140,7 +155,8 @@ H264_FPS="auto"
 # and encodes each independently. The four tile streams are published on
 # separate Zenoh topics (camera/h264/tl, camera/h264/tr, camera/h264/bl,
 # camera/h264/br).
-# Only useful when capture is 3840x2160 or larger.
+# Only useful when capture is 3840x2160 or larger. Tiles turn on automatically
+# for live capture above 1080p, so this is only needed to force them on.
 H264_TILES="false"
 
 # FPS limit applied to tile streams. A lower value than the camera FPS
@@ -158,13 +174,10 @@ JPEG="false"
 # JPEG encoding quality, 1-100. 85 is visually equivalent to 100 for
 # slightly less work.
 #
-# Note that quality is a weak lever on cost. Measured at 1080p30 on a
-# Verdin iMX8MP, enabling JPEG takes the camera process from 27% to 104%
-# CPU, and dropping quality from 100 to 85 recovers only about 3 of those
-# 77 points -- the cost is dominated by the per-frame conversion and DCT,
-# not the entropy coding. If JPEG streaming is too expensive, reduce
-# STREAM_SIZE or turn JPEG off; there is no hardware JPEG encoder on this
-# platform to fall back on.
+# JPEG is compressed in software and quality is a weak lever on its cost. The
+# cost is dominated by the per-frame conversion and the DCT, not the entropy
+# coding. To reduce it, lower STREAM_SIZE or turn JPEG off; there is no
+# hardware JPEG encoder on this platform to fall back on.
 JPEG_QUALITY="85"
 
 # ---------------------------------------------------------------------------

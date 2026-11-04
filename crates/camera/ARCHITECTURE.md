@@ -1,6 +1,6 @@
 # Architecture
 
-The design lives in Confluence, under [EdgeFirst Camera SDK](https://au-zone.atlassian.net/wiki/spaces/EAM/pages/2750545921). This file maps that design onto the crate.
+This file describes the crate's modules, the rules every backend follows, how slots are owned, and each backend. The service built on it is described in the [application architecture](../../ARCHITECTURE.md).
 
 ## Modules
 
@@ -58,7 +58,7 @@ It behaves like an Import backend:
 
 ## The V4L2 backend
 
-`backend/v4l2/` implements design §4.2 over [`edgefirst-v4l2`](https://crates.io/crates/edgefirst-v4l2).
+`backend/v4l2/` is built over [`edgefirst-v4l2`](https://crates.io/crates/edgefirst-v4l2).
 
 | File | Contents |
 |---|---|
@@ -85,7 +85,7 @@ It behaves like an Import backend:
 
 ## The libcamera backend
 
-`backend/libcamera/` (feature `libcamera`, Linux) implements design §4.3 over [`edgefirst-libcamera-sys`](../libcamera-sys), which loads a C shim built for the installed libcamera at run time. Nothing links libcamera, so one binary runs with or without it; without it, `enumerate()` lists no libcamera cameras and opening one is `NotFound`.
+`backend/libcamera/` (feature `libcamera`, Linux) is built over [`edgefirst-libcamera-sys`](../libcamera-sys), which loads a C shim built for the installed libcamera at run time. Nothing links libcamera, so one binary runs with or without it; without it, `enumerate()` lists no libcamera cameras and opening one is `NotFound`.
 
 | File | Contents |
 |---|---|
@@ -102,7 +102,7 @@ It behaves like an Import backend:
 
 **Controls.** The `ControlSet` comes from the camera's `ControlInfoMap` after configuration: `FrameDurationLimits` as `FrameRate`, `ExposureTime` as `Exposure` (µs), `AnalogueGain` as `Gain` (a `Float` multiplier) and `ColourTemperature` as `WhiteBalance`. Values outside the range are clamped and reported as `Clamped`; a control the camera lacks is `Unsupported(Camera)`. Manual exposure and gain use `ExposureTimeMode` and `AnalogueGainMode` where the pipeline has them and `AeEnable` elsewhere. Manual white balance needs a settable colour temperature; neo takes only `ColourGains`, which would need a calibration, so it is reported unsupported.
 
-**Frame rate.** A requested rate is sent as `FrameDurationLimits`, but some pipelines ignore it (neo runs the OS08A20 at 60 fps), and neo's `FrameDuration` metadata does not match its frame interval either (15.97 ms at 60 fps). `config().frame_rate` is therefore measured from sensor timestamps: from the first two frames at `start()`, then from the median of the first ten intervals, which also become the period for drop counting. A delivered rate more than 1 % from the request is logged.
+**Frame rate.** A requested rate is sent as `FrameDurationLimits`, but some pipelines ignore it (neo runs the OS08A20 at 60 fps), and neo's `FrameDuration` metadata does not match its frame interval either (15.97 ms at 60 fps). `config().frame_rate` is the rate the pipeline's `FrameDuration` metadata reports, and drops are counted against it. `Camera::measured_frame_rate()` reports separately the rate measured from sensor timestamps, after the first frames of a start. A delivered rate that differs from the one `config()` reports is logged, so a pipeline that ignores or misreports the request shows as a difference between the two.
 
 **Timestamps.** `SensorTimestamp`, which the pipelines copy from the capture node's V4L2 buffer timestamp: `CLOCK_MONOTONIC`, at frame start on the RPi receivers (`rp1-cfe`, `unicam`) and at frame end elsewhere. The capture drivers come from `properties::SystemDevices` through `/sys/dev/char`.
 
@@ -134,4 +134,4 @@ The sidecar is the public `Sidecar` (`sidecar.rs`, feature `file`), which record
 
 **Damage.** A unit the decoder rejects is skipped with a warning and counted in `stats().errors`; a picture the decoder reports as damaged is counted and not delivered, its units going out with the next frame. After 30 rejected units in a row the decoder is taken to have failed (`ErrorKind::Backend`).
 
-**Platforms.** Decoding is V4L2 memory-to-memory only in phase 1, so playback runs on i.MX targets; elsewhere `open()` fails with `NotFound` naming the decoder.
+**Platforms.** Decoding is currently V4L2 memory-to-memory only, so playback runs on i.MX targets; elsewhere `open()` fails with `NotFound` naming the decoder.
