@@ -31,7 +31,28 @@ impl FromStr for CameraMode {
     type Err = String;
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
-        parse_camera_mode(raw)
+        match parse_mode_setting(raw)? {
+            ModeSetting::Mode(mode) => Ok(mode),
+            ModeSetting::Rate(fps) => Err(format!(
+                "camera mode '{raw}' sets only a frame rate; use CAMERA_FPS={fps}"
+            )),
+        }
+    }
+}
+
+/// A `CAMERA_MODE` value: a named mode, or the frame rate alone (`30FPS`),
+/// the 2.x form kept as a deprecated alias for `CAMERA_FPS`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModeSetting {
+    Mode(CameraMode),
+    Rate(u32),
+}
+
+impl FromStr for ModeSetting {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        parse_mode_setting(raw)
     }
 }
 
@@ -49,20 +70,16 @@ fn parse_fps(digits: &str) -> Result<u32, String> {
 }
 
 fn named_size(token: &str) -> Result<(u32, u32), String> {
-    match token {
-        "vga" => Ok((640, 480)),
-        "wvga" => Ok((800, 480)),
-        "540p" => Ok((960, 540)),
-        "720p" => Ok((1280, 720)),
-        "1080p" => Ok((1920, 1080)),
-        "4k" => Ok((3840, 2160)),
-        other => Err(format!(
-            "unknown camera size '{other}'; expected VGA, WVGA, 540p, 720p, 1080p, or 4K"
-        )),
-    }
+    edgefirst_camera::named_size(token).ok_or_else(|| {
+        let names: Vec<_> = edgefirst_camera::size_names().collect();
+        format!(
+            "unknown camera size '{token}'; expected one of {}",
+            names.join(", ")
+        )
+    })
 }
 
-fn parse_camera_mode(raw: &str) -> Result<CameraMode, String> {
+fn parse_mode_setting(raw: &str) -> Result<ModeSetting, String> {
     let s = raw.trim();
     if s.is_empty() {
         return Err("camera mode must not be empty".into());
@@ -71,10 +88,7 @@ fn parse_camera_mode(raw: &str) -> Result<CameraMode, String> {
 
     if let Some(fps) = lower.strip_suffix("fps") {
         if !fps.is_empty() && fps.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(format!(
-                "camera mode '{raw}' sets only a frame rate, which is no longer accepted; \
-                 use CAMERA_FPS={fps} (--camera-fps {fps})"
-            ));
+            return Ok(ModeSetting::Rate(parse_fps(fps)?));
         }
     }
 
@@ -94,10 +108,10 @@ fn parse_camera_mode(raw: &str) -> Result<CameraMode, String> {
         ));
     }
 
-    Ok(CameraMode {
+    Ok(ModeSetting::Mode(CameraMode {
         size: named_size(&lower[..fps_start])?,
         fps: parse_fps(&lower[fps_start..])?,
-    })
+    }))
 }
 
 /// A camera control setting: `auto`, or a fixed value.
@@ -268,9 +282,10 @@ pub struct CaptureArgs {
 
     /// Capture mode shorthand (`1080p30`): `--camera-size` plus
     /// `--camera-fps`, accepted only when the camera reports the mode.
-    /// Explicit `--camera-size` and `--camera-fps` win over it.
+    /// Explicit `--camera-size` and `--camera-fps` win over it. A rate
+    /// alone (`30FPS`) is a deprecated alias for `--camera-fps`.
     #[arg(long, env = "CAMERA_MODE")]
-    pub camera_mode: Option<CameraMode>,
+    pub camera_mode: Option<ModeSetting>,
 
     /// Number of capture buffers (2-32).
     ///
@@ -284,7 +299,9 @@ pub struct CaptureArgs {
         long,
         env = "CAMERA_BUFFERS",
         default_value_t = 4,
-        value_parser = clap::value_parser!(u32).range(2..=32)
+        value_parser = clap::value_parser!(u32).range(
+            *edgefirst_camera::POOL_DEPTH.start() as i64..=*edgefirst_camera::POOL_DEPTH.end() as i64
+        )
     )]
     pub camera_buffers: u32,
 
@@ -388,9 +405,7 @@ pub struct Args {
     #[arg(long, env = "REPLAY", hide = true, conflicts_with = "source")]
     pub replay: Option<PathBuf>,
 
-    /// Zenoh topic for multi-plane camera frame (edgefirst_msgs/CameraFrame).
-    /// Supersedes `--dma-topic` from 2.6.x. The new topic drops the `rt/`
-    /// prefix per the schemas 3.1 convention for newly introduced topics.
+    /// Zenoh topic for multi-plane camera frame (edgefirst_msgs/CameraFrame)
     #[arg(long, env = "FRAME_TOPIC", default_value = "camera/frame")]
     pub frame_topic: String,
 
@@ -408,11 +423,9 @@ pub struct Args {
 
     /// JPEG encoding quality (1-100)
     ///
-    /// Was hardcoded at 100. 85 is visually equivalent for slightly less
-    /// work, but quality is a weak lever on cost: measured at 1080p30 on
-    /// a Verdin iMX8MP, enabling JPEG takes this process from 27% to 104%
-    /// CPU and 100 -> 85 recovers only ~3 of those 77 points. The cost is
-    /// the per-frame conversion and DCT, not the entropy coding.
+    /// Quality has little effect on cost, which is the per-frame
+    /// conversion and DCT; lower `--stream-size` or turn JPEG off to save
+    /// CPU.
     #[arg(
         long,
         env = "JPEG_QUALITY",
@@ -421,14 +434,10 @@ pub struct Args {
     )]
     pub jpeg_quality: u8,
 
-    /// Enable H.264 video streaming output
+    /// Enable H.264 video streaming output (default on)
     ///
-    /// On by default. H.264 is the stream every Maivin consumer expects,
-    /// and defaulting it off meant a bare `edgefirst-camera` published no
-    /// video at all -- invisible to the service, which sets H264 in
-    /// /etc/default/camera, but a repeated surprise when running the
-    /// binary by hand. Takes an optional value (`--h264 false`) so it can
-    /// still be turned off from the command line or the environment.
+    /// Takes an optional value: `--h264 false` (`H264=false`) turns it
+    /// off.
     #[arg(
         long,
         env = "H264",
@@ -546,7 +555,24 @@ impl Args {
     pub fn explicit_fps(&self) -> Option<f64> {
         self.capture
             .camera_fps
+            .or_else(|| self.rate_only_mode().map(f64::from))
             .or_else(|| self.replay_fps.filter(|_| self.is_file_source()))
+    }
+
+    /// The named `CAMERA_MODE`, if one is set.
+    pub fn named_mode(&self) -> Option<&CameraMode> {
+        match &self.capture.camera_mode {
+            Some(ModeSetting::Mode(mode)) => Some(mode),
+            _ => None,
+        }
+    }
+
+    /// The rate of a rate-only `CAMERA_MODE` (`30FPS`), if one is set.
+    pub fn rate_only_mode(&self) -> Option<u32> {
+        match self.capture.camera_mode {
+            Some(ModeSetting::Rate(fps)) => Some(fps),
+            _ => None,
+        }
     }
 }
 
@@ -977,11 +1003,27 @@ mod tests {
     }
 
     #[test]
-    fn fps_only_modes_point_to_camera_fps() {
-        for raw in ["30FPS", "30fps", " 60FPS "] {
+    fn fps_only_modes_are_a_camera_fps_alias() {
+        for (raw, fps) in [("30FPS", 30), ("30fps", 30), (" 60FPS ", 60)] {
+            assert_eq!(
+                ModeSetting::from_str(raw),
+                Ok(ModeSetting::Rate(fps)),
+                "{raw}"
+            );
             let err = CameraMode::from_str(raw).unwrap_err();
             assert!(err.contains("CAMERA_FPS"), "{raw}: {err}");
         }
+        let args = Args::parse_from(["edgefirst-camera", "--camera-mode", "15FPS"]);
+        assert_eq!(args.explicit_fps(), Some(15.0));
+        assert_eq!(args.named_mode(), None);
+        let args = Args::parse_from([
+            "edgefirst-camera",
+            "--camera-mode",
+            "15FPS",
+            "--camera-fps",
+            "10",
+        ]);
+        assert_eq!(args.explicit_fps(), Some(10.0), "CAMERA_FPS wins");
     }
 
     #[test]

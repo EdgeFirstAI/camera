@@ -8,6 +8,7 @@ mod encode;
 mod exit;
 mod jpeg;
 mod messages;
+mod notify;
 mod pipeline;
 mod source;
 
@@ -21,11 +22,10 @@ use std::{
 
 use args::{Args, Command, RecordArgs};
 use clap::Parser;
-use edgefirst_image::ImageProcessor;
 use exit::{Failure, Status};
 use messages::{CameraInfoFields, TfStaticFields};
 use pipeline::Settings;
-use source::{Request, SourceKind};
+use source::Request;
 use tracing::{info, level_filters::LevelFilter, warn};
 use tracing_subscriber::{layer::SubscriberExt as _, EnvFilter, Layer as _, Registry};
 use zenoh::{Session, Wait};
@@ -94,12 +94,19 @@ fn serve(args: Args) -> Result<(), Box<dyn Error>> {
     // Threads inherit the mask, so this runs before any is spawned.
     shutdown_on_signals()?;
 
-    // The runtime serves the tokio console only. Capture runs on this
-    // thread, outside it: the image crate's GL converter blocks, which a
-    // runtime thread may not.
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
+    // The runtime serves the tokio console only, so it exists only with
+    // one. Capture runs on this thread, outside it: the image crate's GL
+    // converter blocks, which a runtime thread may not.
+    let runtime = if args.tokio_console {
+        Some(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()?,
+        )
+    } else {
+        None
+    };
 
     args.tracy.then(tracy_client::Client::start);
     #[cfg(target_os = "linux")]
@@ -115,7 +122,7 @@ fn serve(args: Args) -> Result<(), Box<dyn Error>> {
             .pretty()
             .with_filter(get_env_filter())
     });
-    let (console, console_server) = if args.tokio_console {
+    let (console, console_server) = if let Some(runtime) = &runtime {
         let (console, server) = runtime.block_on(async {
             console_subscriber::ConsoleLayer::builder()
                 .with_default_env()
@@ -135,7 +142,7 @@ fn serve(args: Args) -> Result<(), Box<dyn Error>> {
         .with(tracy);
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
     tracing_log::LogTracer::init()?;
-    if let Some(server) = console_server {
+    if let (Some(server), Some(runtime)) = (console_server, &runtime) {
         runtime.spawn(async move {
             if let Err(e) = server.serve().await {
                 warn!("tokio console: {e}");
@@ -197,14 +204,11 @@ fn run(
     session: &Session,
     adjust: impl FnOnce(&mut Settings),
 ) -> Result<(), Box<dyn Error>> {
-    let request = Request::from_args(args, source::probe_camera)?;
-    let processor = match request.kind {
-        SourceKind::File => None,
-        _ => ImageProcessor::new()
-            .map_err(|e| warn!("image crate unavailable for the capture pool: {e}"))
-            .ok(),
+    let Some(request) = Request::from_args(args, |spec| source::probe_ready(spec, &SHUTDOWN))?
+    else {
+        return Ok(());
     };
-    let Some(opened) = source::open(&request, processor.as_ref(), &SHUTDOWN)? else {
+    let Some(opened) = source::open(&request, &SHUTDOWN)? else {
         return Ok(());
     };
 
@@ -212,7 +216,7 @@ fn run(
     adjust(&mut settings);
     // A camera that stops delivering (an ISP daemon restart on vvcam, a
     // USB reset) is opened again in this process, with the startup retry.
-    let mut reopen = || source::open(&request, processor.as_ref(), &SHUTDOWN);
+    let mut reopen = || source::open(&request, &SHUTDOWN);
     let reopen: Option<pipeline::Reopen<'_>> = request.kind.is_camera().then_some(&mut reopen);
     pipeline::run(
         opened,
@@ -432,7 +436,7 @@ mod tests {
     #[test]
     fn a_recordings_metadata_wins() {
         let a = args(&["--camera-frame-id", "live"]);
-        let r = Request::from_args(&a, |_| unreachable!()).unwrap();
+        let r = Request::from_args(&a, |_| unreachable!()).unwrap().unwrap();
         let extras = r#"{"tf_static": {"base_frame_id": "b", "child_frame_id": "rec",
             "translation": [1, 2, 3], "rotation": [0, 0, 0, 1]}}"#;
         let s = settings(&a, &r, Some(extras));

@@ -14,7 +14,6 @@ use edgefirst_camera::{
     Applied, Backend, BufferPool, Camera, CameraBuilder, CameraDescriptor, Control, ErrorKind,
     Exposure, FormatInfo, Gain, MemoryStrategy, Mirror, Rates, Sizes, StreamConfig, WhiteBalance,
 };
-use edgefirst_image::ImageProcessor;
 use edgefirst_tensor::{CpuAccess, DType, ImageDesc, PixelFormat, TensorDyn, TensorMemory};
 use tracing::{info, warn};
 
@@ -27,12 +26,12 @@ use crate::{
 /// the ISP daemon has not started serving the device, or delivers no first
 /// frame yet.
 ///
-/// Deliberately small. camera.service bounds its own restart loop with
-/// StartLimitIntervalSec=60 / StartLimitBurst=5 so that a camera which
-/// cannot start lands in "failed", where it is visible, rather than
-/// hammering the ISP. Every second spent retrying in-process is a second
-/// that window cannot account for, and a long enough budget would stop five
-/// starts from ever fitting inside it.
+/// Deliberately small. A service manager that bounds its restarts (the
+/// Maivin's camera.service allows five starts in 420 s) needs each failed
+/// start to be short, so a camera that cannot start lands in "failed",
+/// where it is visible, rather than hammering the ISP. A vvcam ISP that
+/// still refuses after a few attempts is wedged until its daemon restarts,
+/// which only a new start of the service does.
 pub(crate) const ISP_READY_BUDGET: Duration = Duration::from_secs(15);
 
 /// How long to wait between attempts.
@@ -52,9 +51,6 @@ const _: () = assert!(ISP_READY_ATTEMPT_LIMIT >= 2);
 /// Capture buffers added for the encoders, which hold a frame's buffer
 /// while it waits for them and while they read it.
 pub(crate) const ENCODER_BUFFERS: usize = 2;
-
-/// The SDK's largest pool.
-const MAX_BUFFERS: usize = 32;
 
 /// The format requested from camera devices.
 pub(crate) const CAPTURE_FORMAT: PixelFormat = PixelFormat::Yuyv;
@@ -123,16 +119,25 @@ pub(crate) struct Request {
 impl Request {
     /// The request `args` describe. A `CAMERA_MODE` is checked against the
     /// modes `probe` reports and expanded; explicit size and rate win over
-    /// it.
+    /// it. `None` when `probe` returns `None`: a shutdown arrived while it
+    /// waited for the camera.
     pub(crate) fn from_args(
         args: &Args,
-        probe: impl FnOnce(&str) -> edgefirst_camera::Result<Vec<FormatInfo>>,
-    ) -> Result<Self, Box<dyn Error>> {
+        probe: impl FnOnce(&str) -> Result<Option<Vec<FormatInfo>>, Box<dyn Error>>,
+    ) -> Result<Option<Self>, Box<dyn Error>> {
         let spec = args.source_spec();
         let kind = SourceKind::of(&spec);
         let mut size = args.explicit_size();
         let mut fps = args.explicit_fps();
-        if let Some(mode) = &args.capture.camera_mode {
+        if let Some(fps) = args.rate_only_mode() {
+            match args.capture.camera_fps {
+                Some(f) if f != f64::from(fps) => {
+                    warn!("CAMERA_FPS {f} overrides CAMERA_MODE {fps}FPS")
+                }
+                _ => warn!("CAMERA_MODE={fps}FPS is deprecated; use CAMERA_FPS={fps}"),
+            }
+        }
+        if let Some(mode) = args.named_mode() {
             if !kind.is_camera() {
                 return Err(Failure::new(
                     Status::InvalidArgs,
@@ -143,12 +148,15 @@ impl Request {
                 )
                 .into());
             }
-            let formats = probe(&spec).map_err(|e| {
+            let Some(formats) = probe(&spec).map_err(|e| {
                 Failure::of(
-                    &e,
+                    &*e,
                     format!("cannot read the modes of {spec} for CAMERA_MODE: {e}"),
                 )
-            })?;
+            })?
+            else {
+                return Ok(None);
+            };
             check_mode(mode, &formats).map_err(|m| Failure::new(Status::InvalidArgs, m))?;
             let mode_fps = f64::from(mode.fps);
             match size {
@@ -177,7 +185,7 @@ impl Request {
                 warn!("CAMERA_FPS {c} overrides REPLAY_FPS {r}");
             }
         }
-        Ok(Self {
+        Ok(Some(Self {
             // Packed YUV is what the encoders and converters take directly
             // on the i.MX 8M Plus; a device keeps its last format otherwise.
             format: match kind {
@@ -206,7 +214,7 @@ impl Request {
             },
             looping: args.replay_loop,
             controls: controls(args),
-        })
+        }))
     }
 
     /// The device path, for messages.
@@ -220,7 +228,7 @@ impl Request {
 fn pool_depth(args: &Args) -> usize {
     let buffers = args.capture.camera_buffers as usize;
     if args.h264 || args.h264_tiles || args.jpeg {
-        (buffers + ENCODER_BUFFERS).min(MAX_BUFFERS)
+        (buffers + ENCODER_BUFFERS).min(*edgefirst_camera::POOL_DEPTH.end())
     } else {
         buffers
     }
@@ -248,6 +256,19 @@ fn controls(args: &Args) -> Vec<Control> {
         }));
     }
     out
+}
+
+/// Probes the modes of a camera spec, retrying while the camera is not
+/// ready as [`open`] does: the ISP may still be starting. `None` when a
+/// shutdown arrived first.
+pub(crate) fn probe_ready(
+    spec: &str,
+    shutdown: &AtomicBool,
+) -> Result<Option<Vec<FormatInfo>>, Box<dyn Error>> {
+    let deadline = Instant::now() + ISP_READY_BUDGET;
+    retry_while_not_ready(spec, deadline, ISP_READY_DELAY, shutdown, || {
+        probe_camera(spec)
+    })
 }
 
 /// Probes the modes of a camera spec: a V4L2 device path or
@@ -314,20 +335,16 @@ pub(crate) fn check_mode(mode: &CameraMode, formats: &[FormatInfo]) -> Result<()
 /// reserved for a camera that genuinely cannot start.
 pub(crate) fn open(
     request: &Request,
-    processor: Option<&ImageProcessor>,
     shutdown: &AtomicBool,
 ) -> Result<Option<Opened>, Box<dyn Error>> {
     let deadline = Instant::now() + ISP_READY_BUDGET;
     retry_while_not_ready(request.name(), deadline, ISP_READY_DELAY, shutdown, || {
-        open_once(request, processor)
+        open_once(request)
     })
 }
 
 /// One attempt: open, mirror, provide the pool, start.
-fn open_once(
-    request: &Request,
-    processor: Option<&ImageProcessor>,
-) -> edgefirst_camera::Result<Opened> {
+fn open_once(request: &Request) -> edgefirst_camera::Result<Opened> {
     let builder = |format: Option<PixelFormat>| -> edgefirst_camera::Result<CameraBuilder> {
         let mut b = CameraBuilder::source(&request.spec)?
             .buffers(request.buffers)
@@ -381,14 +398,12 @@ fn open_once(
 
     let contiguous = request.kind == SourceKind::Device;
     if request.kind != SourceKind::File && request.memory != MemoryStrategy::Export {
-        if let Some(processor) = processor {
-            match allocate_pool(processor, camera.config(), contiguous) {
-                Ok(pool) => camera.set_buffers(BufferPool::Provided(pool))?,
-                Err(e) if contiguous => {
-                    return Err(contiguous_unavailable(camera.config(), &e.to_string()))
-                }
-                Err(e) => warn!("cannot allocate the capture pool, using the camera's: {e}"),
+        match allocate_pool(camera.config(), contiguous) {
+            Ok(pool) => camera.set_buffers(BufferPool::Provided(pool))?,
+            Err(e) if contiguous => {
+                return Err(contiguous_unavailable(camera.config(), &e.to_string()))
             }
+            Err(e) => warn!("cannot allocate the capture pool, using the camera's: {e}"),
         }
     }
 
@@ -428,13 +443,13 @@ fn open_once(
     })
 }
 
-/// Allocates the capture pool for `config` through the image crate, so its
-/// buffers suit the converters. `contiguous` asks for CMA memory only.
+/// Allocates the capture pool for `config`, with full CPU access so the
+/// converters and subscribers can read it. `contiguous` asks for CMA memory
+/// only, at the pitch the image crate's converters use.
 fn allocate_pool(
-    processor: &ImageProcessor,
     config: &StreamConfig,
     contiguous: bool,
-) -> Result<Vec<TensorDyn>, edgefirst_image::Error> {
+) -> Result<Vec<TensorDyn>, edgefirst_tensor::Error> {
     let mut desc = ImageDesc::new(
         config.width as usize,
         config.height as usize,
@@ -448,7 +463,7 @@ fn allocate_pool(
             .with_contiguous(true);
     }
     (0..config.buffer_count.max(1))
-        .map(|_| processor.create_image_desc(&desc))
+        .map(|_| TensorDyn::image_desc(&desc))
         .collect()
 }
 
@@ -504,6 +519,9 @@ where
             return Ok(None);
         }
 
+        // Each attempt is progress: a camera reopened after an ISP restart
+        // can take several, and the watchdog must not fire meanwhile.
+        crate::notify::watchdog();
         attempt += 1;
         match open_once() {
             Ok(opened) => {
@@ -646,7 +664,7 @@ mod tests {
 
     fn request(argv: &[&str]) -> Result<Request, Box<dyn Error>> {
         let args = Args::parse_from([&["edgefirst-camera"][..], argv].concat());
-        Request::from_args(&args, |_| Ok(vvcam_formats()))
+        Request::from_args(&args, |_| Ok(Some(vvcam_formats()))).map(|r| r.expect("no shutdown"))
     }
 
     #[test]
@@ -697,7 +715,9 @@ mod tests {
     #[test]
     fn a_mode_is_probed_only_when_set() {
         let args = Args::parse_from(["edgefirst-camera"]);
-        let r = Request::from_args(&args, |_| panic!("probed without CAMERA_MODE")).unwrap();
+        let r = Request::from_args(&args, |_| panic!("probed without CAMERA_MODE"))
+            .unwrap()
+            .unwrap();
         assert_eq!((r.size, r.fps), (None, None));
     }
 
@@ -767,9 +787,8 @@ mod tests {
             "false",
         ])
         .unwrap();
-        let processor = ImageProcessor::new().ok();
         let flag = AtomicBool::new(false);
-        let mut opened = open(&r, processor.as_ref(), &flag).unwrap().unwrap();
+        let mut opened = open(&r, &flag).unwrap().unwrap();
         assert_eq!(opened.software_mirror, Some(Mirror::Both));
         let c = opened.camera.config().clone();
         assert_eq!((c.width, c.height, c.buffer_count), (64, 48, 3));

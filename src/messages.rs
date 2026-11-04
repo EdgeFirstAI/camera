@@ -475,9 +475,8 @@ mod tests {
     #[test]
     fn camera_info_fields_degrades_on_non_numeric_camera_matrix_element() {
         // A `camera_matrix` with the right length but a non-numeric
-        // element used to be silently coerced to 0.0, producing a bogus
-        // intrinsics matrix that looked "successfully loaded" and never
-        // triggered the fallback warning.
+        // element is not a calibration: it must fall back with a warning,
+        // not load as a matrix with zeros in it.
         let tmp = std::env::temp_dir();
         let pid = std::process::id();
         let path = tmp.join(format!("edgefirst_cam_info_nan_matrix_{pid}.json"));
@@ -529,10 +528,9 @@ mod tests {
 
     #[test]
     fn camera_info_fields_degrades_on_missing_source_image_dimensions() {
-        // A missing width/height used to be logged as an `error!` and
-        // silently substituted (1920x1080) while still returning `Ok`,
-        // so `from_args` never emitted the fallback warning even though
-        // the calibration was structurally incomplete.
+        // A calibration without its image width and height is incomplete:
+        // it must fall back with a warning rather than load with a guessed
+        // size.
         let tmp = std::env::temp_dir();
         let pid = std::process::id();
         let path = tmp.join(format!("edgefirst_cam_info_no_dims_{pid}.json"));

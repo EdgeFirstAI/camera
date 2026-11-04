@@ -17,7 +17,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Condvar, Mutex,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -41,10 +41,11 @@ use zenoh::{
 
 use crate::{
     args::H264Fps,
-    encode::{self, OpenEncoder, Plan, Stage, TILE_NAMES},
+    encode::{self, OpenEncoder, Plan, Stage, TILES},
     exit::{Failure, Status},
     jpeg::JpegStage,
     messages::{jpeg_msg, sample_timestamp, video_msg, CameraInfoFields, TfStaticFields},
+    notify,
     source::{Opened, SourceKind},
 };
 
@@ -129,6 +130,10 @@ struct Progress {
     measured: bool,
     /// The recording's sidecar, corrected to the measured rate.
     sidecar: Option<SidecarFile>,
+    /// Whether systemd was told the service is ready.
+    ready: bool,
+    /// The encoder reported as stalled, so it is reported once.
+    stalled: Option<&'static str>,
 }
 
 /// A recording's sidecar and the stream it describes.
@@ -285,8 +290,9 @@ pub(crate) fn run(
     }
     let tiles = tiles_enabled(settings.tiles, settings.auto_tiles, &config);
 
-    let mut threads: Vec<JoinHandle<()>> = Vec::new();
-    let mut sinks: Vec<(Sender<Job>, &'static str)> = Vec::new();
+    // Dropped on every return, so an error while the later encoders start
+    // still closes and joins the earlier ones.
+    let mut workers = Workers::default();
 
     let mut sidecar = None;
     let recorder = match &settings.record {
@@ -313,19 +319,21 @@ pub(crate) fn run(
         let (tx, rx) = kanal::bounded(H264_QUEUE);
         let out = Output::new(session, &settings.h264_topic, &settings.frame_id)?;
         let tracy = settings.tracy;
-        threads.push(spawn("h264", move || {
-            run_stage(stage, &rx, out, recorder, tracy)
+        let sink = Sink::new("h264", Queue::Fifo(tx));
+        let heartbeat = Arc::clone(&sink.heartbeat);
+        workers.threads.push(spawn("h264", move || {
+            run_stage(stage, &rx, out, recorder, tracy, &heartbeat)
         })?);
-        sinks.push((tx, "h264"));
+        workers.sinks.push(sink);
     }
 
     if tiles {
         let size = encode::tile_output(config.width, config.height);
         let tile_fps = settings.tile_fps;
-        for (i, name) in TILE_NAMES.iter().enumerate() {
+        for (i, tile) in TILES.iter().enumerate() {
             let limited = tile_fps > 0 && f64::from(tile_fps) < fps;
             let plan = Plan {
-                label: format!("h264/{name}"),
+                label: tile.label.into(),
                 size,
                 region: Some(encode::tile_region(
                     i,
@@ -340,23 +348,31 @@ pub(crate) fn run(
             };
             let stage = Stage::new(plan, &config, open_encoder)?;
             let (tx, rx) = kanal::bounded(H264_QUEUE);
-            let frame_id = format!("{}_{}", settings.frame_id, tile_frame_suffix(i));
+            let frame_id = format!("{}_{}", settings.frame_id, tile.frame_suffix);
             let out = Output::new(session, &settings.tile_topics[i], &frame_id)?;
             let tracy = settings.tracy;
-            threads.push(spawn(&format!("h264_{name}"), move || {
-                run_stage(stage, &rx, out, None, tracy)
-            })?);
-            sinks.push((tx, TILE_SINKS[i]));
+            let sink = Sink::new(tile.label, Queue::Fifo(tx));
+            let heartbeat = Arc::clone(&sink.heartbeat);
+            workers
+                .threads
+                .push(spawn(&format!("h264_{}", tile.name), move || {
+                    run_stage(stage, &rx, out, None, tracy, &heartbeat)
+                })?);
+            workers.sinks.push(sink);
         }
     }
 
     if let Some(quality) = settings.jpeg {
         let stage = JpegStage::new(&config, stream, software_mirror, quality)?;
-        let (tx, rx) = kanal::bounded(JPEG_QUEUE);
+        let (tx, rx) = latest();
         let out = Output::new(session, &settings.jpeg_topic, &settings.frame_id)?;
         let tracy = settings.tracy;
-        threads.push(spawn("jpeg", move || run_jpeg(stage, &rx, out, tracy))?);
-        sinks.push((tx, "jpeg"));
+        let sink = Sink::new("jpeg", Queue::Latest(tx));
+        let heartbeat = Arc::clone(&sink.heartbeat);
+        workers.threads.push(spawn("jpeg", move || {
+            run_jpeg(stage, &rx, out, tracy, &heartbeat)
+        })?);
+        workers.sinks.push(sink);
     }
 
     let forward = if settings.h264 && file {
@@ -388,6 +404,8 @@ pub(crate) fn run(
         deadline: settings.max_duration.map(|d| Instant::now() + d),
         measured: false,
         sidecar,
+        ready: false,
+        stalled: None,
     };
     let mut camera = Some(camera);
     let result = loop {
@@ -400,7 +418,7 @@ pub(crate) fn run(
             settings,
             &config,
             fps,
-            &sinks,
+            &workers.sinks,
             forward.as_ref(),
             &mut progress,
             shutdown,
@@ -438,12 +456,7 @@ pub(crate) fn run(
         }
     };
 
-    drop(sinks);
-    for t in threads {
-        if t.join().is_err() {
-            error!("an encoder thread panicked");
-        }
-    }
+    drop(workers);
     done.store(true, Ordering::SeqCst);
     let _ = tf.join();
     if let Some(mut camera) = camera {
@@ -505,15 +518,6 @@ fn discard_waiting(camera: &mut dyn Camera) {
     }
 }
 
-/// Names of the tile sinks, for drop reports. Static so the hot path does
-/// not allocate a label per frame per tile.
-const TILE_SINKS: [&str; 4] = ["h264/tl", "h264/tr", "h264/bl", "h264/br"];
-
-/// The `frame_id` suffix of tile `i`, as camera 2.x named them.
-fn tile_frame_suffix(i: usize) -> &'static str {
-    ["topleft", "topright", "bottomleft", "bottomright"][i]
-}
-
 /// Tiles are on when requested, and with `auto` above 1080p, where the
 /// main stream is scaled down.
 fn tiles_enabled(requested: bool, auto: bool, config: &StreamConfig) -> bool {
@@ -533,10 +537,215 @@ fn tiles_enabled(requested: bool, auto: bool, config: &StreamConfig) -> bool {
 /// buffer, so the queue stays short; one absorbs encoder jitter.
 const H264_QUEUE: usize = 1;
 
-/// Frames the JPEG channel queues. One keeps the compressor busy: it takes
-/// longer than a frame period, and waiting for the next frame after each
-/// one would round its rate down to every other frame.
-const JPEG_QUEUE: usize = 1;
+/// How long an encoder may go without finishing a frame before the service
+/// stops telling the systemd watchdog it is alive.
+const STAGE_STALL: Duration = Duration::from_secs(10);
+
+/// Consecutive encode failures after which an encoder thread gives up,
+/// which ends the service so systemd restarts it.
+const ENCODE_FAILURE_LIMIT: u32 = 30;
+
+/// Where the capture loop hands frames to one encoder thread.
+struct Sink {
+    name: &'static str,
+    queue: Queue,
+    heartbeat: Arc<Heartbeat>,
+}
+
+enum Queue {
+    /// Frames wait in order; a full queue drops the new frame.
+    Fifo(Sender<Job>),
+    /// The newest frame waits; it replaces one that has not been taken.
+    /// For an encoder slower than the camera, which should always work on
+    /// the newest frame.
+    Latest(LatestSender<Job>),
+}
+
+/// The encoder threads and the sinks that feed them.
+#[derive(Default)]
+struct Workers {
+    sinks: Vec<Sink>,
+    threads: Vec<JoinHandle<()>>,
+}
+
+impl Drop for Workers {
+    /// Closes every sink, so each encoder drains and flushes, then waits
+    /// for them.
+    fn drop(&mut self) {
+        self.sinks.clear();
+        for t in self.threads.drain(..) {
+            if t.join().is_err() {
+                error!("an encoder thread panicked");
+            }
+        }
+    }
+}
+
+/// What became of a frame offered to a sink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Offer {
+    /// Queued.
+    Sent,
+    /// Queued in place of a frame that waited, which is dropped.
+    Replaced,
+    /// Not queued: the queue is full.
+    Dropped,
+    /// The encoder thread is gone.
+    Closed,
+}
+
+impl Sink {
+    fn new(name: &'static str, queue: Queue) -> Self {
+        Self {
+            name,
+            queue,
+            heartbeat: Heartbeat::new(),
+        }
+    }
+
+    fn offer(&self, job: Job) -> Offer {
+        match &self.queue {
+            // kanal reports a full channel as `Ok(false)`; `Err` means the
+            // receiver is gone.
+            Queue::Fifo(tx) => match tx.try_send(job) {
+                Ok(true) => Offer::Sent,
+                Ok(false) => Offer::Dropped,
+                Err(_) => Offer::Closed,
+            },
+            Queue::Latest(tx) => tx.offer(job),
+        }
+    }
+}
+
+/// When an encoder thread last finished with a frame.
+struct Heartbeat(std::sync::atomic::AtomicU64);
+
+impl Heartbeat {
+    fn new() -> Arc<Self> {
+        let h = Arc::new(Self(std::sync::atomic::AtomicU64::new(0)));
+        h.beat();
+        h
+    }
+
+    fn beat(&self) {
+        self.0.store(since_epoch(Instant::now()), Ordering::Relaxed);
+    }
+
+    fn age(&self, now: Instant) -> Duration {
+        Duration::from_millis(since_epoch(now).saturating_sub(self.0.load(Ordering::Relaxed)))
+    }
+}
+
+/// Milliseconds since the first call, for heartbeats.
+fn since_epoch(now: Instant) -> u64 {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let epoch = *EPOCH.get_or_init(Instant::now);
+    now.saturating_duration_since(epoch).as_millis() as u64
+}
+
+/// A one-slot queue whose newest item wins.
+struct Mailbox<T> {
+    slot: Mutex<MailboxSlot<T>>,
+    filled: Condvar,
+}
+
+struct MailboxSlot<T> {
+    item: Option<T>,
+    sender_gone: bool,
+    receiver_gone: bool,
+}
+
+/// The sending end of [`latest`]; dropping it ends the receiver's loop once
+/// the waiting item is taken.
+struct LatestSender<T>(Arc<Mailbox<T>>);
+
+/// The receiving end of [`latest`]; dropping it makes every offer
+/// [`Offer::Closed`].
+struct LatestReceiver<T>(Arc<Mailbox<T>>);
+
+fn latest<T>() -> (LatestSender<T>, LatestReceiver<T>) {
+    let mailbox = Arc::new(Mailbox {
+        slot: Mutex::new(MailboxSlot {
+            item: None,
+            sender_gone: false,
+            receiver_gone: false,
+        }),
+        filled: Condvar::new(),
+    });
+    (LatestSender(Arc::clone(&mailbox)), LatestReceiver(mailbox))
+}
+
+impl<T> Mailbox<T> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, MailboxSlot<T>> {
+        self.slot.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl<T> LatestSender<T> {
+    fn offer(&self, item: T) -> Offer {
+        let mut slot = self.0.lock();
+        if slot.receiver_gone {
+            return Offer::Closed;
+        }
+        let replaced = slot.item.replace(item).is_some();
+        drop(slot);
+        self.0.filled.notify_one();
+        if replaced {
+            Offer::Replaced
+        } else {
+            Offer::Sent
+        }
+    }
+}
+
+impl<T> Drop for LatestSender<T> {
+    fn drop(&mut self) {
+        self.0.lock().sender_gone = true;
+        self.0.filled.notify_one();
+    }
+}
+
+impl<T> LatestReceiver<T> {
+    /// The waiting item, waiting for one; `None` once the sender is gone
+    /// and nothing waits.
+    fn recv(&self) -> Option<T> {
+        let mut slot = self.0.lock();
+        loop {
+            if let Some(item) = slot.item.take() {
+                return Some(item);
+            }
+            if slot.sender_gone {
+                return None;
+            }
+            slot = self.0.filled.wait(slot).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+impl<T> Drop for LatestReceiver<T> {
+    fn drop(&mut self) {
+        let mut slot = self.0.lock();
+        slot.receiver_gone = true;
+        slot.item = None;
+    }
+}
+
+/// The encoder end of a sink.
+trait Inbox {
+    fn next_job(&self) -> Option<Job>;
+}
+
+impl Inbox for Receiver<Job> {
+    fn next_job(&self) -> Option<Job> {
+        self.recv().ok()
+    }
+}
+
+impl Inbox for LatestReceiver<Job> {
+    fn next_job(&self) -> Option<Job> {
+        self.recv()
+    }
+}
 
 fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> Result<JoinHandle<()>, Box<dyn Error>> {
     Ok(thread::Builder::new().name(name.to_string()).spawn(f)?)
@@ -623,7 +832,7 @@ fn capture(
     settings: &Settings,
     config: &StreamConfig,
     fps: f64,
-    sinks: &[(Sender<Job>, &'static str)],
+    sinks: &[Sink],
     forward: Option<&Output>,
     progress: &mut Progress,
     shutdown: &AtomicBool,
@@ -747,10 +956,43 @@ fn capture(
         }
 
         let frame = Arc::new(frame);
-        for (tx, sink) in sinks {
-            record_send_outcome(tx.try_send((Arc::clone(&frame), stamp)), sink, &mut drops);
+        for sink in sinks {
+            let offer = sink.offer((Arc::clone(&frame), stamp));
+            if offer == Offer::Closed {
+                return Err(Failure::new(
+                    Status::Software,
+                    format!("the {} encoder stopped", sink.name),
+                )
+                .into());
+            }
+            drops.record(sink.name, offer);
         }
         drop(frame);
+
+        if !progress.ready {
+            progress.ready = true;
+            notify::ready();
+            notify::status(&format!(
+                "Capturing {}x{} at {fps} fps",
+                config.width, config.height
+            ));
+        }
+        let now = Instant::now();
+        match sinks.iter().find(|s| s.heartbeat.age(now) > STAGE_STALL) {
+            None => {
+                progress.stalled = None;
+                notify::watchdog();
+            }
+            Some(sink) if progress.stalled != Some(sink.name) => {
+                error!(
+                    "the {} encoder has not finished a frame in {:?}",
+                    sink.name,
+                    sink.heartbeat.age(now)
+                );
+                progress.stalled = Some(sink.name);
+            }
+            Some(_) => {}
+        }
 
         let dropped = camera.stats().dropped;
         drops.record_camera(dropped.saturating_sub(lost.unwrap_or(dropped)));
@@ -767,10 +1009,11 @@ fn capture(
 
 fn run_stage(
     mut stage: Stage,
-    rx: &Receiver<Job>,
+    rx: &impl Inbox,
     out: Output,
     mut recorder: Option<BufWriter<File>>,
     tracy: bool,
+    heartbeat: &Heartbeat,
 ) {
     let publish = |au: EncodedFrame, stamp: Time, recorder: &mut Option<BufWriter<File>>| {
         if let Some(w) = recorder.as_mut() {
@@ -783,17 +1026,32 @@ fn run_stage(
         }
         out.video(&au.data, stamp);
     };
-    while let Ok((frame, stamp)) = rx.recv() {
+    let mut failures = 0;
+    while let Some((frame, stamp)) = rx.next_job() {
         if !stage.accept(Instant::now()) {
+            heartbeat.beat();
             continue;
         }
         let span = info_span!("h264", stage = stage.label());
         match span.in_scope(|| stage.encode(frame, stamp)) {
-            Ok(aus) => aus
-                .into_iter()
-                .for_each(|(au, stamp)| publish(au, stamp, &mut recorder)),
-            Err(e) => error!("{} encode failed: {e}", stage.label()),
+            Ok(aus) => {
+                failures = 0;
+                aus.into_iter()
+                    .for_each(|(au, stamp)| publish(au, stamp, &mut recorder));
+            }
+            Err(e) => {
+                failures += 1;
+                error!("{} encode failed: {e}", stage.label());
+                if failures >= ENCODE_FAILURE_LIMIT {
+                    error!(
+                        "{}: {failures} encodes failed in a row; stopping the encoder",
+                        stage.label()
+                    );
+                    break;
+                }
+            }
         }
+        heartbeat.beat();
         if tracy {
             secondary_frame_mark!("h264");
         }
@@ -811,12 +1069,29 @@ fn run_stage(
     }
 }
 
-fn run_jpeg(mut stage: JpegStage, rx: &Receiver<Job>, out: Output, tracy: bool) {
-    while let Ok((frame, stamp)) = rx.recv() {
-        let jpeg = match info_span!("jpeg").in_scope(|| stage.encode(frame)) {
-            Ok(jpeg) => jpeg,
+fn run_jpeg(
+    mut stage: JpegStage,
+    rx: &impl Inbox,
+    out: Output,
+    tracy: bool,
+    heartbeat: &Heartbeat,
+) {
+    let mut failures = 0;
+    while let Some((frame, stamp)) = rx.next_job() {
+        let encoded = info_span!("jpeg").in_scope(|| stage.encode(frame));
+        heartbeat.beat();
+        let jpeg = match encoded {
+            Ok(jpeg) => {
+                failures = 0;
+                jpeg
+            }
             Err(e) => {
+                failures += 1;
                 error!("jpeg encode failed: {e}");
+                if failures >= ENCODE_FAILURE_LIMIT {
+                    error!("jpeg: {failures} encodes failed in a row; stopping the encoder");
+                    return;
+                }
                 continue;
             }
         };
@@ -897,15 +1172,16 @@ impl Rate {
 }
 
 /// Counters for frames lost: by the camera (from its capture stats), and
-/// discarded because an encoder channel was full.
+/// by each encoder that was still busy with an earlier frame.
 ///
 /// Encoder drops are expected under load, and dropping is the right
 /// response; counting them is what lets an operator see that a recording
-/// has holes. Reports are rate-limited to one line per interval.
+/// has holes. Reports are rate-limited to one line per interval, and give
+/// each encoder's drops against the frames offered to it.
 pub(crate) struct DropStats {
-    dropped: BTreeMap<&'static str, u64>,
+    /// Per sink: frames offered and frames dropped.
+    sinks: BTreeMap<&'static str, (u64, u64)>,
     camera: u64,
-    sent: u64,
     interval: Duration,
     last_report: Instant,
 }
@@ -913,20 +1189,20 @@ pub(crate) struct DropStats {
 impl DropStats {
     pub(crate) fn new(interval: Duration, now: Instant) -> Self {
         Self {
-            dropped: BTreeMap::new(),
+            sinks: BTreeMap::new(),
             camera: 0,
-            sent: 0,
             interval,
             last_report: now,
         }
     }
 
-    pub(crate) fn record_sent(&mut self) {
-        self.sent = self.sent.saturating_add(1);
-    }
-
-    pub(crate) fn record_drop(&mut self, sink: &'static str) {
-        *self.dropped.entry(sink).or_insert(0) += 1;
+    /// Counts a frame offered to `sink`.
+    fn record(&mut self, sink: &'static str, offer: Offer) {
+        let (offered, dropped) = self.sinks.entry(sink).or_insert((0, 0));
+        *offered += 1;
+        if matches!(offer, Offer::Dropped | Offer::Replaced | Offer::Closed) {
+            *dropped += 1;
+        }
     }
 
     /// Frames the camera lost since the last call.
@@ -946,36 +1222,18 @@ impl DropStats {
         if self.camera > 0 {
             parts.push(format!("camera dropped {} frames", self.camera));
         }
-        if !self.dropped.is_empty() {
-            let total: u64 = self.dropped.values().sum();
-            let per_sink = self
-                .dropped
-                .iter()
-                .map(|(sink, n)| format!("{sink}={n}"))
-                .collect::<Vec<_>>()
-                .join(" ");
-            parts.push(format!(
-                "dropped {total} of {} frames (encoder channels full): {per_sink}",
-                total + self.sent
-            ));
+        let busy: Vec<String> = self
+            .sinks
+            .iter()
+            .filter(|(_, (_, dropped))| *dropped > 0)
+            .map(|(sink, (offered, dropped))| format!("{sink}={dropped}/{offered}"))
+            .collect();
+        if !busy.is_empty() {
+            parts.push(format!("encoders busy, frames dropped: {}", busy.join(" ")));
         }
-        self.dropped.clear();
-        self.sent = 0;
+        self.sinks.clear();
         self.camera = 0;
         (!parts.is_empty()).then(|| parts.join("; "))
-    }
-}
-
-/// Records whether a `try_send` delivered the frame. kanal reports a full
-/// channel as `Ok(false)`, not as an error; `Err` means it is closed.
-fn record_send_outcome(
-    outcome: Result<bool, kanal::SendError>,
-    sink: &'static str,
-    stats: &mut DropStats,
-) {
-    match outcome {
-        Ok(true) => stats.record_sent(),
-        Ok(false) | Err(_) => stats.record_drop(sink),
     }
 }
 
@@ -1031,29 +1289,79 @@ mod tests {
     }
 
     #[test]
-    fn a_full_channel_is_counted_as_a_drop_not_a_send() {
-        let t0 = Instant::now();
-        let mut stats = DropStats::new(Duration::from_secs(10), t0);
-        record_send_outcome(Ok(true), "h264", &mut stats);
-        record_send_outcome(Ok(false), "h264", &mut stats);
-        record_send_outcome(Err(kanal::SendError::ReceiveClosed), "h264", &mut stats);
-        let report = stats.take_report(t0 + Duration::from_secs(11)).unwrap();
-        assert!(report.contains("h264=2"), "{report}");
-        assert!(report.contains("of 3 frames"), "{report}");
+    fn a_full_channel_is_a_drop_and_a_gone_receiver_is_closed() {
+        let mut opened = mock_opened("");
+        let mut job = || {
+            let frame = opened
+                .camera
+                .next_frame(Some(Duration::from_secs(1)))
+                .unwrap();
+            (Arc::new(frame), schema::now())
+        };
+        let (tx, rx) = kanal::bounded::<Job>(1);
+        let sink = Sink::new("h264", Queue::Fifo(tx));
+        assert_eq!(sink.offer(job()), Offer::Sent);
+        assert_eq!(sink.offer(job()), Offer::Dropped);
+        drop(rx);
+        assert_eq!(sink.offer(job()), Offer::Closed);
     }
 
     #[test]
-    fn drop_stats_counts_per_sink_and_reports_after_the_interval() {
+    fn the_newest_frame_replaces_one_that_waits() {
+        let (tx, rx) = latest::<u32>();
+        assert_eq!(tx.offer(1), Offer::Sent);
+        assert_eq!(tx.offer(2), Offer::Replaced);
+        assert_eq!(rx.recv(), Some(2));
+        assert_eq!(tx.offer(3), Offer::Sent);
+        drop(tx);
+        assert_eq!(rx.recv(), Some(3), "a waiting item outlives the sender");
+        assert_eq!(rx.recv(), None);
+    }
+
+    #[test]
+    fn a_mailbox_whose_receiver_is_gone_is_closed() {
+        let (tx, rx) = latest::<u32>();
+        drop(rx);
+        assert_eq!(tx.offer(1), Offer::Closed);
+    }
+
+    #[test]
+    fn a_mailbox_wakes_its_receiver() {
+        let (tx, rx) = latest::<u32>();
+        let taker = thread::spawn(move || rx.recv());
+        thread::sleep(Duration::from_millis(20));
+        tx.offer(7);
+        assert_eq!(taker.join().unwrap(), Some(7));
+    }
+
+    #[test]
+    fn heartbeats_age() {
+        let h = Heartbeat::new();
+        let now = Instant::now();
+        assert!(h.age(now) < Duration::from_secs(1));
+        assert!(h.age(now + Duration::from_secs(12)) > STAGE_STALL);
+    }
+
+    #[test]
+    fn drops_are_reported_per_sink_against_frames_offered() {
         let t0 = Instant::now();
         let mut stats = DropStats::new(Duration::from_secs(10), t0);
-        stats.record_sent();
-        stats.record_drop("h264/tl");
-        stats.record_drop("h264/tl");
-        stats.record_drop("jpeg");
+        for _ in 0..300 {
+            stats.record("h264", Offer::Sent);
+        }
+        for i in 0..300 {
+            stats.record(
+                "jpeg",
+                if i % 3 == 0 {
+                    Offer::Replaced
+                } else {
+                    Offer::Sent
+                },
+            );
+        }
         assert!(stats.take_report(t0 + Duration::from_secs(1)).is_none());
         let report = stats.take_report(t0 + Duration::from_secs(11)).unwrap();
-        assert!(report.contains("h264/tl=2"), "{report}");
-        assert!(report.contains("jpeg=1"), "{report}");
+        assert_eq!(report, "encoders busy, frames dropped: jpeg=100/300");
     }
 
     #[test]
@@ -1064,7 +1372,7 @@ mod tests {
         stats.record_camera(0);
         let report = stats.take_report(t0 + Duration::from_secs(11)).unwrap();
         assert_eq!(report, "camera dropped 3 frames");
-        stats.record_sent();
+        stats.record("h264", Offer::Sent);
         assert!(stats.take_report(t0 + Duration::from_secs(22)).is_none());
     }
 
@@ -1072,11 +1380,12 @@ mod tests {
     fn drop_stats_resets_the_window_after_reporting() {
         let t0 = Instant::now();
         let mut stats = DropStats::new(Duration::from_secs(10), t0);
-        stats.record_drop("jpeg");
+        stats.record("jpeg", Offer::Dropped);
         stats.take_report(t0 + Duration::from_secs(11)).unwrap();
-        stats.record_drop("jpeg");
+        stats.record("jpeg", Offer::Dropped);
+        stats.record("jpeg", Offer::Sent);
         let second = stats.take_report(t0 + Duration::from_secs(22)).unwrap();
-        assert!(second.contains("jpeg=1"), "{second}");
+        assert!(second.contains("jpeg=1/2"), "{second}");
     }
 
     #[test]
@@ -1131,7 +1440,9 @@ mod tests {
 
     fn settings(args: &[&str]) -> (Request, Settings) {
         let args = crate::args::Args::parse_from([&["edgefirst-camera"][..], args].concat());
-        let request = Request::from_args(&args, |_| unreachable!()).unwrap();
+        let request = Request::from_args(&args, |_| unreachable!())
+            .unwrap()
+            .unwrap();
         let settings = crate::settings(&args, &request, None);
         (request, settings)
     }
@@ -1166,10 +1477,7 @@ mod tests {
                 .wait()
                 .unwrap()
         };
-        let processor = edgefirst_image::ImageProcessor::new().ok();
-        let opened = source::open(&request, processor.as_ref(), &shutdown)
-            .unwrap()
-            .unwrap();
+        let opened = source::open(&request, &shutdown).unwrap().unwrap();
         run(opened, &session, &settings, open_fake, None, &shutdown).unwrap();
         // tf_static is republished every second.
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -1338,6 +1646,26 @@ mod tests {
         assert!(seqs.last().unwrap() >= &30, "{seqs:?}");
     }
 
+    /// An encoder that keeps failing ends the run, so the service manager
+    /// restarts the service, rather than streaming on without its output.
+    #[test]
+    fn an_encoder_that_keeps_failing_ends_the_run() {
+        let (_, settings) = settings(&["--source", "mock:64x48@120", "--stream-size", "64", "48"]);
+        let session = local_session();
+        let shutdown = AtomicBool::new(false);
+        let err = run(
+            mock_opened(""),
+            &session,
+            &settings,
+            crate::encode::tests::open_failing,
+            None,
+            &shutdown,
+        )
+        .unwrap_err();
+        assert_eq!(crate::exit::status(&*err), Status::Software, "{err}");
+        assert!(err.to_string().contains("h264"), "{err}");
+    }
+
     /// A camera that fails before delivering a frame is not reopened: the
     /// failure ends the run, for the service manager to restart.
     #[test]
@@ -1470,7 +1798,7 @@ mod tests {
         let (request, settings) = settings(&["--source", "mock:64x48@30"]);
         let session = local_session();
         let flag = AtomicBool::new(false);
-        let opened = source::open(&request, None, &flag).unwrap().unwrap();
+        let opened = source::open(&request, &flag).unwrap().unwrap();
         let err = run(opened, &session, &settings, open_fake, None, &flag).unwrap_err();
         assert!(err.to_string().contains("STREAM_SIZE 1920x1080"), "{err}");
     }

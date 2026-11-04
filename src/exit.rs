@@ -5,9 +5,9 @@
 //!
 //! systemd names exit statuses in the journal: 1 to 7 by their LSB init
 //! script meanings and 64 to 78 by `sysexits.h`. Each status here is one
-//! whose name matches its meaning (`status=75/TEMPFAIL`), not the
-//! videostream CLI's 3 to 6, which systemd would report as
-//! `NOTIMPLEMENTED`, `NOPERMISSION`, `NOTINSTALLED` and `NOTCONFIGURED`.
+//! whose name matches its meaning (`status=75/TEMPFAIL`); 3 to 6 are
+//! avoided because systemd reports them as `NOTIMPLEMENTED`,
+//! `NOPERMISSION`, `NOTINSTALLED` and `NOTCONFIGURED`.
 
 use std::{error::Error, fmt, process::ExitCode};
 
@@ -30,6 +30,9 @@ pub(crate) enum Status {
     CodecUnavailable = 69,
     /// The Zenoh session could not be opened (`EX_NOHOST`, `NOHOST`).
     Socket = 68,
+    /// An encoder stopped while the camera ran (`EX_SOFTWARE`,
+    /// `SOFTWARE`); a restart opens it again.
+    Software = 70,
     /// The camera delivered no frames in time; trying again later may
     /// work (`EX_TEMPFAIL`, `TEMPFAIL`).
     Timeout = 75,
