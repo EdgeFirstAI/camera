@@ -89,9 +89,9 @@ cd src && cargo build  # Where are we now?
   - `zenoh 1.10.1` - Transport and ROS2 bridge compatibility
   - `tokio 1.53.1` - Async runtime with multi-threaded executor
   - `edgefirst-camera` (workspace crate `crates/camera`) - Camera SDK: V4L2, `file:` and `mock` sources, capture buffers, frame-to-`CameraFrame` mapping
-  - `edgefirst-image 0.36` - HAL image conversion (`ImageProcessor` picks OpenGL, then G2D, then CPU)
-  - `edgefirst-codec 0.36` - HAL H.264 `VideoEncoder` over V4L2 memory-to-memory (vsi_v4l2 on i.MX 8M Plus); the SDK uses its decoder for `file:` sources
-  - `edgefirst-tensor 0.36` - HAL tensors that frames are delivered as
+  - `edgefirst-image 0.39` - HAL image conversion (`ImageProcessor` picks OpenGL, then G2D, then CPU)
+  - `edgefirst-codec 0.39` - HAL H.264 `VideoEncoder` over V4L2 memory-to-memory (vsi_v4l2 on i.MX 8M Plus); the SDK uses its decoder for `file:` sources
+  - `edgefirst-tensor 0.39` - HAL tensors that frames are delivered as
   - `edgefirst-schemas 4.0.0` - ROS2 message schemas with zero-copy CDR builders
   - `tracing-tracy` - Performance profiling (Tracy profiler integration)
   - `turbojpeg` - JPEG encoding with SIMD (require-simd feature)
