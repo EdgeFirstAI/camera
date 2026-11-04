@@ -7,8 +7,8 @@
 # Action Versions (hash-pinned):
 # - actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 (v7.0.1)
 # - dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d (v4.0.3)
-# - taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 (v2.87.12)
-# - actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a (v7.0.1)
+# - taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 (v2.87.32)
+# - actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 (v7.0.2)
 
 name: CI
 
@@ -96,7 +96,7 @@ jobs:
   quick:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    uses: EdgeFirstAI/.github/.github/workflows/rust-quick.yml@9e296f92996b38683c684b9091ed59cb27562770
+    uses: EdgeFirstAI/.github/.github/workflows/rust-quick.yml@c7876194b9fe9f7f72daf0efadaf32d7dff1b257
     with:
       pre-command: bash .github/scripts/ci-setup.sh
       nextest-args: --workspace --locked --features edgefirst-camera/mock,edgefirst-camera/schemas,edgefirst-camera/file --lib --bin edgefirst-camera --test env_scrub --test on_target --test board --test publish --test subcommands --test mock --test schema --test file --test v4l2_vivid --test layout
@@ -118,7 +118,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7  # stable
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8  # v2.87.28
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037  # v2.87.32
         with:
           tool: cargo-cyclonedx
       - name: Resolve dependency graph and check NOTICE
@@ -180,7 +180,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Build and check the shim
         run: crates/libcamera-sys/shim/build-prebuilt.sh "${{ matrix.libcamera }}" "$RUNNER_TEMP/shim"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: libcamera-shim-${{ matrix.arch }}-${{ matrix.libcamera }}
           path: ${{ runner.temp }}/shim
@@ -189,7 +189,7 @@ jobs:
   full:
     needs: [changes, libcamera-shim]
     if: needs.changes.outputs.full == 'true' || needs.changes.outputs.hardware == 'true'
-    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@9e296f92996b38683c684b9091ed59cb27562770
+    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@c7876194b9fe9f7f72daf0efadaf32d7dff1b257
     with:
       lanes: ${{ needs.changes.outputs.full == 'true' && 'all' || 'hardware' }}
       # An i.MX 8M Plus through V4L2, and the i.MX 95 through libcamera;
