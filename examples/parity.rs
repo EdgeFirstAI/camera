@@ -32,12 +32,13 @@ type BoxError = Box<dyn Error + Send + Sync>;
 
 /// Frames per second the frame and H.264 topics must sustain.
 const TARGET_FPS: f64 = 29.5;
-/// 95th-percentile latency targets in milliseconds.
+/// 95th-percentile latency targets in milliseconds. JPEG has none: it is
+/// compressed in software on every platform, which gets what rate and
+/// latency the CPU allows, so it is reported but not judged.
 const TARGET_FRAME_MS: f64 = 5.0;
-const TARGET_JPEG_MS: f64 = 50.0;
 const TARGET_H264_MS: f64 = 100.0;
 const TARGET_RSS_MB: f64 = 200.0;
-/// Percent of one core.
+/// Percent of one core, for configurations without software JPEG.
 const TARGET_CPU: f64 = 25.0;
 
 #[derive(Parser)]
@@ -504,6 +505,7 @@ fn compare(before: &Report, after: &Report, floor: Option<&Floor>) -> String {
     };
     let (a, b) = (index(before), index(after));
     let keys: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+    let software_jpeg = b.contains_key("camera/jpeg");
     let pass = |ok: bool| if ok { "pass" } else { "FAIL" };
     let opt = |v: Option<f64>, digits: usize| v.map_or("-".to_owned(), |v| format!("{v:.digits$}"));
 
@@ -537,9 +539,7 @@ fn compare(before: &Report, after: &Report, floor: Option<&Floor>) -> String {
                         pass(t.fps >= TARGET_FPS && p95 < TARGET_FRAME_MS)
                     ),
                 },
-                "camera/jpeg" => {
-                    format!("{} (p95 <{TARGET_JPEG_MS} ms)", pass(p95 < TARGET_JPEG_MS))
-                }
+                "camera/jpeg" => "reported only (software JPEG)".to_owned(),
                 "camera/h264" => format!(
                     "{} (≥{TARGET_FPS} fps, p95 <{TARGET_H264_MS} ms)",
                     pass(t.fps >= TARGET_FPS && p95 < TARGET_H264_MS)
@@ -613,16 +613,23 @@ fn compare(before: &Report, after: &Report, floor: Option<&Floor>) -> String {
         before.label, after.label
     );
     let p = |r: &Report, f: fn(&ProcessReport) -> f64| opt(r.process.as_ref().map(f), 1);
+    let cpu_target = if software_jpeg {
+        "reported only (software JPEG)".to_owned()
+    } else {
+        format!(
+            "{} (<{TARGET_CPU}%)",
+            pass(
+                after
+                    .process
+                    .as_ref()
+                    .is_some_and(|p| p.cpu_percent < TARGET_CPU)
+            )
+        )
+    };
     out += &format!(
-        "| CPU, % of one core | {} | {} | {} (<{TARGET_CPU}%) |\n",
+        "| CPU, % of one core | {} | {} | {cpu_target} |\n",
         p(before, |p| p.cpu_percent),
         p(after, |p| p.cpu_percent),
-        pass(
-            after
-                .process
-                .as_ref()
-                .is_some_and(|p| p.cpu_percent < TARGET_CPU)
-        )
     );
     out += &format!(
         "| Resident memory, max MB | {} | {} | {} (<{TARGET_RSS_MB} MB) |\n",

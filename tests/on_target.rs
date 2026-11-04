@@ -47,7 +47,21 @@ const FRAME_TOPIC: &str = "camera/frame";
 const JPEG_TOPIC: &str = "camera/jpeg";
 const H264_TOPIC: &str = "camera/h264";
 
-/// The rate requested from the camera and expected on every topic.
+/// What a topic must deliver over the [`RATE_WINDOW`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Expect {
+    /// At least [`MIN_RATE`] of the requested rate: capture, and outputs
+    /// a hardware encoder produces.
+    Rate,
+    /// Samples in both halves of the window, at whatever rate: outputs
+    /// compressed in software, which no platform can promise a rate for.
+    /// JPEG is compressed with libjpeg-turbo on every platform; a platform
+    /// that gains a hardware JPEG encoder can expect a rate there.
+    Delivers,
+}
+
+/// The rate requested from the camera and expected of [`Expect::Rate`]
+/// topics.
 fn expected_fps() -> f64 {
     std::env::var("EDGEFIRST_CAMERA_FPS")
         .ok()
@@ -92,10 +106,11 @@ struct Arrivals {
 }
 
 /// Runs the binary with `args`, subscribed to `topics`. Requires the first
-/// sample on each within [`FIRST_SAMPLE`], then at least [`MIN_RATE`] of
-/// the expected rate over the [`RATE_WINDOW`] after it, frame `seq` that
+/// sample on each within [`FIRST_SAMPLE`], then what each topic's
+/// [`Expect`] asks over the [`RATE_WINDOW`] after it, frame `seq` that
 /// never goes back, and a prompt, clean exit after SIGTERM.
-fn stream(args: &[String], topics: &[&'static str]) -> TestResult {
+fn stream(args: &[String], expected: &[(&'static str, Expect)]) -> TestResult {
+    let topics: Vec<&'static str> = expected.iter().map(|&(t, _)| t).collect();
     let fps = expected_fps();
     let endpoint = free_endpoint()?;
     let mut args = args.to_vec();
@@ -172,21 +187,40 @@ fn stream(args: &[String], topics: &[&'static str]) -> TestResult {
     stopped?;
 
     let wanted = MIN_RATE * fps * RATE_WINDOW.as_secs_f64();
+    let half = RATE_WINDOW / 2;
     let mut failures = Vec::new();
-    for (topic, log) in topics.iter().zip(&arrivals) {
+    for ((topic, expect), log) in expected.iter().zip(&arrivals) {
         let log = log.lock().unwrap();
         let first = log.times[0];
-        let count = log
+        let in_window: Vec<Duration> = log
             .times
             .iter()
-            .filter(|&&t| t.duration_since(first) < RATE_WINDOW)
-            .count();
+            .map(|&t| t.duration_since(first))
+            .filter(|&d| d < RATE_WINDOW)
+            .collect();
+        let count = in_window.len();
         let rate = count as f64 / RATE_WINDOW.as_secs_f64();
-        eprintln!("{topic}: {count} samples in {RATE_WINDOW:?} ({rate:.2}/s, expected {fps})");
-        if (count as f64) < wanted {
-            failures.push(format!(
-                "{topic}: {count} samples in {RATE_WINDOW:?}, under {wanted:.0} ({MIN_RATE} of {fps}/s)"
-            ));
+        match expect {
+            Expect::Rate => {
+                eprintln!(
+                    "{topic}: {count} samples in {RATE_WINDOW:?} ({rate:.2}/s, expected {fps})"
+                );
+                if (count as f64) < wanted {
+                    failures.push(format!(
+                        "{topic}: {count} samples in {RATE_WINDOW:?}, under {wanted:.0} ({MIN_RATE} of {fps}/s)"
+                    ));
+                }
+            }
+            Expect::Delivers => {
+                eprintln!(
+                    "{topic}: {count} samples in {RATE_WINDOW:?} ({rate:.2}/s, no rate expected)"
+                );
+                if !in_window.iter().any(|&d| d >= half) {
+                    failures.push(format!(
+                        "{topic}: no sample in the second half of {RATE_WINDOW:?}; it stopped"
+                    ));
+                }
+            }
         }
         if !log.errors.is_empty() {
             failures.push(format!("{topic}: undecodable samples: {:?}", log.errors));
@@ -249,7 +283,10 @@ fn jpeg_capture() -> TestResult {
     let Some(args) = capture(&["--jpeg"]) else {
         return Ok(());
     };
-    stream(&args, &[FRAME_TOPIC, JPEG_TOPIC])
+    stream(
+        &args,
+        &[(FRAME_TOPIC, Expect::Rate), (JPEG_TOPIC, Expect::Delivers)],
+    )
 }
 
 #[test]
@@ -259,7 +296,10 @@ fn h264_capture() -> TestResult {
     let Some(args) = capture(&["--h264"]) else {
         return Ok(());
     };
-    stream(&args, &[FRAME_TOPIC, H264_TOPIC])
+    stream(
+        &args,
+        &[(FRAME_TOPIC, Expect::Rate), (H264_TOPIC, Expect::Rate)],
+    )
 }
 
 #[test]

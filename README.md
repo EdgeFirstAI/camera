@@ -634,7 +634,7 @@ On a board with fixed devices, set `CAMERA` and `EDGEFIRST_CODEC_V4L2_ENCODER` i
 
 ## Known Limitations
 
-- **JPEG is software-compressed.** The i.MX 8M Plus has no hardware JPEG encoder. At 1080p, JPEG costs about one core and a p95 of about 122 ms, the same as 2.12. Most of the cost is conversion and the DCT, so `JPEG_QUALITY` has little effect. Reduce it with `STREAM_SIZE` or turn `JPEG` off.
+- **JPEG is software-compressed, with no guaranteed rate.** The service compresses JPEG with libjpeg-turbo on every platform, so `camera/jpeg` runs at whatever rate the CPU allows and always carries the newest frame; frames it cannot keep up with are dropped. On the i.MX 8M Plus at 1080p that is about one core, 17 to 18 fps and a p95 of about 122 ms, the same as 2.12. Most of the cost is conversion and the DCT, so `JPEG_QUALITY` has little effect; reduce it with `STREAM_SIZE`, or use `camera/h264`, which the i.MX 8M Plus encodes in hardware at the full rate.
 - **YUYV tensor shape.** `camera/frame` describes YUYV tensors as `[H, W, 2]`, where 2.12 used `[H, W]`. This is under review.
 - **i.MX 95 `nxp/neo` pipeline.** The camera cannot mirror and does not honour the requested frame rate. The service mirrors the encoded outputs in software and reports the rate the camera delivers.
 - **macOS and Windows.** There is no camera backend yet. The application runs on the `mock` source only.
