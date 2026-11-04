@@ -16,78 +16,50 @@ pub(crate) struct Mapping {
     pub(crate) mem_planes: usize,
 }
 
-/// Every V4L2 format the backend captures, in order of preference for one
-/// pixel format: single-buffer NV12 ahead of `NV12M` (§3.3; HAL's Adreno
-/// path declines a chroma plane in a separate DMA-BUF).
-const TABLE: &[Mapping] = &[
-    Mapping {
-        fourcc: uapi::V4L2_PIX_FMT_YUYV,
-        format: PixelFormat::Yuyv,
-        mem_planes: 1,
-    },
-    Mapping {
-        fourcc: uapi::V4L2_PIX_FMT_VYUY,
-        format: PixelFormat::Vyuy,
-        mem_planes: 1,
-    },
-    Mapping {
-        fourcc: uapi::V4L2_PIX_FMT_NV12,
-        format: PixelFormat::Nv12,
-        mem_planes: 1,
-    },
+/// The V4L2 formats whose chroma is a buffer of its own. Every other
+/// format is the tensor crate's [`PixelFormat::to_fourcc`] code.
+const MULTI_BUFFER: [Mapping; 2] = [
     Mapping {
         fourcc: uapi::V4L2_PIX_FMT_NV12M,
         format: PixelFormat::Nv12,
         mem_planes: 2,
     },
     Mapping {
-        fourcc: uapi::V4L2_PIX_FMT_NV16,
-        format: PixelFormat::Nv16,
-        mem_planes: 1,
-    },
-    Mapping {
         fourcc: uapi::V4L2_PIX_FMT_NV16M,
         format: PixelFormat::Nv16,
         mem_planes: 2,
     },
-    Mapping {
-        fourcc: uapi::V4L2_PIX_FMT_NV24,
-        format: PixelFormat::Nv24,
-        mem_planes: 1,
-    },
-    Mapping {
-        fourcc: uapi::V4L2_PIX_FMT_GREY,
-        format: PixelFormat::Grey,
-        mem_planes: 1,
-    },
-    Mapping {
-        fourcc: uapi::V4L2_PIX_FMT_RGB24,
-        format: PixelFormat::Rgb,
-        mem_planes: 1,
-    },
-    Mapping {
-        fourcc: uapi::V4L2_PIX_FMT_RGBA32,
-        format: PixelFormat::Rgba,
-        mem_planes: 1,
-    },
-    Mapping {
-        fourcc: uapi::V4L2_PIX_FMT_ABGR32,
-        format: PixelFormat::Bgra,
-        mem_planes: 1,
-    },
 ];
+
+/// The single-buffer mapping of `format`, when it has a V4L2 code.
+fn single(format: PixelFormat) -> Option<Mapping> {
+    let fourcc = format.to_fourcc();
+    (fourcc != 0).then_some(Mapping {
+        fourcc,
+        format,
+        mem_planes: 1,
+    })
+}
 
 /// The mapping for a V4L2 fourcc, when the backend can capture it.
 pub(crate) fn by_fourcc(fourcc: u32) -> Option<Mapping> {
-    TABLE.iter().copied().find(|m| m.fourcc == fourcc)
+    PixelFormat::from_fourcc(fourcc)
+        .and_then(single)
+        .or_else(|| MULTI_BUFFER.into_iter().find(|m| m.fourcc == fourcc))
 }
 
-/// The preferred fourcc for `format` among those the device `offers`.
-/// Multi-buffer variants are only usable on a multi-planar queue.
+/// The preferred fourcc for `format` among those the device `offers`:
+/// single-buffer ahead of the multi-buffer variant, which converters that
+/// take one DMA-BUF per image cannot use and which is only usable on a
+/// multi-planar queue.
 pub(crate) fn choose(format: PixelFormat, offers: &[u32], multiplanar: bool) -> Option<Mapping> {
-    TABLE.iter().copied().find(|m| {
-        m.format == format && (m.mem_planes == 1 || multiplanar) && offers.contains(&m.fourcc)
-    })
+    single(format)
+        .filter(|m| offers.contains(&m.fourcc))
+        .or_else(|| {
+            MULTI_BUFFER
+                .into_iter()
+                .find(|m| m.format == format && multiplanar && offers.contains(&m.fourcc))
+        })
 }
 
 #[cfg(test)]

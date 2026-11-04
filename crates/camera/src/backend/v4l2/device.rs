@@ -16,9 +16,10 @@ use crate::{Backend, CameraDescriptor, Error, ErrorKind, FormatInfo, Rates, Size
 
 /// Converts an `edgefirst-v4l2` error, naming what the backend was doing.
 ///
-/// `EAGAIN` is [`ErrorKind::NotReady`]: vvcam answers setup ioctls with it
-/// while `isp_media_server` restarts. A dequeue's `EAGAIN` (no buffer yet)
-/// never reaches here; `edgefirst-v4l2` returns it as no buffer.
+/// An errno maps through [`crate::error::errno_kind`], so `EAGAIN` is
+/// [`ErrorKind::NotReady`]: vvcam answers setup ioctls with it while
+/// `isp_media_server` restarts. A dequeue's `EAGAIN` (no buffer yet) never
+/// reaches here; `edgefirst-v4l2` returns it as no buffer.
 pub(crate) fn v4l2_error(what: &str, e: edgefirst_v4l2::Error) -> Error {
     use edgefirst_v4l2::ErrorKind as K;
     if errno(&e) == Some(libc::EAGAIN) {
@@ -28,13 +29,15 @@ pub(crate) fn v4l2_error(what: &str, e: edgefirst_v4l2::Error) -> Error {
         )
         .with_source(e);
     }
-    let kind = match e.kind() {
-        K::Disconnected => ErrorKind::Disconnected,
-        K::Busy => ErrorKind::Busy,
-        K::InvalidArgument | K::InvalidState => ErrorKind::InvalidConfig,
-        K::Unsupported => ErrorKind::Backend,
-        _ => ErrorKind::Io,
-    };
+    let kind = errno(&e)
+        .and_then(crate::error::errno_kind)
+        .unwrap_or(match e.kind() {
+            K::Disconnected => ErrorKind::Disconnected,
+            K::Busy => ErrorKind::Busy,
+            K::InvalidArgument | K::InvalidState => ErrorKind::InvalidConfig,
+            K::Unsupported => ErrorKind::Backend,
+            _ => ErrorKind::Io,
+        });
     Error::new(kind, format!("{what}: {e}")).with_source(e)
 }
 
@@ -110,7 +113,7 @@ fn lock(dev: &Device, path: &Path) -> crate::Result<()> {
 
 /// Describes a capture node: identity and every capturable format with its
 /// sizes and rates.
-pub(crate) fn describe(dev: &Device, buf_type: BufType) -> CameraDescriptor {
+pub(crate) fn describe(dev: &Device, buf_type: BufType) -> crate::Result<CameraDescriptor> {
     let caps = dev.capabilities();
     let mut d = CameraDescriptor::new(
         Backend::V4l2,
@@ -118,15 +121,29 @@ pub(crate) fn describe(dev: &Device, buf_type: BufType) -> CameraDescriptor {
         caps.card.clone(),
         caps.driver.clone(),
     );
-    d.formats = formats(dev, buf_type);
-    d
+    d.formats = formats(dev, buf_type)?;
+    Ok(d)
 }
 
 /// The capturable formats of a node, each with its sizes and rates. Formats
 /// with no tensor equivalent (such as UVC MJPEG) are left out.
-pub(crate) fn formats(dev: &Device, buf_type: BufType) -> Vec<FormatInfo> {
+///
+/// A node that is not ready or went away is an error, so a caller can tell
+/// it from a node with nothing to capture; any other failure to list
+/// formats is an empty list.
+pub(crate) fn formats(dev: &Device, buf_type: BufType) -> crate::Result<Vec<FormatInfo>> {
+    let listed = match dev.formats(buf_type) {
+        Ok(listed) => listed,
+        Err(e) => {
+            let e = v4l2_error(&format!("list the formats of {}", dev.path().display()), e);
+            if matches!(e.kind(), ErrorKind::NotReady | ErrorKind::Disconnected) {
+                return Err(e);
+            }
+            Vec::new()
+        }
+    };
     let mut out: Vec<FormatInfo> = Vec::new();
-    for desc in dev.formats(buf_type).unwrap_or_default() {
+    for desc in listed {
         let Some(m) = format::by_fourcc(desc.fourcc) else {
             continue;
         };
@@ -146,7 +163,7 @@ pub(crate) fn formats(dev: &Device, buf_type: BufType) -> Vec<FormatInfo> {
             });
         }
     }
-    out
+    Ok(out)
 }
 
 fn sizes(dev: &Device, fourcc: u32) -> Option<Sizes> {
@@ -217,12 +234,12 @@ pub(crate) fn enumerate() -> crate::Result<Vec<CameraDescriptor>> {
                 .is_ok_and(|c| c.is_capture() && c.has_streaming() && !c.is_m2m())
         })
         .filter_map(|n| open(&n.path, false).ok())
-        .map(|(dev, buf_type)| describe(&dev, buf_type))
+        .filter_map(|(dev, buf_type)| describe(&dev, buf_type).ok())
         .collect())
 }
 
 /// The full format, size and rate table of the node a descriptor names.
 pub(crate) fn probe(d: &CameraDescriptor) -> crate::Result<Vec<FormatInfo>> {
     let (dev, buf_type) = open(Path::new(&d.id), false)?;
-    Ok(formats(&dev, buf_type))
+    formats(&dev, buf_type)
 }

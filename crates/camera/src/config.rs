@@ -3,7 +3,41 @@
 
 //! Stream requests and the configuration a backend actually negotiated.
 
+use std::ops::RangeInclusive;
+
 use edgefirst_tensor::{Colorimetry, PixelFormat, TensorDyn};
+
+#[cfg(any(
+    feature = "v4l2",
+    feature = "libcamera",
+    feature = "mock",
+    feature = "file"
+))]
+use crate::{Error, ErrorKind, Result};
+
+/// The capture pool depths every backend accepts.
+pub const POOL_DEPTH: RangeInclusive<usize> = 2..=32;
+
+/// Refuses a pool depth outside [`POOL_DEPTH`].
+#[cfg(any(
+    feature = "v4l2",
+    feature = "libcamera",
+    feature = "mock",
+    feature = "file"
+))]
+pub(crate) fn check_pool_depth(buffers: usize) -> Result<()> {
+    if POOL_DEPTH.contains(&buffers) {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorKind::InvalidConfig,
+        format!(
+            "pool depth {buffers} outside {}..={}",
+            POOL_DEPTH.start(),
+            POOL_DEPTH.end()
+        ),
+    ))
+}
 
 /// How capture buffers are allocated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -40,6 +74,38 @@ pub enum Mirror {
     Vertical,
     /// Both, equivalent to a 180° rotation.
     Both,
+}
+
+impl Mirror {
+    /// Every mirror, in order of [`Mirror::bits`].
+    pub const ALL: [Mirror; 4] = [Self::None, Self::Horizontal, Self::Vertical, Self::Both];
+
+    /// The mirror that flips left to right when `horizontal` and top to
+    /// bottom when `vertical`.
+    pub fn from_flips(horizontal: bool, vertical: bool) -> Self {
+        Self::from_bits(u8::from(horizontal) | (u8::from(vertical) << 1))
+    }
+
+    /// The value of [`crate::ControlId::Mirror`]: bit 0 flips left to
+    /// right, bit 1 top to bottom.
+    pub fn bits(self) -> u8 {
+        self as u8
+    }
+
+    /// The mirror of a [`Mirror::bits`] value; higher bits are ignored.
+    pub fn from_bits(bits: u8) -> Self {
+        Self::ALL[usize::from(bits & 3)]
+    }
+
+    /// Whether it flips left to right.
+    pub fn horizontal(self) -> bool {
+        self.bits() & 1 != 0
+    }
+
+    /// Whether it flips top to bottom.
+    pub fn vertical(self) -> bool {
+        self.bits() & 2 != 0
+    }
 }
 
 /// Physical contiguity required of SDK-allocated buffers.

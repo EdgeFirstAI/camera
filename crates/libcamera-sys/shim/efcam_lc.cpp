@@ -35,7 +35,7 @@ struct efcam_lc_cam {
 	int efd = -1;
 	bool running = false;
 
-	void requestComplete(Request *request);
+	void requestComplete(Request *request) noexcept;
 };
 
 namespace {
@@ -164,7 +164,7 @@ void copy_str(char *dst, size_t len, const std::string &src)
 } /* namespace */
 
 /* Runs on libcamera's thread: record and signal only. */
-void efcam_lc_cam::requestComplete(Request *request)
+void efcam_lc_cam::requestComplete(Request *request) noexcept
 {
 	efcam_lc_completion c{};
 	c.size = sizeof(c);
@@ -204,12 +204,12 @@ void efcam_lc_cam::requestComplete(Request *request)
 
 extern "C" {
 
-uint32_t efcam_lc_abi_version(void)
+uint32_t efcam_lc_abi_version(void) noexcept
 {
 	return EFCAM_LC_ABI_VERSION;
 }
 
-const char *efcam_lc_build_version(void)
+const char *efcam_lc_build_version(void) noexcept
 {
 	static const std::string v = std::to_string(LIBCAMERA_VERSION_MAJOR) + "." +
 				     std::to_string(LIBCAMERA_VERSION_MINOR) + "." +
@@ -217,12 +217,12 @@ const char *efcam_lc_build_version(void)
 	return v.c_str();
 }
 
-const char *efcam_lc_runtime_version(void)
+const char *efcam_lc_runtime_version(void) noexcept
 {
 	return CameraManager::version().c_str();
 }
 
-int efcam_lc_mgr_create(efcam_lc_mgr **out)
+int efcam_lc_mgr_create(efcam_lc_mgr **out) noexcept
 {
 	auto m = std::make_unique<efcam_lc_mgr>();
 	m->cm = std::make_unique<CameraManager>();
@@ -233,7 +233,7 @@ int efcam_lc_mgr_create(efcam_lc_mgr **out)
 	return 0;
 }
 
-void efcam_lc_mgr_destroy(efcam_lc_mgr *mgr)
+void efcam_lc_mgr_destroy(efcam_lc_mgr *mgr) noexcept
 {
 	if (!mgr)
 		return;
@@ -241,13 +241,13 @@ void efcam_lc_mgr_destroy(efcam_lc_mgr *mgr)
 	delete mgr;
 }
 
-int efcam_lc_mgr_camera_count(efcam_lc_mgr *mgr)
+int efcam_lc_mgr_camera_count(efcam_lc_mgr *mgr) noexcept
 {
 	return int(mgr->cm->cameras().size());
 }
 
 int efcam_lc_mgr_camera_info(efcam_lc_mgr *mgr, uint32_t index,
-			     struct efcam_lc_camera_info *info)
+			     struct efcam_lc_camera_info *info) noexcept
 {
 	auto cams = mgr->cm->cameras();
 	if (index >= cams.size())
@@ -273,7 +273,7 @@ int efcam_lc_mgr_camera_info(efcam_lc_mgr *mgr, uint32_t index,
 }
 
 int efcam_lc_mgr_formats(efcam_lc_mgr *mgr, const char *id, uint32_t role,
-			 struct efcam_lc_format *out, uint32_t capacity)
+			 struct efcam_lc_format *out, uint32_t capacity) noexcept
 {
 	if (role > EFCAM_LC_ROLE_VIEWFINDER)
 		return -EINVAL;
@@ -312,7 +312,7 @@ int efcam_lc_mgr_formats(efcam_lc_mgr *mgr, const char *id, uint32_t role,
 
 	if (capacity > 0 && out) {
 		uint32_t stride = out->size;
-		if (stride == 0)
+		if (stride < sizeof(out->size))
 			return -EINVAL;
 		auto *base = reinterpret_cast<unsigned char *>(out);
 		for (size_t i = 0; i < all.size() && i < capacity; i++) {
@@ -324,7 +324,7 @@ int efcam_lc_mgr_formats(efcam_lc_mgr *mgr, const char *id, uint32_t role,
 	return int(all.size());
 }
 
-int efcam_lc_cam_open(efcam_lc_mgr *mgr, const char *id, efcam_lc_cam **out)
+int efcam_lc_cam_open(efcam_lc_mgr *mgr, const char *id, efcam_lc_cam **out) noexcept
 {
 	std::shared_ptr<Camera> camera = mgr->cm->get(id);
 	if (!camera)
@@ -347,7 +347,7 @@ int efcam_lc_cam_open(efcam_lc_mgr *mgr, const char *id, efcam_lc_cam **out)
 
 int efcam_lc_cam_configure(efcam_lc_cam *cam,
 			   const struct efcam_lc_stream_request *in,
-			   struct efcam_lc_stream_info *info)
+			   struct efcam_lc_stream_info *info) noexcept
 {
 	efcam_lc_stream_request req = read_in(in);
 	if (req.role > EFCAM_LC_ROLE_VIEWFINDER ||
@@ -395,7 +395,7 @@ int efcam_lc_cam_configure(efcam_lc_cam *cam,
 }
 
 int efcam_lc_cam_control_info(efcam_lc_cam *cam, uint32_t control,
-			      struct efcam_lc_control_info *info)
+			      struct efcam_lc_control_info *info) noexcept
 {
 	const ControlId *id = control_id(control);
 	if (!id)
@@ -412,7 +412,7 @@ int efcam_lc_cam_control_info(efcam_lc_cam *cam, uint32_t control,
 	return 0;
 }
 
-int efcam_lc_cam_alloc(efcam_lc_cam *cam)
+int efcam_lc_cam_alloc(efcam_lc_cam *cam) noexcept
 {
 	if (!cam->stream)
 		return -EINVAL;
@@ -439,7 +439,7 @@ int efcam_lc_cam_alloc(efcam_lc_cam *cam)
 }
 
 int efcam_lc_cam_buffer(efcam_lc_cam *cam, uint32_t slot,
-			struct efcam_lc_buffer *buf)
+			struct efcam_lc_buffer *buf) noexcept
 {
 	if (!cam->allocator)
 		return -EINVAL;
@@ -460,7 +460,7 @@ int efcam_lc_cam_buffer(efcam_lc_cam *cam, uint32_t slot,
 	return 0;
 }
 
-int efcam_lc_cam_start(efcam_lc_cam *cam, const struct efcam_lc_controls *ctrls)
+int efcam_lc_cam_start(efcam_lc_cam *cam, const struct efcam_lc_controls *ctrls) noexcept
 {
 	if (cam->running)
 		return -EBUSY;
@@ -485,12 +485,12 @@ int efcam_lc_cam_start(efcam_lc_cam *cam, const struct efcam_lc_controls *ctrls)
 	return 0;
 }
 
-int efcam_lc_cam_event_fd(efcam_lc_cam *cam)
+int efcam_lc_cam_event_fd(efcam_lc_cam *cam) noexcept
 {
 	return cam->efd;
 }
 
-int efcam_lc_cam_dequeue(efcam_lc_cam *cam, struct efcam_lc_completion *c)
+int efcam_lc_cam_dequeue(efcam_lc_cam *cam, struct efcam_lc_completion *c) noexcept
 {
 	uint64_t v;
 	ssize_t r = read(cam->efd, &v, sizeof(v));
@@ -512,7 +512,7 @@ int efcam_lc_cam_dequeue(efcam_lc_cam *cam, struct efcam_lc_completion *c)
 }
 
 int efcam_lc_cam_requeue(efcam_lc_cam *cam, uint32_t slot,
-			 const struct efcam_lc_controls *ctrls)
+			 const struct efcam_lc_controls *ctrls) noexcept
 {
 	if (slot >= cam->requests.size())
 		return -ENOENT;
@@ -524,7 +524,7 @@ int efcam_lc_cam_requeue(efcam_lc_cam *cam, uint32_t slot,
 	return cam->camera->queueRequest(r);
 }
 
-int efcam_lc_cam_stop(efcam_lc_cam *cam)
+int efcam_lc_cam_stop(efcam_lc_cam *cam) noexcept
 {
 	if (!cam->running)
 		return 0;
@@ -533,9 +533,19 @@ int efcam_lc_cam_stop(efcam_lc_cam *cam)
 	return ret;
 }
 
-int efcam_lc_cam_free(efcam_lc_cam *cam)
+int efcam_lc_cam_free(efcam_lc_cam *cam) noexcept
 {
 	int ret = efcam_lc_cam_stop(cam);
+	if (ret != 0) {
+		/*
+		 * A camera that did not stop may still hold its requests and
+		 * buffers, so they are leaked rather than freed under it.
+		 */
+		for (auto &r : cam->requests)
+			(void)r.release();
+		cam->requests.clear();
+		(void)cam->allocator.release();
+	}
 	cam->requests.clear();
 	if (cam->allocator && cam->stream) {
 		int r = cam->allocator->free(cam->stream);
@@ -548,7 +558,7 @@ int efcam_lc_cam_free(efcam_lc_cam *cam)
 	return ret;
 }
 
-void efcam_lc_cam_close(efcam_lc_cam *cam)
+void efcam_lc_cam_close(efcam_lc_cam *cam) noexcept
 {
 	if (!cam)
 		return;

@@ -121,15 +121,25 @@ impl ClockReader for SystemClocks {
 }
 
 /// Reads the current instant of `clock` on this host.
-#[cfg_attr(
-    not(feature = "mock"),
-    expect(
-        dead_code,
-        reason = "used by backends; only the mock backend exists yet"
-    )
-)]
+#[cfg(any(feature = "mock", feature = "file"))]
 pub(crate) fn now(clock: CaptureClock) -> std::io::Result<i64> {
     SystemClocks.capture_ns(clock).map(|ns| ns as i64)
+}
+
+/// The stamp of a frame made on this host now, for sources with no capture
+/// clock of their own: monotonic where the platform has one.
+#[cfg(any(feature = "mock", feature = "file"))]
+pub(crate) fn synthetic_now() -> std::io::Result<Timestamp> {
+    let clock = if cfg!(unix) {
+        CaptureClock::Monotonic
+    } else {
+        CaptureClock::Realtime
+    };
+    Ok(Timestamp {
+        clock,
+        source: TimestampSource::EndOfFrame,
+        nanos: now(clock)?,
+    })
 }
 
 /// Converts capture timestamps to wall-clock acquisition time, following

@@ -8,8 +8,8 @@ use std::fmt;
 /// Result alias used throughout the crate.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// Stable error category, mapped one-to-one by the C, Python, Swift and
-/// Kotlin surfaces without string parsing.
+/// Stable error category, for callers and language bindings to act on
+/// without parsing messages.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorKind {
@@ -177,21 +177,37 @@ impl std::error::Error for Error {
     }
 }
 
+/// The kind of an errno, for every backend, or `None` for an errno with no
+/// more specific kind than the caller's own. Backends override it only
+/// where a call gives an errno a documented meaning of its own, such as
+/// vvcam's `ENOENT` while its daemon restarts.
+#[cfg(unix)]
+pub(crate) fn errno_kind(errno: i32) -> Option<ErrorKind> {
+    Some(match errno {
+        libc::ENOENT => ErrorKind::NotFound,
+        libc::ENODEV | libc::ENXIO => ErrorKind::Disconnected,
+        libc::EAGAIN => ErrorKind::NotReady,
+        libc::EBUSY => ErrorKind::Busy,
+        libc::EINTR => ErrorKind::Interrupted,
+        libc::ETIMEDOUT => ErrorKind::Timeout,
+        libc::EINVAL => ErrorKind::InvalidConfig,
+        _ => return None,
+    })
+}
+
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
-        let kind = match err.kind() {
+        #[cfg(unix)]
+        let errno = err.raw_os_error().and_then(errno_kind);
+        #[cfg(not(unix))]
+        let errno: Option<ErrorKind> = None;
+        let kind = errno.unwrap_or(match err.kind() {
             std::io::ErrorKind::NotFound => ErrorKind::NotFound,
-            std::io::ErrorKind::WouldBlock => ErrorKind::Busy,
+            std::io::ErrorKind::WouldBlock => ErrorKind::NotReady,
             std::io::ErrorKind::Interrupted => ErrorKind::Interrupted,
             std::io::ErrorKind::TimedOut => ErrorKind::Timeout,
-            _ => match err.raw_os_error() {
-                #[cfg(unix)]
-                Some(libc::EBUSY) => ErrorKind::Busy,
-                #[cfg(unix)]
-                Some(libc::ENODEV) => ErrorKind::Disconnected,
-                _ => ErrorKind::Io,
-            },
-        };
+            _ => ErrorKind::Io,
+        });
         Self::new(kind, err.to_string()).with_source(err)
     }
 }
@@ -224,9 +240,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn enodev_is_disconnected() {
-        let err: Error = std::io::Error::from_raw_os_error(libc::ENODEV).into();
-        assert_eq!(err.kind(), ErrorKind::Disconnected);
+    fn errnos_map_to_one_kind_everywhere() {
+        for (errno, kind) in [
+            (libc::ENODEV, ErrorKind::Disconnected),
+            (libc::EAGAIN, ErrorKind::NotReady),
+            (libc::EBUSY, ErrorKind::Busy),
+            (libc::ENOENT, ErrorKind::NotFound),
+        ] {
+            let err: Error = std::io::Error::from_raw_os_error(errno).into();
+            assert_eq!(err.kind(), kind, "errno {errno}");
+            assert_eq!(errno_kind(errno), Some(kind), "errno {errno}");
+        }
+        let eio: Error = std::io::Error::from_raw_os_error(libc::EIO).into();
+        assert_eq!(eio.kind(), ErrorKind::Io);
     }
 
     #[test]

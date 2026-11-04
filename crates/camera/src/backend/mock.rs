@@ -21,11 +21,10 @@ use edgefirst_tensor::{CpuAccess, DType, PixelFormat, TensorDyn, TensorMemory};
 use crate::builder::Source;
 use crate::pool::{self, BufferInfo, PoolRequirements};
 use crate::{
-    timestamp, Applied, Backend, BufferPool, Camera, CameraBuilder, CameraDescriptor, CaptureClock,
-    CaptureStats, Contiguity, Control, ControlId, ControlInfo, ControlSet, ControlValue, Error,
-    ErrorKind, FormatInfo, Frame, FrameMeta, PlaneLayout, Rates, RealtimeClock, ResolvedMemory,
-    Result, Sizes, SlotTable, StreamConfig, StreamRequest, Timestamp, TimestampSource, Unsupported,
-    WaitHandle,
+    timestamp, Applied, Backend, BufferPool, Camera, CameraBuilder, CameraDescriptor, CaptureStats,
+    Contiguity, Control, ControlId, ControlInfo, ControlSet, ControlValue, Error, ErrorKind,
+    FormatInfo, Frame, FrameMeta, PlaneLayout, Rates, RealtimeClock, ResolvedMemory, Result, Sizes,
+    SlotTable, StreamConfig, StreamRequest, Unsupported, WaitHandle,
 };
 
 const FORMATS: [PixelFormat; 4] = [
@@ -37,8 +36,6 @@ const FORMATS: [PixelFormat; 4] = [
 const MIN_FPS: f64 = 1.0;
 const MAX_FPS: f64 = 240.0;
 /// Pool depth limits, matching `--camera-buffers`.
-const MIN_BUFFERS: usize = 2;
-const MAX_BUFFERS: usize = 32;
 /// The mock writes with the CPU, so any CPU-mappable memory will do.
 const NATIVE: &[TensorMemory] = &[TensorMemory::Mem, TensorMemory::Shm, TensorMemory::DmaBuf];
 
@@ -105,14 +102,8 @@ pub(crate) fn open(builder: CameraBuilder) -> Result<Box<dyn Camera>> {
             format!("mock size {width}x{height} must be even and at least 16x16"),
         ));
     }
-    if builder.provided.is_none() && !(MIN_BUFFERS..=MAX_BUFFERS).contains(&request.buffers) {
-        return Err(Error::new(
-            ErrorKind::InvalidConfig,
-            format!(
-                "pool depth {} outside {MIN_BUFFERS}..={MAX_BUFFERS}",
-                request.buffers
-            ),
-        ));
+    if builder.provided.is_none() {
+        crate::config::check_pool_depth(request.buffers)?;
     }
     let fps = request.frame_rate.unwrap_or(fps).clamp(MIN_FPS, MAX_FPS);
     let mut config = StreamConfig::new(width, height, format, 0);
@@ -189,8 +180,8 @@ impl MockCamera {
             height: self.config.height as usize,
             // The mock adapts to any pitch, as a driver honouring padding does.
             row_stride: None,
-            min_count: MIN_BUFFERS,
-            max_count: MAX_BUFFERS,
+            min_count: *crate::POOL_DEPTH.start(),
+            max_count: *crate::POOL_DEPTH.end(),
             contiguity: self.request.contiguity,
             native: NATIVE,
         };
@@ -424,16 +415,7 @@ impl Camera for MockCamera {
             };
             let tensor = table.tensor(slot).clone();
             self.fill(&tensor)?;
-            let clock = if cfg!(unix) {
-                CaptureClock::Monotonic
-            } else {
-                CaptureClock::Realtime
-            };
-            let ts = Timestamp {
-                clock,
-                source: TimestampSource::EndOfFrame,
-                nanos: timestamp::now(clock)?,
-            };
+            let ts = timestamp::synthetic_now()?;
             let mut meta = FrameMeta::new(slot, self.seq, ts);
             meta.driver_sequence = Some(self.seq as u32);
             meta.realtime = self.clock.to_realtime(ts).ok();

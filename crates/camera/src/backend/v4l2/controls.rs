@@ -159,7 +159,7 @@ impl Controls {
                 let v = self
                     .info(uapi::V4L2_CID_VFLIP)
                     .map_or(Ok(0), |_| read(uapi::V4L2_CID_VFLIP))?;
-                ControlValue::Int((h != 0) as i64 | (((v != 0) as i64) << 1))
+                ControlValue::Int(i64::from(Mirror::from_flips(h != 0, v != 0).bits()))
             }
             ControlId::Exposure => {
                 ControlValue::Int(read(uapi::V4L2_CID_EXPOSURE_ABSOLUTE)? * EXPOSURE_UNIT_US)
@@ -218,12 +218,7 @@ impl Controls {
     }
 
     fn mirror(&self, dev: &Device, m: Mirror) -> Result<Applied> {
-        let (h, v) = match m {
-            Mirror::None => (false, false),
-            Mirror::Horizontal => (true, false),
-            Mirror::Vertical => (false, true),
-            Mirror::Both => (true, true),
-        };
+        let (h, v) = (m.horizontal(), m.vertical());
         let has_h = self.info(uapi::V4L2_CID_HFLIP).is_some();
         let has_v = self.info(uapi::V4L2_CID_VFLIP).is_some();
         let standard = (!h || has_h) && (!v || has_v) && (has_h || has_v);
@@ -249,7 +244,7 @@ impl Controls {
             quirks::viv_flip(dev, viv, axis, on)
                 .map_err(|e| v4l2_error("S_EXT_CTRLS VIV_EXTCTRL", e))?;
         }
-        self.viv_mirror.set(u8::from(h) | (u8::from(v) << 1));
+        self.viv_mirror.set(m.bits());
         Ok(Applied::Driver)
     }
 

@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 use edgefirst_libcamera_sys as sys;
 use edgefirst_tensor::{DType, PixelFormat, Tensor, TensorDyn};
 
-use self::manager::{c_id, errno_error, Manager};
+use self::manager::{c_id, errno_error, lookup_error, Manager};
 use super::rate::{round_fps, RateMeter};
 use crate::builder::Source;
 use crate::{
@@ -48,8 +48,6 @@ use crate::{
 
 pub(crate) use self::manager::set_match_list;
 
-const MIN_BUFFERS: usize = 2;
-const MAX_BUFFERS: usize = 32;
 /// How long `start()` waits for the first frame before `NotReady`.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 /// Poll slice while every buffer is held, so slots released on other
@@ -102,7 +100,7 @@ impl Handle {
         // SAFETY: a live manager, a NUL-terminated id and an out pointer.
         let ret = unsafe { (manager.functions().cam_open)(manager.raw(), cid.as_ptr(), &mut raw) };
         if ret < 0 {
-            return Err(errno_error(ret, &format!("open libcamera camera {id}")));
+            return Err(lookup_error(ret, &format!("open libcamera camera {id}")));
         }
         let raw = NonNull::new(raw).ok_or_else(|| {
             Error::new(ErrorKind::Backend, "the libcamera shim returned no camera")
@@ -212,7 +210,10 @@ impl Handle {
             events: libc::POLLIN,
             revents: 0,
         };
-        let ms = timeout.map_or(-1, |t| t.as_millis().min(i32::MAX as u128) as i32);
+        // Rounded up: a timeout under a millisecond still waits.
+        let ms = timeout.map_or(-1, |t| {
+            t.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32
+        });
         loop {
             // SAFETY: one valid pollfd.
             let n = unsafe { libc::poll(&mut pfd, 1, ms) };
@@ -283,14 +284,7 @@ fn orientation(m: Mirror) -> u32 {
 }
 
 fn mirror_of(o: u32) -> Option<Mirror> {
-    [
-        Mirror::None,
-        Mirror::Horizontal,
-        Mirror::Vertical,
-        Mirror::Both,
-    ]
-    .into_iter()
-    .find(|&m| orientation(m) == o)
+    Mirror::ALL.into_iter().find(|&m| orientation(m) == o)
 }
 
 /// Opens camera `builder.source` on `manager`.
@@ -302,15 +296,7 @@ pub(crate) fn open_on(manager: Arc<Manager>, builder: CameraBuilder) -> Result<B
         ));
     };
     let request = builder.request;
-    if !(MIN_BUFFERS..=MAX_BUFFERS).contains(&request.buffers) {
-        return Err(Error::new(
-            ErrorKind::InvalidConfig,
-            format!(
-                "pool depth {} outside {MIN_BUFFERS}..={MAX_BUFFERS}",
-                request.buffers
-            ),
-        ));
-    }
+    crate::config::check_pool_depth(request.buffers)?;
     if request.memory == MemoryStrategy::Import {
         return Err(Error::new(
             ErrorKind::InvalidConfig,
@@ -630,13 +616,15 @@ impl LibcameraCamera {
         let deadline = Instant::now() + FIRST_FRAME_TIMEOUT;
         loop {
             while let Some(c) = self.handle.dequeue() {
+                // A failed or cancelled request goes straight back, so no
+                // slot is lost before the first frame.
                 match c.status {
                     sys::EFCAM_LC_STATUS_OK => return Ok(c),
                     sys::EFCAM_LC_STATUS_ERROR => {
                         self.stats.errors += 1;
                         self.handle.requeue(c.slot, None)?;
                     }
-                    _ => {}
+                    _ => self.handle.requeue(c.slot, None)?,
                 }
             }
             let left = deadline.saturating_duration_since(Instant::now());
@@ -795,14 +783,9 @@ impl Camera for LibcameraCamera {
         let last = self.last.as_ref();
         let value = match id {
             ControlId::FrameRate => self.config.frame_rate.map(ControlValue::Float),
-            ControlId::Mirror => mirror_of(self.stream.orientation).map(|m| {
-                ControlValue::Int(match m {
-                    Mirror::None => 0,
-                    Mirror::Horizontal => 1,
-                    Mirror::Vertical => 2,
-                    Mirror::Both => 3,
-                })
-            }),
+            ControlId::Mirror => {
+                mirror_of(self.stream.orientation).map(|m| ControlValue::Int(i64::from(m.bits())))
+            }
             ControlId::Exposure => last
                 .filter(|c| c.exposure_time_us >= 0)
                 .map(|c| ControlValue::Int(c.exposure_time_us)),

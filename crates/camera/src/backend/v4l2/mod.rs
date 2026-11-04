@@ -52,8 +52,6 @@ use crate::{
 
 pub(crate) use self::device::{enumerate, probe};
 
-const MIN_BUFFERS: usize = 2;
-const MAX_BUFFERS: usize = 32;
 /// How long `start()` waits for the first frame: the Import probe, and the
 /// `NotReady` check for an ISP that is still restarting (about 4 s on the
 /// i.MX 8M Plus after `isp_media_server` restarts).
@@ -70,18 +68,12 @@ pub(crate) fn open(builder: CameraBuilder) -> Result<Box<dyn Camera>> {
         ));
     };
     let request = builder.request;
-    if builder.provided.is_none() && !(MIN_BUFFERS..=MAX_BUFFERS).contains(&request.buffers) {
-        return Err(Error::new(
-            ErrorKind::InvalidConfig,
-            format!(
-                "pool depth {} outside {MIN_BUFFERS}..={MAX_BUFFERS}",
-                request.buffers
-            ),
-        ));
+    if builder.provided.is_none() {
+        crate::config::check_pool_depth(request.buffers)?;
     }
     let _span = tracing::debug_span!("camera.v4l2.open", path = %path.display()).entered();
     let (dev, buf_type) = device::open(path, builder.exclusive)?;
-    let descriptor = device::describe(&dev, buf_type);
+    let descriptor = device::describe(&dev, buf_type)?;
     let neg = negotiate(
         &dev,
         buf_type,
@@ -347,8 +339,8 @@ impl V4l2Camera {
             width: self.neg.width as usize,
             height: self.neg.height as usize,
             row_stride: Some(self.neg.strides[0]),
-            min_count: MIN_BUFFERS,
-            max_count: MAX_BUFFERS,
+            min_count: *crate::POOL_DEPTH.start(),
+            max_count: *crate::POOL_DEPTH.end(),
             contiguity: self.request.contiguity,
             native: &[TensorMemory::DmaBuf],
         };
@@ -464,7 +456,7 @@ impl V4l2Camera {
             let mut t = TensorDyn::from_fd(fd, &self.shape()?, DType::U8, None)?;
             t.set_format(format)?;
             t.set_row_stride(self.neg.strides[0])?;
-            // The tensor owns a dup; record the fd it holds.
+            // The tensor keeps this fd; record the one it holds.
             let handle = t.dmabuf().map_or(handle, |b| i64::from(b.as_raw_fd()));
             return Ok((t, vec![handle]));
         }

@@ -101,7 +101,8 @@ impl Control {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ControlId {
-    /// Mirroring: `Int` 0 none, 1 horizontal, 2 vertical, 3 both.
+    /// Mirroring: `Int` [`Mirror::bits`], 0 none, 1 horizontal, 2 vertical,
+    /// 3 both.
     Mirror,
     /// Frame rate: `Float` frames per second.
     FrameRate,

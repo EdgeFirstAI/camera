@@ -6,9 +6,9 @@
 //! Portable camera capture into [`edgefirst_tensor`] zero-copy buffers.
 //!
 //! A [`Camera`] delivers [`Frame`]s: tensors plus capture metadata. Frames
-//! are DMA-BUF tensors on Linux (IOSurface, D3D11 and AHardwareBuffer on
-//! later platforms), ready for `edgefirst-image` conversion and for
-//! publishing as `edgefirst-schemas` `CameraFrame` messages.
+//! from Linux cameras are DMA-BUF tensors, ready for `edgefirst-image`
+//! conversion and for publishing as `edgefirst-schemas` `CameraFrame`
+//! messages.
 //!
 //! - **Requests, not commands.** Size, format, frame rate and controls are
 //!   requests. [`Camera::config`] and [`Applied`] report what was actually
@@ -19,9 +19,9 @@
 //! - **Acquisition time.** Each frame carries its capture instant in the
 //!   driver's clock and its wall-clock acquisition time, converted once at
 //!   dequeue with [`RealtimeClock`].
-//! - **Bindable.** The API has no generics or lifetimes; `Box<dyn Camera>`
-//!   is the handle the Python, C, Swift and Kotlin surfaces wrap, and
-//!   [`ErrorKind`] maps to their error codes.
+//! - **Bindable.** The API has no generics or lifetimes, so
+//!   `Box<dyn Camera>` can be wrapped by other languages, and [`ErrorKind`]
+//!   is a stable error category.
 //!
 //! ## Example
 //!
@@ -57,8 +57,8 @@
 //! - `mock`: the synthetic frame source (`mock[:WxH@fps]`).
 //! - `file`: recorded H.264 playback (`file:<name>.h264` with its
 //!   `<name>.json` sidecar), decoded by the platform's V4L2 decoder.
-//! - `schemas`: [`schema`], the `Frame` → `edgefirst_msgs/CameraFrame`
-//!   mapping.
+//! - `schemas`: the `schema` module, the `Frame` →
+//!   `edgefirst_msgs/CameraFrame` mapping.
 
 mod backend;
 mod builder;
@@ -79,12 +79,16 @@ pub use builder::CameraBuilder;
 pub use camera::{Camera, CaptureStats, WaitHandle};
 pub use config::{
     BufferPool, Contiguity, MemoryStrategy, Mirror, ResolvedMemory, StreamConfig, StreamRequest,
+    POOL_DEPTH,
 };
 pub use control::{
     Applied, Control, ControlFlags, ControlId, ControlInfo, ControlSet, ControlValue, Exposure,
     Gain, Unsupported, WhiteBalance,
 };
-pub use enumerate::{modes, Backend, CameraDescriptor, FormatInfo, Mode, Rates, SizeRates, Sizes};
+pub use enumerate::{
+    modes, named_size, size_names, Backend, CameraDescriptor, FormatInfo, Mode, Rates, SizeRates,
+    Sizes,
+};
 pub use error::{Error, ErrorKind, Rejection, Result};
 pub use frame::{Frame, FrameMeta, PlaneLayout, SlotRelease};
 pub use pool::SlotTable;

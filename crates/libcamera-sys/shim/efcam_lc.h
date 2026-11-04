@@ -29,6 +29,16 @@ extern "C" {
 
 #define EFCAM_LC_API __attribute__((visibility("default")))
 
+/*
+ * No exception may unwind out of the shim into its C or Rust caller: an
+ * exception that reaches an exported function terminates the process.
+ */
+#ifdef __cplusplus
+#define EFCAM_LC_NOEXCEPT noexcept
+#else
+#define EFCAM_LC_NOEXCEPT
+#endif
+
 #define EFCAM_LC_ABI_VERSION 1u
 #define EFCAM_LC_MAX_PLANES 4
 #define EFCAM_LC_MAX_DEVICES 8
@@ -185,57 +195,57 @@ struct efcam_lc_completion {
 	uint32_t bytes_used[EFCAM_LC_MAX_PLANES];
 };
 
-EFCAM_LC_API uint32_t efcam_lc_abi_version(void);
+EFCAM_LC_API uint32_t efcam_lc_abi_version(void) EFCAM_LC_NOEXCEPT;
 /* The libcamera version the shim was built against, e.g. "0.7.0". */
-EFCAM_LC_API const char *efcam_lc_build_version(void);
+EFCAM_LC_API const char *efcam_lc_build_version(void) EFCAM_LC_NOEXCEPT;
 /* The loaded libcamera's version string (CameraManager::version()). */
-EFCAM_LC_API const char *efcam_lc_runtime_version(void);
+EFCAM_LC_API const char *efcam_lc_runtime_version(void) EFCAM_LC_NOEXCEPT;
 
 /* Starts the process's CameraManager; libcamera allows one at a time. */
-EFCAM_LC_API int efcam_lc_mgr_create(efcam_lc_mgr **out);
-EFCAM_LC_API void efcam_lc_mgr_destroy(efcam_lc_mgr *mgr);
-EFCAM_LC_API int efcam_lc_mgr_camera_count(efcam_lc_mgr *mgr);
+EFCAM_LC_API int efcam_lc_mgr_create(efcam_lc_mgr **out) EFCAM_LC_NOEXCEPT;
+EFCAM_LC_API void efcam_lc_mgr_destroy(efcam_lc_mgr *mgr) EFCAM_LC_NOEXCEPT;
+EFCAM_LC_API int efcam_lc_mgr_camera_count(efcam_lc_mgr *mgr) EFCAM_LC_NOEXCEPT;
 EFCAM_LC_API int efcam_lc_mgr_camera_info(efcam_lc_mgr *mgr, uint32_t index,
-					  struct efcam_lc_camera_info *info);
+					  struct efcam_lc_camera_info *info) EFCAM_LC_NOEXCEPT;
 /*
  * Writes up to `capacity` formats of camera `id` for `role` into `out`, an
  * array whose element size is out[0].size, and returns how many exist.
  */
 EFCAM_LC_API int efcam_lc_mgr_formats(efcam_lc_mgr *mgr, const char *id,
 				      uint32_t role, struct efcam_lc_format *out,
-				      uint32_t capacity);
+				      uint32_t capacity) EFCAM_LC_NOEXCEPT;
 
 /* Acquires camera `id`: -ENODEV when absent, -EBUSY when held. */
 EFCAM_LC_API int efcam_lc_cam_open(efcam_lc_mgr *mgr, const char *id,
-				   efcam_lc_cam **out);
+				   efcam_lc_cam **out) EFCAM_LC_NOEXCEPT;
 /* Configures one stream; -EINVAL when invalid, -EBUSY with buffers allocated. */
 EFCAM_LC_API int efcam_lc_cam_configure(efcam_lc_cam *cam,
 					const struct efcam_lc_stream_request *req,
-					struct efcam_lc_stream_info *info);
+					struct efcam_lc_stream_info *info) EFCAM_LC_NOEXCEPT;
 /* 0 and `info` when the configured camera offers `control`, else -ENOENT. */
 EFCAM_LC_API int efcam_lc_cam_control_info(efcam_lc_cam *cam, uint32_t control,
-					   struct efcam_lc_control_info *info);
+					   struct efcam_lc_control_info *info) EFCAM_LC_NOEXCEPT;
 /* Allocates the stream's buffers, one request per buffer; returns the count. */
-EFCAM_LC_API int efcam_lc_cam_alloc(efcam_lc_cam *cam);
+EFCAM_LC_API int efcam_lc_cam_alloc(efcam_lc_cam *cam) EFCAM_LC_NOEXCEPT;
 EFCAM_LC_API int efcam_lc_cam_buffer(efcam_lc_cam *cam, uint32_t slot,
-				     struct efcam_lc_buffer *buf);
+				     struct efcam_lc_buffer *buf) EFCAM_LC_NOEXCEPT;
 /* Starts the camera and queues every request. */
 EFCAM_LC_API int efcam_lc_cam_start(efcam_lc_cam *cam,
-				    const struct efcam_lc_controls *ctrls);
+				    const struct efcam_lc_controls *ctrls) EFCAM_LC_NOEXCEPT;
 /* An EFD_NONBLOCK eventfd, readable while completions are pending. */
-EFCAM_LC_API int efcam_lc_cam_event_fd(efcam_lc_cam *cam);
+EFCAM_LC_API int efcam_lc_cam_event_fd(efcam_lc_cam *cam) EFCAM_LC_NOEXCEPT;
 /* Returns 1 and the oldest completion, or 0 when none is pending. */
 EFCAM_LC_API int efcam_lc_cam_dequeue(efcam_lc_cam *cam,
-				      struct efcam_lc_completion *c);
+				      struct efcam_lc_completion *c) EFCAM_LC_NOEXCEPT;
 /* Reuses the request of `slot`, keeping its buffer, and queues it. */
 EFCAM_LC_API int efcam_lc_cam_requeue(efcam_lc_cam *cam, uint32_t slot,
-				      const struct efcam_lc_controls *ctrls);
+				      const struct efcam_lc_controls *ctrls) EFCAM_LC_NOEXCEPT;
 /* Stops the camera; in-flight requests complete or are cancelled first. */
-EFCAM_LC_API int efcam_lc_cam_stop(efcam_lc_cam *cam);
+EFCAM_LC_API int efcam_lc_cam_stop(efcam_lc_cam *cam) EFCAM_LC_NOEXCEPT;
 /* Stops if needed, destroys the requests and frees the buffers. */
-EFCAM_LC_API int efcam_lc_cam_free(efcam_lc_cam *cam);
+EFCAM_LC_API int efcam_lc_cam_free(efcam_lc_cam *cam) EFCAM_LC_NOEXCEPT;
 /* Frees everything and releases the camera. */
-EFCAM_LC_API void efcam_lc_cam_close(efcam_lc_cam *cam);
+EFCAM_LC_API void efcam_lc_cam_close(efcam_lc_cam *cam) EFCAM_LC_NOEXCEPT;
 
 #ifdef __cplusplus
 }

@@ -36,17 +36,15 @@ use crate::builder::Source;
 use crate::frame::TensorHolder;
 use crate::Sidecar;
 use crate::{
-    timestamp, Applied, Backend, BufferPool, Camera, CameraBuilder, CameraDescriptor, CaptureClock,
-    CaptureStats, Contiguity, Control, ControlId, ControlInfo, ControlSet, ControlValue, Error,
-    ErrorKind, Frame, FrameMeta, PlaneLayout, RealtimeClock, Rejection, Result, StreamConfig,
-    StreamRequest, Timestamp, TimestampSource, Unsupported, WaitHandle,
+    timestamp, Applied, Backend, BufferPool, Camera, CameraBuilder, CameraDescriptor, CaptureStats,
+    Contiguity, Control, ControlId, ControlInfo, ControlSet, ControlValue, Error, ErrorKind, Frame,
+    FrameMeta, PlaneLayout, RealtimeClock, Rejection, Result, StreamConfig, StreamRequest,
+    Unsupported, WaitHandle,
 };
 
 const MIN_FPS: f64 = 0.1;
 const MAX_FPS: f64 = 1000.0;
 /// Pool depth limits, matching `--camera-buffers`.
-const MIN_BUFFERS: usize = 2;
-const MAX_BUFFERS: usize = 32;
 /// Consecutive undecodable units after which the decoder is taken to have
 /// failed rather than the stream to be damaged.
 const MAX_CONSECUTIVE_SKIPS: u32 = 30;
@@ -231,14 +229,8 @@ impl FileCamera {
         if request.mirror.is_some() {
             tracing::warn!("file: mirroring is not supported by a file source");
         }
-        if builder.provided.is_none() && !(MIN_BUFFERS..=MAX_BUFFERS).contains(&request.buffers) {
-            return Err(Error::new(
-                ErrorKind::InvalidConfig,
-                format!(
-                    "pool depth {} outside {MIN_BUFFERS}..={MAX_BUFFERS}",
-                    request.buffers
-                ),
-            ));
+        if builder.provided.is_none() {
+            crate::config::check_pool_depth(request.buffers)?;
         }
         let fps = request.frame_rate.unwrap_or(sidecar.fps);
         if !(fps.is_finite() && fps > 0.0) {
@@ -459,16 +451,7 @@ impl FileCamera {
         std::thread::sleep(due.saturating_duration_since(now));
         self.pacer.delivered(due, Instant::now());
 
-        let clock = if cfg!(unix) {
-            CaptureClock::Monotonic
-        } else {
-            CaptureClock::Realtime
-        };
-        let ts = Timestamp {
-            clock,
-            source: TimestampSource::EndOfFrame,
-            nanos: timestamp::now(clock)?,
-        };
+        let ts = timestamp::synthetic_now()?;
         let Ready { picture, encoded } = ready;
         let mut meta = FrameMeta::new(0, self.seq, ts);
         meta.realtime = self.clock.to_realtime(ts).ok();

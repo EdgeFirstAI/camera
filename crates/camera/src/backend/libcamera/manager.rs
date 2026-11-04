@@ -107,7 +107,7 @@ impl Manager {
         let count =
             unsafe { (f.mgr_formats)(self.raw(), cid.as_ptr(), role, std::ptr::null_mut(), 0) };
         if count < 0 {
-            return Err(errno_error(count, &format!("list the formats of {id}")));
+            return Err(lookup_error(count, &format!("list the formats of {id}")));
         }
         let mut out = vec![sys::efcam_lc_format::default(); count as usize];
         if out.is_empty() {
@@ -124,7 +124,7 @@ impl Manager {
             )
         };
         if got < 0 {
-            return Err(errno_error(got, &format!("list the formats of {id}")));
+            return Err(lookup_error(got, &format!("list the formats of {id}")));
         }
         out.truncate(got.min(count) as usize);
         Ok(out)
@@ -177,14 +177,21 @@ pub(crate) fn c_id(id: &str) -> Result<CString> {
     })
 }
 
-/// An error from a shim call returning `-errno`.
+/// An error from a shim call returning `-errno`, kinded like every other
+/// backend's errno.
 pub(crate) fn errno_error(ret: i32, what: &str) -> Error {
     let errno = -ret;
-    let kind = match errno {
-        libc::ENODEV | libc::ENOENT => ErrorKind::NotFound,
-        libc::EBUSY => ErrorKind::Busy,
-        libc::EINVAL => ErrorKind::InvalidConfig,
-        _ => ErrorKind::Backend,
-    };
+    let kind = crate::error::errno_kind(errno).unwrap_or(ErrorKind::Backend);
     Error::new(kind, format!("cannot {what}")).with_source(std::io::Error::from_raw_os_error(errno))
+}
+
+/// An error from a shim call that looks a camera up by id, where `ENODEV`
+/// means no camera has that id rather than a camera that went away.
+pub(crate) fn lookup_error(ret: i32, what: &str) -> Error {
+    let err = errno_error(ret, what);
+    if -ret == libc::ENODEV {
+        Error::new(ErrorKind::NotFound, err.to_string()).with_source(err)
+    } else {
+        err
+    }
 }

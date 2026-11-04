@@ -151,6 +151,20 @@ pub(crate) const NAMED_SIZES: [(&str, u32, u32); 6] = [
     ("4K", 3840, 2160),
 ];
 
+/// The size a standard name stands for (`VGA`, `WVGA`, `540p`, `720p`,
+/// `1080p`, `4K`), in any letter case.
+pub fn named_size(name: &str) -> Option<(u32, u32)> {
+    NAMED_SIZES
+        .iter()
+        .find(|(n, ..)| n.eq_ignore_ascii_case(name))
+        .map(|&(_, w, h)| (w, h))
+}
+
+/// The standard size names, in increasing size.
+pub fn size_names() -> impl Iterator<Item = &'static str> {
+    NAMED_SIZES.iter().map(|&(n, ..)| n)
+}
+
 impl Mode {
     /// The mode's name: a standard size name followed by the whole-number
     /// rate (`1080p30`), or `WxH@fps` for other sizes.
@@ -227,6 +241,14 @@ pub fn modes(formats: &[FormatInfo], format: PixelFormat) -> Vec<Mode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn size_names_ignore_case() {
+        assert_eq!(named_size("1080P"), Some((1920, 1080)));
+        assert_eq!(named_size("4k"), Some((3840, 2160)));
+        assert_eq!(named_size("8K"), None);
+        assert_eq!(size_names().count(), NAMED_SIZES.len());
+    }
 
     /// The OV5640 on the i.MX 8M Plus ISI, as enumerated on imx8mpevk-08.
     fn isi_ov5640() -> Vec<FormatInfo> {
