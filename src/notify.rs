@@ -73,6 +73,7 @@ fn send(message: &str) {
 
 /// The watchdog interval for this process from `WATCHDOG_USEC` and
 /// `WATCHDOG_PID`, halved.
+#[cfg(any(target_os = "linux", test))]
 fn ping_interval(usec: Option<&str>, pid: Option<&str>) -> Option<Duration> {
     if pid.is_some_and(|p| p.parse::<u32>().ok() != Some(std::process::id())) {
         return None;

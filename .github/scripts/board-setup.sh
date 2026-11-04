@@ -63,11 +63,22 @@ PY
     echo "board-setup: libcamera camera through nxp/neo"
     ;;
   *)
-    # The ISP-restart test needs the vvcam ISP daemon. A board without the
-    # unit has an ISI sensor, which the test does not apply to.
-    if ! systemctl cat imx8-isp.service >/dev/null 2>&1; then
+    # The ISP-restart test needs the camera to be the vvcam ISP's node,
+    # which the tests recognise by its V4L2 driver name, as here. A board
+    # can carry imx8-isp.service and still capture through the ISI.
+    camera=${EDGEFIRST_CAMERA_SOURCE:-/dev/video3}
+    driver=$(python3 - "$camera" <<'PY' || true
+import fcntl, sys
+VIDIOC_QUERYCAP = 0x80685600  # _IOR('V', 0, struct v4l2_capability)
+buf = bytearray(104)
+with open(sys.argv[1], "rb", buffering=0) as dev:
+    fcntl.ioctl(dev, VIDIOC_QUERYCAP, buf)
+print(buf[:16].split(b"\0")[0].decode())
+PY
+)
+    if [[ "$driver" != *viv* ]]; then
       allow+=(not-vvcam)
-      echo "::notice::board-setup: $(hostname) has no imx8-isp.service; the ISP-restart test is expected to skip"
+      echo "::notice::board-setup: $camera is driver '${driver:-unknown}', not the vvcam ISP; the ISP-restart test is expected to skip"
     fi
     echo "board-setup: V4L2 camera"
     ;;

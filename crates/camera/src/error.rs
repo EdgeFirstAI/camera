@@ -197,17 +197,17 @@ pub(crate) fn errno_kind(errno: i32) -> Option<ErrorKind> {
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
-        #[cfg(unix)]
-        let errno = err.raw_os_error().and_then(errno_kind);
-        #[cfg(not(unix))]
-        let errno: Option<ErrorKind> = None;
-        let kind = errno.unwrap_or(match err.kind() {
+        let by_kind = match err.kind() {
             std::io::ErrorKind::NotFound => ErrorKind::NotFound,
             std::io::ErrorKind::WouldBlock => ErrorKind::NotReady,
             std::io::ErrorKind::Interrupted => ErrorKind::Interrupted,
             std::io::ErrorKind::TimedOut => ErrorKind::Timeout,
             _ => ErrorKind::Io,
-        });
+        };
+        #[cfg(unix)]
+        let kind = err.raw_os_error().and_then(errno_kind).unwrap_or(by_kind);
+        #[cfg(not(unix))]
+        let kind = by_kind;
         Self::new(kind, err.to_string()).with_source(err)
     }
 }
