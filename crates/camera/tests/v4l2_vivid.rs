@@ -16,8 +16,9 @@
 //! The fault-injection tests need a debug build.
 #![cfg(all(target_os = "linux", feature = "v4l2"))]
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -62,11 +63,39 @@ fn vivid(n: u32) -> Option<Vivid> {
         let _ = writeln!(std::io::stderr(), "SKIPPED: {why}");
         return None;
     };
-    let lock = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("vivid-{n}.lock"));
-    let file = File::create(lock).expect("lock file");
+    let file = lock_file(n);
     // SAFETY: the descriptor is open for the call.
     assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) }, 0);
     Some(Vivid { path, _lock: file })
+}
+
+/// The lock file of vivid instance `n`. The instances belong to the
+/// kernel, so the path is the same for every build and checkout on the
+/// machine: under `/run/lock`, else the system temporary directory, else
+/// this build's target dir. `flock` needs only a read descriptor, so a lock
+/// file another user created serves as well.
+fn lock_file(n: u32) -> File {
+    let name = format!("edgefirst-camera-vivid-{n}.lock");
+    let dirs = [
+        PathBuf::from("/run/lock"),
+        std::env::temp_dir(),
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")),
+    ];
+    for dir in &dirs {
+        let path = dir.join(&name);
+        let opened = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o666)
+            .open(&path)
+            .or_else(|_| File::open(&path));
+        if let Ok(file) = opened {
+            return file;
+        }
+    }
+    panic!("cannot open {name} in any of {dirs:?}");
 }
 
 fn builder(v: &Vivid) -> CameraBuilder {

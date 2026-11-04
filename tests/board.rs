@@ -12,8 +12,10 @@
 //!   `common::source`. Without it the tests print `SKIPPED` and pass.
 //! - `EDGEFIRST_SOAK_SECS`: how long the 1080p30 soak runs, default 20;
 //!   600 for the ten-minute platform run.
-//! - `EDGEFIRST_RECORDING`: a camera 2.x recording (`.h264` with its
+//! - `EDGEFIRST_CAMERA_RECORDING`: a camera 2.x recording (`.h264` with its
 //!   `.json`) for the decode test, which skips without it.
+//! - `EDGEFIRST_CAMERA_REQUIRE_BOARD=1`: every skip fails, except those
+//!   named in `EDGEFIRST_CAMERA_ALLOW_SKIPS` (see `common::Skip`).
 //!
 //! vvcam-only tests (the ISP daemon restart, the VIV mirror quirk) check the
 //! driver and skip elsewhere. The restart test restarts `imx8-isp.service`.
@@ -40,6 +42,8 @@ use edgefirst_tensor::{CpuAccess, DType, ImageDesc, PixelFormat, TensorDyn, Tens
 use serial_test::serial;
 
 mod common;
+
+use common::Skip;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -355,9 +359,12 @@ fn mirror_both_turns_the_image() -> TestResult {
     let (turned, applied) = capture(Mirror::Both)?;
     // `ControlId::Mirror` reads back 3 for both axes.
     if applied != ControlValue::Int(3) {
-        eprintln!(
-            "SKIPPED: {} cannot mirror (reads back {applied:?}) and kept streaming",
-            t.source
+        common::skip(
+            Skip::NoMirror,
+            format!(
+                "{} cannot mirror (reads back {applied:?}) and kept streaming",
+                t.source
+            ),
         );
         return Ok(());
     }
@@ -366,7 +373,10 @@ fn mirror_both_turns_the_image() -> TestResult {
     let mean = plain.iter().sum::<f64>() / plain.len() as f64;
     let spread = mean_abs_diff(&plain, &vec![mean; plain.len()]);
     if spread < 4.0 {
-        eprintln!("SKIPPED: the scene is too uniform (spread {spread:.1}) to see a flip");
+        common::skip(
+            Skip::UniformScene,
+            format!("the scene is too uniform (spread {spread:.1}) to see a flip"),
+        );
         return Ok(());
     }
     let same = mean_abs_diff(&plain, &turned);
@@ -393,7 +403,7 @@ fn not_ready_across_an_isp_restart() -> TestResult {
         return Ok(());
     };
     if !is_vvcam(&t.source) {
-        eprintln!("SKIPPED: {} is not the vvcam ISP", t.source);
+        common::skip(Skip::NotVvcam, format!("{} is not the vvcam ISP", t.source));
         return Ok(());
     }
     isp("restart")?;
@@ -473,7 +483,10 @@ fn h264_encodes_within_the_latency_target() -> TestResult {
         let frame = camera.next_frame(TIMEOUT)?;
         let ts = frame.timestamp();
         if ts.clock != CaptureClock::Monotonic {
-            eprintln!("SKIPPED: frames are stamped on {:?}", ts.clock);
+            common::skip(
+                Skip::NotMonotonic,
+                format!("frames are stamped on {:?}", ts.clock),
+            );
             return Ok(());
         }
         let pts = u64::try_from(ts.nanos)?;
@@ -507,10 +520,13 @@ fn h264_encodes_within_the_latency_target() -> TestResult {
 /// platform decoder.
 #[test]
 #[serial]
-#[ignore = "requires a recording (set EDGEFIRST_RECORDING on a board)"]
+#[ignore = "requires a recording (set EDGEFIRST_CAMERA_RECORDING on a board)"]
 fn decodes_a_2x_recording() -> TestResult {
-    let Ok(path) = std::env::var("EDGEFIRST_RECORDING") else {
-        eprintln!("SKIPPED: set EDGEFIRST_RECORDING to a camera 2.x recording");
+    let Ok(path) = std::env::var("EDGEFIRST_CAMERA_RECORDING") else {
+        common::skip(
+            Skip::NoRecording,
+            "set EDGEFIRST_CAMERA_RECORDING to a camera 2.x recording",
+        );
         return Ok(());
     };
     let sidecar = edgefirst_camera::Sidecar::load(Path::new(&path))?;

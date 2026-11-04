@@ -8,7 +8,7 @@
 # - actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 (v7.0.1)
 # - dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d (v4.0.3)
 # - taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 (v2.87.32)
-# - actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 (v7.0.2)
+# - Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 (v2.9.2)
 
 name: CI
 
@@ -73,6 +73,7 @@ jobs:
             shim:
               - 'crates/libcamera-sys/shim/**'
               - '.github/workflows/ci.yml'
+              - '.github/workflows/libcamera-shim.yml'
       - id: mode
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -98,7 +99,9 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     uses: EdgeFirstAI/.github/.github/workflows/rust-quick.yml@c7876194b9fe9f7f72daf0efadaf32d7dff1b257
     with:
-      pre-command: bash .github/scripts/ci-setup.sh
+      # vivid-setup.sh fails the lane without vivid unless the repository
+      # variable CAMERA_ALLOW_NO_VIVID is true or the PR has ci:no-vivid.
+      pre-command: ${{ (vars.CAMERA_ALLOW_NO_VIVID == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:no-vivid')) && 'EDGEFIRST_CAMERA_ALLOW_NO_VIVID=1 ' || '' }}bash .github/scripts/ci-setup.sh
       nextest-args: --workspace --locked --features edgefirst-camera/mock,edgefirst-camera/schemas,edgefirst-camera/file --lib --bin edgefirst-camera --test env_scrub --test on_target --test board --test publish --test subcommands --test mock --test schema --test file --test v4l2_vivid --test layout
       clippy-args: --workspace --all-targets --all-features --locked -- -D warnings
       clippy-report: true
@@ -128,12 +131,14 @@ jobs:
     name: V4L2 ioctl ABI
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    # Pinned, not ubuntu-latest: vivid comes from this image's
-    # linux-modules-extra package.
+    # Pinned, not ubuntu-latest: vivid comes from this image's kernel
+    # modules (vivid-setup.sh).
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
+    env:
+      EDGEFIRST_CAMERA_ALLOW_NO_VIVID: ${{ (vars.CAMERA_ALLOW_NO_VIVID == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:no-vivid')) && '1' || '0' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install strace and load vivid
@@ -144,47 +149,48 @@ jobs:
       # rust-toolchain.toml pins the compiler; rustup installs it on first use.
       - name: Trace the vivid tests
         run: |
+          # Reached without vivid only when vivid-setup.sh was allowed to skip.
           if [[ "${EDGEFIRST_CAMERA_REQUIRE_VIVID:-}" != 1 ]]; then
             echo "::warning::vivid is unavailable on this runner; ioctl ABI check skipped"
             exit 0
           fi
           bash .github/scripts/ioctl-abi-check.sh "$RUNNER_TEMP/ioctl-abi"
 
-  # One prebuilt shim per supported libcamera minor and architecture, as
-  # the release ships them: built in Debian bookworm (GCC 12) against the
-  # upstream vX.Y.0 tag, then import-checked against that libcamera and
-  # loaded natively. The libcamera board takes the aarch64 ones.
+  # The workspace lint above unifies features, so a feature that only
+  # compiles beside another is caught here: each SDK feature alone, none,
+  # and the defaults.
+  sdk-features:
+    name: SDK feature lint
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      # rust-toolchain.toml is the single source of the compiler version.
+      - name: Install the pinned toolchain
+        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal --component clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          shared-key: sdk-features
+          cache-on-failure: true
+          cache-bin: false
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037  # v2.87.32
+        with:
+          tool: cargo-hack
+      - name: Clippy with each SDK feature alone
+        run: cargo hack clippy -p edgefirst-camera --each-feature --all-targets --locked -- -D warnings
+
+  # The prebuilt libcamera shims; the libcamera board takes the aarch64 ones.
   libcamera-shim:
-    name: libcamera shim ${{ matrix.libcamera }} ${{ matrix.arch }}
     needs: changes
     if: >-
       needs.changes.outputs.shim == 'true' ||
       needs.changes.outputs.full == 'true' ||
       needs.changes.outputs.hardware == 'true'
-    runs-on: ${{ matrix.runner }}
-    container: debian:bookworm
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        libcamera: [v0.5.0, v0.6.0, v0.7.0]
-        arch: [x86_64, aarch64]
-        include:
-          - arch: x86_64
-            runner: ubuntu-24.04
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - name: Build and check the shim
-        run: crates/libcamera-sys/shim/build-prebuilt.sh "${{ matrix.libcamera }}" "$RUNNER_TEMP/shim"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
-        with:
-          name: libcamera-shim-${{ matrix.arch }}-${{ matrix.libcamera }}
-          path: ${{ runner.temp }}/shim
-          if-no-files-found: error
+    uses: ./.github/workflows/libcamera-shim.yml
 
   full:
     needs: [changes, libcamera-shim]
@@ -209,12 +215,14 @@ jobs:
       board-timeout-minutes: 45
       runner-class-linux: larger
       runner-class-linux-arm: larger
-      pre-command: bash .github/scripts/ci-setup.sh
+      # As in quick: vivid is required unless explicitly allowed.
+      pre-command: ${{ (vars.CAMERA_ALLOW_NO_VIVID == 'true' || contains(github.event.pull_request.labels.*.name, 'ci:no-vivid')) && 'EDGEFIRST_CAMERA_ALLOW_NO_VIVID=1 ' || '' }}bash .github/scripts/ci-setup.sh
       # Unset, the board lane would run pre-command.
       board-pre-command: bash .github/scripts/board-setup.sh
       board-extra-args: -j 1 --no-fail-fast -- --include-ignored
       nextest-args: --workspace --locked --features edgefirst-camera/mock,edgefirst-camera/schemas,edgefirst-camera/file --lib --bin edgefirst-camera --test env_scrub --test on_target --test board --test publish --test subcommands --test mock --test schema --test file --test v4l2_vivid --test layout
-      archive-args: --locked --bin edgefirst-camera --test on_target --test board
+      # The SDK's file-source tests play the recording board-setup.sh names.
+      archive-args: --workspace --locked --features edgefirst-camera/file --bin edgefirst-camera --test on_target --test board --test file
     secrets: inherit
 
   camera-full:
@@ -234,7 +242,7 @@ jobs:
 
   ci-gate:
     if: always()
-    needs: [changes, quick, notice, ioctl-abi, libcamera-shim, full, camera-full, sonar]
+    needs: [changes, quick, notice, ioctl-abi, sdk-features, libcamera-shim, full, camera-full, sonar]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     permissions: {}

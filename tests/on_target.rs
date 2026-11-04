@@ -2,89 +2,230 @@
 // Copyright (c) 2026 Au-Zone Technologies. All Rights Reserved.
 
 //! End-to-end runs of the `edgefirst-camera` binary on a board's camera,
-//! named by `EDGEFIRST_CAMERA_SOURCE` (see `common::source`). Each run is
-//! stopped with SIGTERM so the binary shuts down through its normal path,
-//! which is also what writes its coverage profile.
+//! named by `EDGEFIRST_CAMERA_SOURCE` (see `common::source`). The capture
+//! runs subscribe to the binary over Zenoh, as a downstream service would,
+//! and require each topic to start and keep its rate. Each run is stopped
+//! with SIGTERM so the binary shuts down through its normal path, which is
+//! also what writes its coverage profile.
+//!
+//! - `EDGEFIRST_CAMERA_FPS`: the rate requested from the camera and expected
+//!   on every topic, default 30.
 
 #![cfg(target_os = "linux")]
 
+use edgefirst_schemas::edgefirst_msgs::CameraFrame;
 use serial_test::serial;
 use std::{
     error::Error,
     ffi::OsStr,
     fmt::Debug,
     path::{Path, PathBuf},
-    process::{Child, Command, ExitStatus, Stdio},
+    process::{Child, Command, Stdio},
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
+use zenoh::Wait as _;
 
 mod common;
 
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+use common::{camera_bin, free_endpoint, scratch_dir, subscriber_session, wait_with_deadline};
 
-/// nextest remaps this path when running from an archive; the compile-time
-/// `CARGO_BIN_EXE_` path names the build host.
-fn camera_bin() -> PathBuf {
-    std::env::var_os("NEXTEST_BIN_EXE_edgefirst_camera")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_edgefirst-camera")))
+type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
+
+/// How long a stopped binary may take to exit.
+const SHUTDOWN_BOUND: Duration = Duration::from_secs(3);
+/// From start-up to the first sample on every topic.
+const FIRST_SAMPLE: Duration = Duration::from_secs(20);
+/// How long each topic's rate is measured, from its first sample.
+const RATE_WINDOW: Duration = Duration::from_secs(10);
+/// The share of the expected rate a topic must keep.
+const MIN_RATE: f64 = 0.9;
+const DEFAULT_FPS: f64 = 30.0;
+
+const FRAME_TOPIC: &str = "camera/frame";
+const JPEG_TOPIC: &str = "camera/jpeg";
+const H264_TOPIC: &str = "camera/h264";
+
+/// The rate requested from the camera and expected on every topic.
+fn expected_fps() -> f64 {
+    std::env::var("EDGEFIRST_CAMERA_FPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|f: &f64| *f > 0.0)
+        .unwrap_or(DEFAULT_FPS)
 }
 
-fn wait_with_deadline(child: &mut Child, limit: Duration) -> Option<ExitStatus> {
-    let deadline = Instant::now() + limit;
-    while Instant::now() < deadline {
-        if let Ok(Some(status)) = child.try_wait() {
-            return Some(status);
-        }
-        thread::sleep(Duration::from_millis(100));
+fn spawn<S: AsRef<OsStr>>(args: &[S]) -> std::io::Result<Child> {
+    Command::new(camera_bin())
+        .args(args)
+        .stdin(Stdio::null())
+        .spawn()
+}
+
+/// Sends SIGTERM and requires a clean exit within [`SHUTDOWN_BOUND`].
+fn stop<S: AsRef<OsStr> + Debug>(child: Child, args: &[S]) -> TestResult {
+    let took = common::stop(child).map_err(|e| format!("{args:?}: {e}"))?;
+    eprintln!("stopped {took:?} after SIGTERM");
+    if took > SHUTDOWN_BOUND {
+        return Err(format!("{args:?} took {took:?} to stop, over {SHUTDOWN_BOUND:?}").into());
     }
-    None
+    Ok(())
 }
 
 /// Runs the binary for `duration`, requires it to still be running at the
-/// end, then requires a clean exit after SIGTERM.
-fn run_for<S: AsRef<OsStr> + Debug>(args: &[S], duration: Duration) -> Result<(), Box<dyn Error>> {
-    let mut child = Command::new(camera_bin())
-        .args(args)
-        .stdin(Stdio::null())
-        .spawn()?;
-
+/// end, then requires a prompt, clean exit after SIGTERM.
+fn run_for<S: AsRef<OsStr> + Debug>(args: &[S], duration: Duration) -> TestResult {
+    let mut child = spawn(args)?;
     if let Some(status) = wait_with_deadline(&mut child, duration) {
         return Err(format!("{args:?} exited early with {status}").into());
     }
+    stop(child, args)
+}
 
-    let pid = libc::pid_t::try_from(child.id())?;
-    // SAFETY: `pid` is our own child, which has not been reaped yet.
-    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
+/// Arrivals on one topic, with the frame `seq` where the topic carries one.
+#[derive(Default)]
+struct Arrivals {
+    times: Vec<Instant>,
+    seqs: Vec<u64>,
+    errors: Vec<String>,
+}
 
-    match wait_with_deadline(&mut child, SHUTDOWN_GRACE) {
-        Some(status) if status.success() => Ok(()),
-        Some(status) => Err(format!("{args:?} exited with {status} after SIGTERM").into()),
-        None => {
-            child.kill()?;
-            child.wait()?;
-            Err(format!("{args:?} ignored SIGTERM for {SHUTDOWN_GRACE:?}").into())
+/// Runs the binary with `args`, subscribed to `topics`. Requires the first
+/// sample on each within [`FIRST_SAMPLE`], then at least [`MIN_RATE`] of
+/// the expected rate over the [`RATE_WINDOW`] after it, frame `seq` that
+/// never goes back, and a prompt, clean exit after SIGTERM.
+fn stream(args: &[String], topics: &[&'static str]) -> TestResult {
+    let fps = expected_fps();
+    let endpoint = free_endpoint()?;
+    let mut args = args.to_vec();
+    args.extend([
+        "--listen".into(),
+        endpoint.clone(),
+        "--no-multicast-scouting".into(),
+    ]);
+    let started = Instant::now();
+    let mut child = spawn(&args)?;
+
+    let arrivals: Vec<Arc<Mutex<Arrivals>>> = topics.iter().map(|_| Arc::default()).collect();
+    let watched = (|| -> TestResult {
+        let session = subscriber_session(&endpoint)?;
+        let mut subscribers = Vec::new();
+        for (&topic, log) in topics.iter().zip(&arrivals) {
+            let log = Arc::clone(log);
+            // The binary namespaces its keys with the host name.
+            let subscriber = session
+                .declare_subscriber(format!("*/{topic}"))
+                .callback(move |sample| {
+                    let now = Instant::now();
+                    let mut log = log.lock().unwrap();
+                    log.times.push(now);
+                    if topic == FRAME_TOPIC {
+                        match CameraFrame::from_cdr(sample.payload().to_bytes().into_owned()) {
+                            Ok(frame) => log.seqs.push(frame.seq()),
+                            Err(e) => log.errors.push(e.to_string()),
+                        }
+                    }
+                })
+                .wait()?;
+            subscribers.push(subscriber);
+        }
+
+        let first = |log: &Arc<Mutex<Arrivals>>| log.lock().unwrap().times.first().copied();
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Err(format!("{args:?} exited early with {status}").into());
+            }
+            let firsts: Vec<_> = arrivals.iter().map(first).collect();
+            if firsts.iter().all(Option::is_some) {
+                let last_first = firsts.into_iter().flatten().max().ok_or("no topics")?;
+                eprintln!(
+                    "every topic started {:?} after launch",
+                    last_first - started
+                );
+                // Every window has closed once the last topic's has.
+                let end = last_first + RATE_WINDOW + Duration::from_millis(500);
+                while Instant::now() < end {
+                    if let Some(status) = child.try_wait()? {
+                        return Err(format!("{args:?} exited early with {status}").into());
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                break;
+            }
+            if started.elapsed() > FIRST_SAMPLE {
+                let missing: Vec<_> = topics
+                    .iter()
+                    .zip(&firsts)
+                    .filter(|(_, f)| f.is_none())
+                    .map(|(t, _)| *t)
+                    .collect();
+                return Err(format!("no sample on {missing:?} within {FIRST_SAMPLE:?}").into());
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        drop(subscribers);
+        Ok(())
+    })();
+    let stopped = stop(child, &args);
+    watched?;
+    stopped?;
+
+    let wanted = MIN_RATE * fps * RATE_WINDOW.as_secs_f64();
+    let mut failures = Vec::new();
+    for (topic, log) in topics.iter().zip(&arrivals) {
+        let log = log.lock().unwrap();
+        let first = log.times[0];
+        let count = log
+            .times
+            .iter()
+            .filter(|&&t| t.duration_since(first) < RATE_WINDOW)
+            .count();
+        let rate = count as f64 / RATE_WINDOW.as_secs_f64();
+        eprintln!("{topic}: {count} samples in {RATE_WINDOW:?} ({rate:.2}/s, expected {fps})");
+        if (count as f64) < wanted {
+            failures.push(format!(
+                "{topic}: {count} samples in {RATE_WINDOW:?}, under {wanted:.0} ({MIN_RATE} of {fps}/s)"
+            ));
+        }
+        if !log.errors.is_empty() {
+            failures.push(format!("{topic}: undecodable samples: {:?}", log.errors));
+        }
+        if let Some(w) = log.seqs.windows(2).find(|w| w[1] < w[0]) {
+            failures.push(format!("{topic}: seq went back from {} to {}", w[0], w[1]));
+        }
+        if *topic == FRAME_TOPIC && log.seqs.len() != log.times.len() {
+            failures.push(format!(
+                "{topic}: {} of {} samples carried a seq",
+                log.seqs.len(),
+                log.times.len()
+            ));
         }
     }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; ").into())
+    }
 }
 
-fn scratch_dir(name: &str) -> Result<PathBuf, Box<dyn Error>> {
-    let dir = std::env::temp_dir().join(format!("edgefirst-camera-{name}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
-}
-
-/// `args` capturing from the board's camera at 1080p, or `None` without a
-/// camera. Unset, the app keeps the sensor's current size, which after a
-/// reboot can be smaller than the default 1080p stream (the OV5640 comes up
-/// at 640x480).
+/// `args` capturing from the board's camera at 1080p and the expected rate,
+/// or `None` without a camera. Unset, the app keeps the sensor's current
+/// size, which after a reboot can be smaller than the default 1080p stream
+/// (the OV5640 comes up at 640x480).
 fn capture(args: &[&str]) -> Option<Vec<String>> {
     let source = common::source()?;
-    let size = ["--source", &source, "--camera-size", "1920", "1080"];
-    Some(size.iter().chain(args).map(|s| s.to_string()).collect())
+    let fps = expected_fps().to_string();
+    let camera = [
+        "--source",
+        &source,
+        "--camera-size",
+        "1920",
+        "1080",
+        "--camera-fps",
+        &fps,
+    ];
+    Some(camera.iter().chain(args).map(|s| s.to_string()).collect())
 }
 
 fn sidecar(recording: &Path) -> PathBuf {
@@ -92,7 +233,7 @@ fn sidecar(recording: &Path) -> PathBuf {
 }
 
 #[test]
-fn help_exits_cleanly() -> Result<(), Box<dyn Error>> {
+fn help_exits_cleanly() -> TestResult {
     let status = Command::new(camera_bin())
         .arg("--help")
         .stdout(Stdio::null())
@@ -104,30 +245,30 @@ fn help_exits_cleanly() -> Result<(), Box<dyn Error>> {
 #[test]
 #[serial]
 #[ignore = "requires a camera (run with --include-ignored on a board)"]
-fn jpeg_capture() -> Result<(), Box<dyn Error>> {
+fn jpeg_capture() -> TestResult {
     let Some(args) = capture(&["--jpeg"]) else {
         return Ok(());
     };
-    run_for(&args, Duration::from_secs(15))
+    stream(&args, &[FRAME_TOPIC, JPEG_TOPIC])
 }
 
 #[test]
 #[serial]
 #[ignore = "requires a camera (run with --include-ignored on a board)"]
-fn h264_capture() -> Result<(), Box<dyn Error>> {
+fn h264_capture() -> TestResult {
     let Some(args) = capture(&["--h264"]) else {
         return Ok(());
     };
-    run_for(&args, Duration::from_secs(15))
+    stream(&args, &[FRAME_TOPIC, H264_TOPIC])
 }
 
 #[test]
 #[serial]
 #[ignore = "requires a camera (run with --include-ignored on a board)"]
-fn record_then_replay() -> Result<(), Box<dyn Error>> {
+fn record_then_replay() -> TestResult {
     let dir = scratch_dir("record")?;
     let recording = dir.join("record.h264");
-    let result = (|| -> Result<(), Box<dyn Error>> {
+    let result = (|| -> TestResult {
         let path = recording.to_str().ok_or("non-UTF-8 temp path")?;
         let Some(record) = capture(&["--h264", "--record", path]) else {
             return Ok(());
@@ -152,10 +293,10 @@ fn record_then_replay() -> Result<(), Box<dyn Error>> {
 #[test]
 #[serial]
 #[ignore = "requires a camera (run with --include-ignored on a board)"]
-fn record_subcommand_writes_a_playable_recording() -> Result<(), Box<dyn Error>> {
+fn record_subcommand_writes_a_playable_recording() -> TestResult {
     let dir = scratch_dir("record-sub")?;
     let recording = dir.join("record.h264");
-    let result = (|| -> Result<(), Box<dyn Error>> {
+    let result = (|| -> TestResult {
         let path = recording.to_str().ok_or("non-UTF-8 temp path")?;
         let Some(camera) = capture(&[]) else {
             return Ok(());
@@ -163,10 +304,7 @@ fn record_subcommand_writes_a_playable_recording() -> Result<(), Box<dyn Error>>
         let mut args: Vec<String> =
             vec!["record".into(), path.into(), "--frames".into(), "90".into()];
         args.extend(camera);
-        let mut child = Command::new(camera_bin())
-            .args(&args)
-            .stdin(Stdio::null())
-            .spawn()?;
+        let mut child = spawn(&args)?;
         match wait_with_deadline(&mut child, Duration::from_secs(30)) {
             Some(status) if status.success() => {}
             Some(status) => return Err(format!("{args:?} exited with {status}").into()),
@@ -190,7 +328,7 @@ fn record_subcommand_writes_a_playable_recording() -> Result<(), Box<dyn Error>>
 #[test]
 #[serial]
 #[ignore = "requires a camera (run with --include-ignored on a board)"]
-fn devices_reports_the_cameras_modes() -> Result<(), Box<dyn Error>> {
+fn devices_reports_the_cameras_modes() -> TestResult {
     let Some(source) = common::source() else {
         return Ok(());
     };

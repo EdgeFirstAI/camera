@@ -28,16 +28,25 @@ jobs:
   advisories:
     uses: EdgeFirstAI/.github/.github/workflows/advisories.yml@c7876194b9fe9f7f72daf0efadaf32d7dff1b257
 
-  nightly:
+  # The prebuilt libcamera shims the i.MX 95 board lane loads.
+  libcamera-shim:
     needs: changed
+    if: needs.changed.outputs.run == 'true'
+    uses: ./.github/workflows/libcamera-shim.yml
+
+  nightly:
+    needs: [changed, libcamera-shim]
     if: needs.changed.outputs.run == 'true'
     uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@c7876194b9fe9f7f72daf0efadaf32d7dff1b257
     with:
       lanes: all
       nightly: true
-      # Any board with a working V4L2 capture path; libcamera-only boards
-      # cannot run the camera.
-      boards: camera-v4l2
+      # As in ci.yml: an i.MX 8M Plus through V4L2, and the i.MX 95 through
+      # libcamera; board-setup.sh points the tests at each board's camera.
+      boards: camera-v4l2+imx8mp, camera-libcamera+imx95
+      # The ten-minute platform soak (tests/board.rs).
+      env: |
+        EDGEFIRST_SOAK_SECS=600
       sonar: false
       scancode: true
       # macOS and Windows lanes live in camera-full.yml (nightly-camera).
@@ -47,12 +56,15 @@ jobs:
       board-timeout-minutes: 45
       runner-class-linux: hosted
       runner-class-linux-arm: hosted
-      pre-command: bash .github/scripts/ci-setup.sh
-      # The boards need no setup; unset, the board lane runs pre-command.
-      board-pre-command: "true"
+      # vivid is required unless the repository variable
+      # CAMERA_ALLOW_NO_VIVID is true (see vivid-setup.sh).
+      pre-command: ${{ vars.CAMERA_ALLOW_NO_VIVID == 'true' && 'EDGEFIRST_CAMERA_ALLOW_NO_VIVID=1 ' || '' }}bash .github/scripts/ci-setup.sh
+      # Unset, the board lane would run pre-command.
+      board-pre-command: bash .github/scripts/board-setup.sh
       board-extra-args: -j 1 --no-fail-fast -- --include-ignored
       nextest-args: --workspace --locked --features edgefirst-camera/mock,edgefirst-camera/schemas,edgefirst-camera/file --lib --bin edgefirst-camera --test env_scrub --test on_target --test board --test publish --test subcommands --test mock --test schema --test file --test v4l2_vivid --test layout
-      archive-args: --locked --bin edgefirst-camera --test on_target --test board
+      # The SDK's file-source tests play the recording board-setup.sh names.
+      archive-args: --workspace --locked --features edgefirst-camera/file --bin edgefirst-camera --test on_target --test board --test file
     secrets: inherit
 
   nightly-camera:

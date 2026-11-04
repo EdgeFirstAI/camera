@@ -6,7 +6,10 @@
 //! Opening errors are tested everywhere. Playback needs a hardware H.264
 //! decoder and a recording: set `EDGEFIRST_CAMERA_RECORDING` to a camera
 //! 2.x `.h264` file (its `.json` sidecar beside it) on an M2M-capable
-//! target. Without it the playback tests pass with a note.
+//! target. Without it the playback tests pass with a note, unless
+//! `EDGEFIRST_CAMERA_REQUIRE_BOARD=1` (board lanes), which makes that a
+//! failure; a lane without a decoder lists `no-recording` in
+//! `EDGEFIRST_CAMERA_ALLOW_SKIPS`.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -14,9 +17,16 @@ use std::time::{Duration, Instant};
 use edgefirst_camera::{CameraBuilder, ErrorKind};
 use edgefirst_codec::video::access_units;
 
-/// A scratch directory under the target dir, unique to the test.
+/// A scratch directory unique to the test: under the target dir, or under
+/// the system temporary directory when the tests run from an archive on
+/// another machine, where the build's target dir does not exist.
 fn scratch(test: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(test);
+    let built = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let dir = if built.is_dir() {
+        built.join(test)
+    } else {
+        std::env::temp_dir().join(format!("edgefirst-camera-{test}-{}", std::process::id()))
+    };
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -79,7 +89,13 @@ fn without_a_decoder_opening_is_not_found() {
 /// and sidecar rate.
 fn recording() -> Option<(String, usize, f64)> {
     let Ok(path) = std::env::var("EDGEFIRST_CAMERA_RECORDING") else {
-        eprintln!("EDGEFIRST_CAMERA_RECORDING is not set; skipping playback");
+        let allowed = std::env::var("EDGEFIRST_CAMERA_ALLOW_SKIPS").unwrap_or_default();
+        assert!(
+            std::env::var("EDGEFIRST_CAMERA_REQUIRE_BOARD").as_deref() != Ok("1")
+                || allowed.split([',', ' ']).any(|s| s == "no-recording"),
+            "EDGEFIRST_CAMERA_REQUIRE_BOARD=1 but EDGEFIRST_CAMERA_RECORDING is not set"
+        );
+        eprintln!("SKIPPED (no-recording): EDGEFIRST_CAMERA_RECORDING is not set");
         return None;
     };
     let bytes = std::fs::read(&path).expect("read the recording");

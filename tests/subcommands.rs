@@ -7,17 +7,15 @@
 
 use std::{
     error::Error,
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, Output},
 };
 
-type BoxError = Box<dyn Error + Send + Sync>;
+mod common;
 
-fn camera_bin() -> PathBuf {
-    std::env::var_os("NEXTEST_BIN_EXE_edgefirst_camera")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_edgefirst-camera")))
-}
+use common::{camera_bin, scratch_dir};
+
+type BoxError = Box<dyn Error + Send + Sync>;
 
 fn run(args: &[&str]) -> Result<Output, BoxError> {
     Ok(Command::new(camera_bin()).args(args).output()?)
@@ -31,12 +29,6 @@ fn json(args: &[&str]) -> Result<serde_json::Value, BoxError> {
         String::from_utf8_lossy(&out.stderr)
     );
     Ok(serde_json::from_slice(&out.stdout)?)
-}
-
-fn scratch_dir(name: &str) -> Result<PathBuf, BoxError> {
-    let dir = std::env::temp_dir().join(format!("edgefirst-camera-{name}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
 }
 
 fn path(p: &Path) -> Result<&str, BoxError> {
