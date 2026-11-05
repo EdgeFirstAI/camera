@@ -12,6 +12,11 @@
 #  3. the import gate (check-symbols.sh) against that same libcamera.
 # Writes <out-dir>/libcamera-0.<minor>/libedgefirst_camera_libcamera.so.1.
 #
+# LIBCAMERA_GIT builds from another repository, and SHIM_BUILD names the
+# result: Raspberry Pi's fork is LIBCAMERA_GIT=https://github.com/raspberrypi/libcamera.git
+# SHIM_BUILD=-rpi with a tag such as v0.7.2+rpt20261009, which writes
+# libcamera-0.7-rpi/.
+#
 # Run it as root in a debian:bookworm container with this directory
 # mounted. With [cross-triplet] (aarch64-linux-gnu) it cross-builds;
 # otherwise it builds for the container's own architecture.
@@ -76,7 +81,10 @@ ninja -C "$WORK/libcamera-build" install >/dev/null
 # shellcheck disable=SC2086
 PKG_CONFIG_PATH="$WORK/prefix/lib/pkgconfig" \
     meson setup $cross_args --buildtype release "$WORK/shim-build" "$SHIM" >"$WORK/shim-setup.log"
-PKG_CONFIG_PATH="$WORK/prefix/lib/pkgconfig" ninja -C "$WORK/shim-build" >/dev/null
+if ! PKG_CONFIG_PATH="$WORK/prefix/lib/pkgconfig" ninja -C "$WORK/shim-build" >"$WORK/shim-build.log" 2>&1; then
+    cat "$WORK/shim-build.log" >&2
+    exit 1
+fi
 
 so="$WORK/shim-build/libedgefirst_camera_libcamera.so.1"
 "$strip" --strip-unneeded "$so"
@@ -106,6 +114,7 @@ else:
 PY
 fi
 
-mkdir -p "$OUT/libcamera-$minor"
-cp "$so" "$OUT/libcamera-$minor/"
-echo "built $OUT/libcamera-$minor/libedgefirst_camera_libcamera.so.1 against libcamera $version (${CROSS:-native})"
+dir="$OUT/libcamera-$minor${SHIM_BUILD:-}"
+mkdir -p "$dir"
+cp "$so" "$dir/"
+echo "built $dir/libedgefirst_camera_libcamera.so.1 against libcamera $version (${CROSS:-native})"
