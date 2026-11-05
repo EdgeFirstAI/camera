@@ -57,7 +57,7 @@ graph LR
 |---|---|
 | `main.rs` | Argument parsing, logging, the Zenoh session, signals, and the startup sequence |
 | `args.rs` | Command-line flags and their environment variables, and the empty-variable scrub for systemd `EnvironmentFile`s |
-| `source.rs` | The request built from the command line, opening and starting the source, the capture pool, mirroring, and the retry while the ISP is not ready |
+| `source.rs` | The request built from the command line, opening and starting the source, mirroring, and the retry while the ISP is not ready |
 | `pipeline.rs` | The capture loop, publishers, encoder threads, drop reports and `tf_static` |
 | `encode.rs` | H.264 stages for the main stream and the tiles |
 | `jpeg.rs` | The JPEG stage |
@@ -74,7 +74,7 @@ The application and the SDK also build and run on macOS and Windows, where only 
 
 1. **Arguments.** Empty environment variables are removed before parsing, so `KEY=""` in `/etc/default/camera` means unset. Combinations that cannot work (`--record` without `--h264`, or with a `file:` source) fail before anything opens.
 2. **Request.** `source::Request` resolves the source (`--source`, else the hidden 2.x `--replay` as a `file:` source, else `--camera`), the requested size and rate, the pool depth, the memory strategy, mirroring and controls. A `CAMERA_MODE` is checked against the modes the camera reports (`edgefirst_camera::probe`) and expands to a size and rate; explicit `CAMERA_SIZE` and `CAMERA_FPS` win over it with a warning. The 2.x rate-only form (`30FPS`) is read as `CAMERA_FPS` with a warning. File and mock sources cannot report modes, so a mode there is an error. Devices are asked for YUYV, which the encoders and converters take directly; a device that does not offer it is captured in its current format.
-3. **Open.** `source::open` opens the camera, applies mirroring, provides the capture pool and starts streaming (see [Buffers](#buffers-and-backpressure)). It retries while the SDK reports `NotReady` (`ENOENT` on open, `EAGAIN` on `S_FMT`, or no first frame within the SDK's timeout, as when `isp_media_server` has not started serving the device), within a 15 s budget and six attempts, so a wedged ISP lands the unit in `failed` within systemd's start limit instead of hammering it. Every other error fails startup. A shutdown during the retry exits cleanly.
+3. **Open.** `source::open` opens the camera, applies mirroring and starts streaming (see [Buffers](#buffers-and-backpressure)). It retries while the SDK reports `NotReady` (`ENOENT` on open, `EAGAIN` on `S_FMT`, or no first frame within the SDK's timeout, as when `isp_media_server` has not started serving the device), within a 15 s budget and six attempts, so a wedged ISP lands the unit in `failed` within systemd's start limit instead of hammering it. Every other error fails startup. A shutdown during the retry exits cleanly.
 4. **Pipeline.** `pipeline::run` opens the encoders, the recording if any, and the publishers, then runs the capture loop. An encoder that cannot open is a startup error. Readiness is reported once the first `camera/frame` is published (see [Supervision](#supervision)).
 
 **Recovery.** A camera that delivered frames and then stops (read timeouts past the five-retry budget, a disconnect, `NotReady` or an I/O error) is stopped, closed and opened again with step 3 while the encoders, recorder and publishers keep running. On vvcam that is what an `isp_media_server` restart needs: the old stream delivers nothing until the device is reopened. `seq` continues from the last published frame. Frames held by the encoders keep their buffers across the close. When the reopened camera delivers a different size, format or software mirroring, or fails before delivering a frame, the service exits for systemd to restart. File sources are not reopened.
@@ -101,11 +101,12 @@ Each encoder thread owns its encoder and, when it converts, its own `ImageProces
 
 ### The capture pool
 
-On camera devices the service allocates the capture pool itself, through `ImageProcessor::create_image_desc` with physically contiguous (CMA) memory, so the buffers suit every converter including G2D, and provides it to the SDK. Mock sources get a pool in any memory; file sources use the decoder's pool.
+The SDK allocates the capture pool: physically contiguous (CMA) memory on camera devices, so the buffers suit every converter including G2D, at the pitch the driver negotiates. File sources use the decoder's pool.
 
-- If the device refuses the buffers at `start()` (`BuffersRejected`, for example a pitch it does not accept), the service logs the reason and slot, takes its buffers back, and starts on the SDK's own pool.
-- If contiguous memory runs out (`ContiguousUnavailable`, from the allocation or from the SDK), startup fails with a message naming the shortfall and suggesting a smaller `CAMERA_BUFFERS`.
-- `--memory export` skips the service's pool and uses the driver's buffers.
+- If the device refuses the buffers at `start()`, `MEMORY=auto` falls back to the driver's own and logs the reason.
+- If contiguous memory runs out (`ContiguousUnavailable`), startup fails with a message naming the shortfall and suggesting a smaller `CAMERA_BUFFERS`.
+- `MEMORY=auto` takes the best memory the machine has: CMA, then the system DMA-BUF heap on a machine with no `linux,cma` heap, then the driver's own buffers when no heap can be opened. A CMA heap that is full or not accessible is an error, not a reason to drop to the next one. `MEMORY=import` still fails without CMA.
+- `MEMORY=export` uses the driver's buffers.
 
 ### Frames hold their buffers
 

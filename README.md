@@ -194,7 +194,7 @@ edgefirst-camera \
 
 | Source | Backend | Boards and notes |
 |---|---|---|
-| `/dev/videoN` | V4L2 | Maivin and Raivin (i.MX 8M Plus, `vvcam` ISP, camera on `/dev/video3`), the i.MX 8M Plus EVK and USB UVC cameras. Imports the service's contiguous buffers, or exports the driver's |
+| `/dev/videoN` | V4L2 | Maivin and Raivin (i.MX 8M Plus, `vvcam` ISP, camera on `/dev/video3`), the i.MX 8M Plus EVK and USB UVC cameras. Imports buffers the SDK allocates in contiguous (CMA) memory, from the system DMA-BUF heap on a machine with no CMA heap, or exports the driver's |
 | `libcamera:<id>` | libcamera 0.5 or newer | i.MX 95 through the `nxp/neo` pipeline, and Raspberry Pi 5 (`pisp`). Uses libcamera's own buffers. Loaded at run time, so a unit without libcamera runs the other backends as before |
 | `file:<name>.h264` | Recording replay | A recording with its `<name>.json` sidecar, decoded by a V4L2 H.264 decoder. Linux boards with a hardware decoder |
 | `mock[:WxH@fps]` | Synthetic frames | Testing without a camera. The only backend on macOS and Windows |
@@ -283,7 +283,7 @@ New subcommands: `devices`, `info`, `record` and `convert`. Without a subcommand
 
 ### Behaviour changes
 
-- **Memory.** The service allocates the capture pool in contiguous (CMA) memory and adds two buffers of its own while `H264`, `H264_TILES` or `JPEG` is on. With the default `CAMERA_BUFFERS=4` a unit uses six capture buffers. `CAMERA_BUFFERS` keeps its meaning for subscribers: they have about `CAMERA_BUFFERS - 1` frame periods to read a frame. If CMA runs out, startup fails with a message that suggests a smaller `CAMERA_BUFFERS`. The capture pool no longer creates a GL context, and in the default H.264-direct configuration GL is never initialised.
+- **Memory.** The capture pool is allocated in contiguous (CMA) memory, and the service adds two buffers of its own while `H264`, `H264_TILES` or `JPEG` is on. With the default `CAMERA_BUFFERS=4` a unit uses six capture buffers. `CAMERA_BUFFERS` keeps its meaning for subscribers: they have about `CAMERA_BUFFERS - 1` frame periods to read a frame. If CMA runs out, startup fails with a message that suggests a smaller `CAMERA_BUFFERS`. The capture pool no longer creates a GL context, and in the default H.264-direct configuration GL is never initialised.
 - **Camera restart.** A camera that stops after it started, for example when `isp_media_server` restarts, is reopened inside the running service. `seq` continues. The service exits for systemd only when the reopened camera delivers a different stream or nothing.
 - **Encoder failure.** If an encoder thread exits or panics, or keeps failing, the service exits with status 70 (see [Exit statuses](#exit-statuses)) so systemd restarts it. It no longer streams on silently without H.264 or JPEG.
 - **Exit statuses.** The service exits with statuses that systemd names in the journal; see [Exit statuses](#exit-statuses). Units that match on `SuccessExitStatus=` or `RestartPreventExitStatus=` need reviewing.
@@ -451,7 +451,7 @@ Every option is also an environment variable, named as in the table, so the same
 |---|---|---|---|
 | `--source <SOURCE>` | `SOURCE` | unset | Frame source: `/dev/videoN`, `libcamera:<id>`, `file:<name>.h264` or `mock[:WxH@fps]`. Unset uses `--camera`. See [Backends](#backends-and-how-theyre-selected) |
 | `-c, --camera <PATH>` | `CAMERA` | `/dev/video3` | V4L2 device path, used when `--source` is unset |
-| `--memory <auto\|import\|export>` | `MEMORY` | `auto` | Capture buffer allocation: `import` this service's contiguous buffers, `export` the driver's own, or `auto` to import and fall back to the driver's buffers when it refuses them |
+| `--memory <auto\|import\|export>` | `MEMORY` | `auto` | Capture buffer allocation: `import` contiguous (CMA) buffers, `export` the driver's own, or `auto` to import and fall back to the driver's buffers when it refuses them. `auto` prefers CMA, uses the system DMA-BUF heap on a machine with no CMA heap, and uses the driver's buffers when no heap can be opened |
 | `--camera-size <W> <H>` | `CAMERA_SIZE` | unset | Requested capture size. Unset keeps the camera's current size |
 | `--camera-fps <FPS>` | `CAMERA_FPS` | unset | Requested capture rate. Unset keeps the camera's current rate. For a `file:` source, the playback rate (default: the recording's) |
 | `--camera-mode <MODE>` | `CAMERA_MODE` | unset | Shorthand for size plus rate, for example `1080p30`. See [Capture modes](#capture-modes) |

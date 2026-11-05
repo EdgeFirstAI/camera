@@ -11,10 +11,10 @@ use std::{
 };
 
 use edgefirst_camera::{
-    Applied, Backend, BufferPool, Camera, CameraBuilder, CameraDescriptor, Control, ErrorKind,
-    Exposure, FormatInfo, Gain, MemoryStrategy, Mirror, Rates, Sizes, StreamConfig, WhiteBalance,
+    Applied, Backend, Camera, CameraBuilder, CameraDescriptor, Control, ErrorKind, Exposure,
+    FormatInfo, Gain, MemoryStrategy, Mirror, Rates, Sizes, StreamConfig, WhiteBalance,
 };
-use edgefirst_tensor::{CpuAccess, DType, ImageDesc, PixelFormat, TensorDyn, TensorMemory};
+use edgefirst_tensor::PixelFormat;
 use tracing::{info, warn};
 
 use crate::{
@@ -343,7 +343,7 @@ pub(crate) fn open(
     })
 }
 
-/// One attempt: open, mirror, provide the pool, start.
+/// One attempt: open, mirror, start.
 fn open_once(request: &Request) -> edgefirst_camera::Result<Opened> {
     let builder = |format: Option<PixelFormat>| -> edgefirst_camera::Result<CameraBuilder> {
         let mut b = CameraBuilder::source(&request.spec)?
@@ -396,33 +396,7 @@ fn open_once(request: &Request) -> edgefirst_camera::Result<Opened> {
         }
     }
 
-    let contiguous = request.kind == SourceKind::Device;
-    if request.kind != SourceKind::File && request.memory != MemoryStrategy::Export {
-        match allocate_pool(camera.config(), contiguous) {
-            Ok(pool) => camera.set_buffers(BufferPool::Provided(pool))?,
-            Err(e) if contiguous => {
-                return Err(contiguous_unavailable(camera.config(), &e.to_string()))
-            }
-            Err(e) => warn!("cannot allocate the capture pool, using the camera's: {e}"),
-        }
-    }
-
-    match camera.start() {
-        Ok(()) => {}
-        Err(e) if e.kind() == ErrorKind::BuffersRejected => {
-            let (reason, slot) = e.rejection().unzip();
-            warn!(
-                "{} refused this service's capture buffers ({reason:?}, slot {:?}): {e}; \
-                 using the camera's own buffers",
-                request.name(),
-                slot.flatten()
-            );
-            camera.take_buffers();
-            camera.set_buffers(BufferPool::Sdk)?;
-            camera.start().map_err(|e| fatal(camera.config(), e))?;
-        }
-        Err(e) => return Err(fatal(camera.config(), e)),
-    }
+    camera.start().map_err(|e| fatal(camera.config(), e))?;
 
     let c = camera.config();
     info!(
@@ -441,30 +415,6 @@ fn open_once(request: &Request) -> edgefirst_camera::Result<Opened> {
         kind: request.kind,
         software_mirror,
     })
-}
-
-/// Allocates the capture pool for `config`, with full CPU access so the
-/// converters and subscribers can read it. `contiguous` asks for CMA memory
-/// only, at the pitch the image crate's converters use.
-fn allocate_pool(
-    config: &StreamConfig,
-    contiguous: bool,
-) -> Result<Vec<TensorDyn>, edgefirst_tensor::Error> {
-    let mut desc = ImageDesc::new(
-        config.width as usize,
-        config.height as usize,
-        config.format,
-        DType::U8,
-    )
-    .with_access(CpuAccess::ReadWrite);
-    if contiguous {
-        desc = desc
-            .with_memory(Some(TensorMemory::DmaBuf))
-            .with_contiguous(true);
-    }
-    (0..config.buffer_count.max(1))
-        .map(|_| TensorDyn::image_desc(&desc))
-        .collect()
 }
 
 /// `e`, reworded when the camera could not get contiguous memory.

@@ -366,6 +366,23 @@ fn a_caller_pool_the_driver_refuses_is_rejected() {
     assert_eq!(camera.take_buffers().len(), 3);
 }
 
+/// A machine with no CMA heap at all is not an error under `Auto`, which is
+/// the default: a desktop camera needs no contiguous memory.
+#[test]
+fn auto_prefers_cma_then_the_system_heap() {
+    let Some(v) = vivid(SINGLE) else { return };
+    let mut camera = builder(&v)
+        .memory(MemoryStrategy::Auto)
+        .contiguity(Contiguity::Required)
+        .open()
+        .unwrap();
+    camera.start().unwrap();
+    assert_eq!(camera.config().memory, ResolvedMemory::Import);
+    assert_eq!(camera.config().contiguous, Some(cma()));
+    camera.next_frame(Some(Duration::from_secs(5))).unwrap();
+    camera.stop().unwrap();
+}
+
 #[test]
 fn contiguous_memory_unavailable_is_reported() {
     let Some(v) = vivid(SINGLE) else { return };
