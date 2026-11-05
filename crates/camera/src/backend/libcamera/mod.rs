@@ -254,8 +254,6 @@ struct LibcameraCamera {
     stream: sys::efcam_lc_stream_info,
     /// Controls for the next start or requeue.
     pending: sys::efcam_lc_controls,
-    /// The frame rate asked for, to report a pipeline that ignores it.
-    asked_fps: Option<f64>,
     /// The last completion, for reading controls back.
     last: Option<sys::efcam_lc_completion>,
     provided: Option<Vec<TensorDyn>>,
@@ -267,7 +265,7 @@ struct LibcameraCamera {
     clock: RealtimeClock,
     seq: u64,
     stats: CaptureStats,
-    /// Drops against libcamera's frame duration, and the delivered rate.
+    /// Drops against each frame's own duration, and the delivered rate.
     rate: RateMeter,
     // Declared last: released after the pool's frames are detached.
     handle: Handle,
@@ -368,7 +366,6 @@ pub(crate) fn open_on(manager: Arc<Manager>, builder: CameraBuilder) -> Result<B
         request,
         stream,
         pending: sys::efcam_lc_controls::unset(),
-        asked_fps: None,
         last: None,
         provided: builder.provided,
         pool: None,
@@ -674,22 +671,13 @@ impl LibcameraCamera {
                 nanos: i64::try_from(c.buffer_timestamp_ns).unwrap_or(i64::MAX),
             }
         };
-        let measuring = self.rate.measured().is_none();
-        let tick = self.rate.frame(timestamp.nanos);
+        let tick = self.rate.frame(
+            timestamp.nanos,
+            Some(c.frame_duration_us.saturating_mul(1000)),
+        );
         self.stats.dropped += tick.dropped;
-        if let Some((claimed, fps)) = tick.disagrees {
-            tracing::warn!(
-                "{}: libcamera reports {claimed} fps; the camera delivers {fps} fps",
-                self.id()
-            );
-        }
-        if let (true, Some(fps), Some(asked)) = (measuring, self.rate.measured(), self.asked_fps) {
-            if (fps - asked).abs() > asked * 0.01 {
-                tracing::warn!(
-                    "{}: {asked} fps requested; the camera delivers {fps} fps",
-                    self.id()
-                );
-            }
+        if let Some(mismatch) = tick.mismatch {
+            tracing::warn!("{}: {mismatch}", self.id());
         }
         self.last = Some(c);
 
@@ -820,7 +808,7 @@ impl Camera for LibcameraCamera {
                 let us = (1e6 / got).round() as i64;
                 self.pending.frame_duration_min_us = us;
                 self.pending.frame_duration_max_us = us;
-                self.asked_fps = Some(fps);
+                self.rate.ask(fps);
                 if !self.streaming {
                     self.config.frame_rate = Some(got);
                     self.rate.claim(self.config.frame_rate);

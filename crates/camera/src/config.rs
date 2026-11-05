@@ -217,3 +217,22 @@ impl StreamConfig {
         }
     }
 }
+
+/// Relative difference between two frame rates that is worth reporting.
+const RATE_TOLERANCE: f64 = 0.01;
+
+/// Whether frame rate `a` differs from `b` by more than measurement noise.
+pub fn rates_differ(a: f64, b: f64) -> bool {
+    (a - b).abs() > b * RATE_TOLERANCE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rates_within_the_tolerance_do_not_differ() {
+        assert!(!rates_differ(30.0, 30.2));
+        assert!(rates_differ(30.0, 31.0));
+    }
+}

@@ -67,6 +67,9 @@ pub struct Camera {
     /// `FrameDuration` metadata when it differs from the delivered
     /// duration, as on the i.MX 95 neo.
     pub reported_duration_us: Option<i64>,
+    /// From this sequence number on, frames last this many microseconds and
+    /// report it, as auto-exposure lengthens them in dim light.
+    pub lengthens_after: Option<(u32, i64)>,
     /// Whether orientations other than `Rotate0` are accepted.
     pub mirrors: bool,
     /// Another process holds the camera.
@@ -108,6 +111,7 @@ impl Camera {
             honours_frame_duration: true,
             frame_duration_us: 33_333,
             reported_duration_us: None,
+            lengthens_after: None,
             mirrors: true,
             busy: false,
         }
@@ -224,14 +228,25 @@ impl Cam {
     fn capture(&mut self, slot: u32) -> efcam_lc_completion {
         let seq = self.sequence;
         self.sequence += 1;
+        let (from, long_us) = self
+            .camera
+            .lengthens_after
+            .unwrap_or((u32::MAX, self.duration_us));
+        let (short, long) = (seq.min(from), seq.saturating_sub(from));
+        let elapsed_us = i64::from(short) * self.duration_us + i64::from(long) * long_us;
+        let reported_us = if seq >= from {
+            long_us
+        } else {
+            self.camera.reported_duration_us.unwrap_or(self.duration_us)
+        };
         let mut c = efcam_lc_completion {
             slot,
             status: EFCAM_LC_STATUS_OK,
             sequence: seq,
-            sensor_timestamp_ns: 1_000_000_000 + i64::from(seq) * self.duration_us * 1000,
+            sensor_timestamp_ns: 1_000_000_000 + elapsed_us * 1000,
             exposure_time_us: 20_000,
             analogue_gain: 2.0,
-            frame_duration_us: self.camera.reported_duration_us.unwrap_or(self.duration_us),
+            frame_duration_us: reported_us,
             colour_temperature: 5_000,
             ..efcam_lc_completion::default()
         };

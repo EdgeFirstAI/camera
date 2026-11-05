@@ -24,6 +24,7 @@ use std::{
 };
 
 use edgefirst_camera::{
+    rates_differ,
     schema::{self, FrameTensor},
     Camera, ErrorKind, Frame, Mirror, Sidecar, StreamConfig,
 };
@@ -206,26 +207,11 @@ fn measure(camera: &mut dyn Camera) -> Option<f64> {
     }
 }
 
-/// Relative difference between two frame rates that is reported.
-const RATE_TOLERANCE: f64 = 0.01;
-
-fn rates_differ(a: f64, b: f64) -> bool {
-    (a - b).abs() > b * RATE_TOLERANCE
-}
-
-/// Reports the rate the camera delivers against the one its driver
-/// reports and the one the encoders were set up for, and corrects the
-/// recording's sidecar to it, so a recording plays back at the speed it
-/// was captured.
-fn report_rate(measured: f64, reported: Option<f64>, used: f64, sidecar: Option<&mut SidecarFile>) {
+/// Reports the rate the camera delivers against the one the encoders were
+/// set up for, and corrects the recording's sidecar to it, so a recording
+/// plays back at the speed it was captured.
+fn report_rate(measured: f64, used: f64, sidecar: Option<&mut SidecarFile>) {
     info!("Measured {measured} fps");
-    match reported {
-        Some(r) if rates_differ(r, measured) => {
-            warn!("the camera reports {r} fps but delivers {measured} fps");
-        }
-        None => warn!("the camera reports no frame rate; it delivers {measured} fps"),
-        Some(_) => {}
-    }
     if rates_differ(used, measured) {
         warn!("the encoders were set up for {used} fps; the camera delivers {measured} fps");
     }
@@ -1033,12 +1019,7 @@ fn note_measured_rate(camera: &dyn Camera, progress: &mut Progress, fps: f64) {
     }
     if let Some(measured) = camera.measured_frame_rate() {
         progress.measured = true;
-        report_rate(
-            measured,
-            camera.config().frame_rate,
-            fps,
-            progress.sidecar.as_mut(),
-        );
+        report_rate(measured, fps, progress.sidecar.as_mut());
     }
 }
 
@@ -1942,13 +1923,13 @@ mod tests {
             sidecar: Sidecar::new(30.0, 64, 48),
         };
         file.sidecar.write(&stream).unwrap();
-        report_rate(30.1, Some(30.0), 30.0, Some(&mut file));
+        report_rate(30.1, 30.0, Some(&mut file));
         assert_eq!(
             Sidecar::load(&stream).unwrap().fps,
             30.0,
             "within tolerance"
         );
-        report_rate(60.02, Some(30.0), 30.0, Some(&mut file));
+        report_rate(60.02, 30.0, Some(&mut file));
         assert_eq!(Sidecar::load(&stream).unwrap().fps, 60.02);
         std::fs::remove_dir_all(&dir).unwrap();
     }

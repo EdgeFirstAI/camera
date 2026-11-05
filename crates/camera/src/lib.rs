@@ -78,8 +78,8 @@ mod timestamp;
 pub use builder::CameraBuilder;
 pub use camera::{Camera, CaptureStats, WaitHandle};
 pub use config::{
-    BufferPool, Contiguity, MemoryStrategy, Mirror, ResolvedMemory, StreamConfig, StreamRequest,
-    POOL_DEPTH,
+    rates_differ, BufferPool, Contiguity, MemoryStrategy, Mirror, ResolvedMemory, StreamConfig,
+    StreamRequest, POOL_DEPTH,
 };
 pub use control::{
     Applied, Control, ControlFlags, ControlId, ControlInfo, ControlSet, ControlValue, Exposure,

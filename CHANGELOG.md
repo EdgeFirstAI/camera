@@ -81,7 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Camera devices are asked for YUYV, which the encoders take directly; a device without it is captured in its current format.
   - A camera that cannot mirror, or rejects the mirror control, is mirrored in the JPEG and H.264 outputs instead, and `camera/frame` is published unmirrored with a warning.
   - The ISP retry at startup keys on the SDK's `NotReady` (`ENOENT` on open, or no first frame in time).
-  - Drop warnings report frames the camera lost, from timestamp gaps, as well as frames dropped at full encoder queues.
+  - Drop warnings report frames the camera lost, from timestamp gaps, as well as frames dropped at full encoder queues. With libcamera the gaps are judged against each frame's own reported duration, so auto-exposure lengthening its frames does not count as drops (EDGEAI-1540).
+  - A measured frame rate that contradicts the reported or requested rate logs one warning from the SDK, where several overlapping warnings came from the SDK and the service (EDGEAI-1540).
   - H.264 tiles are encoded at the quadrant's size, up to 1920x1080, through the encoder's crop where the device can express it.
 - H.264 streams are encoded as 2.x encoded them: constant bitrate, a key frame every second, High profile at the lowest level that fits, and `--h264-bitrate auto` at 0.16 bits per pixel (about 10 Mbps at 1080p30). An encoder without the profile or level controls uses its defaults with a warning (EDGEAI-1529).
 - Under systemd, log lines reach the journal once, through journald, instead of also as stdout text (EDGEAI-1529).

@@ -680,13 +680,10 @@ impl V4l2Camera {
             }
         }
         let nanos = i64::try_from(d.timestamp.as_nanos()).unwrap_or(i64::MAX);
-        let tick = self.rate.frame(nanos);
+        let tick = self.rate.frame(nanos, None);
         self.stats.dropped += tick.dropped;
-        if let Some((claimed, fps)) = tick.disagrees {
-            tracing::warn!(
-                "{}: the driver reports {claimed} fps; the camera delivers {fps} fps",
-                self.path()
-            );
+        if let Some(mismatch) = tick.mismatch {
+            tracing::warn!("{}: {mismatch}", self.path());
         }
         let timestamp = Timestamp {
             clock,

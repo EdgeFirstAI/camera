@@ -184,6 +184,19 @@ fn a_pipeline_ignoring_the_rate_reports_its_claim_and_measures_the_rest() {
 }
 
 #[test]
+fn frames_lengthened_by_auto_exposure_are_not_counted_as_drops() {
+    let mut cam = mock::Camera::new(ID, Layout::Separate);
+    cam.lengthens_after = Some((3, 66_666));
+    let mut c = open_with(vec![cam], |b| b).unwrap();
+    c.start().unwrap();
+    for _ in 0..30 {
+        c.next_frame(T).unwrap();
+    }
+    assert_eq!(c.stats().dropped, 0);
+    assert_eq!(c.measured_frame_rate(), Some(15.0));
+}
+
+#[test]
 fn probe_configures_each_size_once_in_a_safe_format() {
     let m = manager(vec![mock::Camera::new(ID, Layout::Separate)]);
     let info = m.cameras().remove(0);

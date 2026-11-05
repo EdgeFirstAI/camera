@@ -147,10 +147,12 @@ pub trait Camera: Send + std::fmt::Debug {
     /// `None` before then or where the backend does not measure it.
     ///
     /// [`StreamConfig::frame_rate`](crate::StreamConfig::frame_rate) is the
-    /// rate the driver reports, which drops are counted against: a camera
-    /// running slower than it reports shows drops, and the measured rate
-    /// tells how fast it actually runs. The backend logs a warning when the
-    /// two disagree.
+    /// rate the driver reports. Drops are counted against each frame's own
+    /// duration where the backend has it, such as libcamera, and against that
+    /// rate elsewhere, where a camera running slower than it reports shows
+    /// drops. The measured rate tells how fast it actually runs, and the
+    /// backend logs one warning when it contradicts the reported or requested
+    /// rate.
     fn measured_frame_rate(&self) -> Option<f64> {
         None
     }
