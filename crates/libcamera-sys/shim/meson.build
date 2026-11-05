@@ -5,7 +5,7 @@ project('edgefirst-camera-libcamera', 'cpp',
     version : '1.0.0',
     license : 'Apache-2.0',
     meson_version : '>= 0.63',
-    default_options : ['cpp_std=c++17', 'warning_level=2'])
+    default_options : ['cpp_std=c++20', 'warning_level=2'])
 
 libcamera_dep = dependency('libcamera', version : '>= 0.5')
 

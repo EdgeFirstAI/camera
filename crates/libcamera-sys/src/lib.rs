@@ -49,6 +49,11 @@ pub const MIN_MINOR: u32 = 5;
 /// The newest libcamera minor [`Shim::load`] looks for.
 const MAX_MINOR: u32 = 30;
 
+/// The builds of a shim for one libcamera minor, tried in order: upstream's,
+/// then Raspberry Pi's, whose 0.7 has the same SONAME as upstream's but uses
+/// `std::span` in its C++ API. Only the matching build loads.
+const SHIM_BUILDS: [&str; 2] = ["", "-rpi"];
+
 /// Why the shim could not be loaded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -143,7 +148,7 @@ impl Shim {
             match Self::open(&candidate) {
                 Ok(shim) => return Ok(shim),
                 Err(e) if e.kind == LoadErrorKind::Abi => return Err(e),
-                Err(_) => tried.push(candidate.display().to_string()),
+                Err(e) => tried.push(e.to_string()),
             }
         }
         let found: Vec<String> = supported.iter().map(|m| format!("0.{m}")).collect();
@@ -166,11 +171,13 @@ impl Shim {
     /// [`LoadErrorKind::Abi`] when it speaks another ABI version.
     pub fn open(path: &Path) -> Result<Self, LoadError> {
         let origin = path.display().to_string();
-        let load =
-            |e: libloading::Error| LoadError::new(LoadErrorKind::Load, format!("{origin}: {e}"));
-        // SAFETY: loading runs the shim's and libcamera's initialisers, which
-        // have no preconditions on this process.
-        let library = unsafe { libloading::Library::new(path) }.map_err(load)?;
+        // libloading keeps dlerror's text, which names what failed, in `source`.
+        let load = |e: libloading::Error| {
+            let why =
+                std::error::Error::source(&e).map_or_else(|| e.to_string(), |s| s.to_string());
+            LoadError::new(LoadErrorKind::Load, format!("{origin}: {why}"))
+        };
+        let library = open_now(path).map_err(load)?;
         macro_rules! resolve {
             ($($field:ident),* $(,)?) => {
                 Functions {$(
@@ -282,6 +289,25 @@ pub fn field_str(field: &[c_char]) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+/// Loads a library with every symbol resolved now. A shim built against a
+/// libcamera whose symbols differ (same SONAME, as in a vendor's fork) then
+/// fails here, where the next candidate can be tried, not at its first use,
+/// where the dynamic linker would end the process.
+fn open_now(path: &Path) -> Result<libloading::Library, libloading::Error> {
+    #[cfg(unix)]
+    {
+        use libloading::os::unix::{Library, RTLD_LOCAL, RTLD_NOW};
+        // SAFETY: loading runs the shim's and libcamera's initialisers, which
+        // have no preconditions on this process.
+        unsafe { Library::open(Some(path), RTLD_NOW | RTLD_LOCAL) }.map(Into::into)
+    }
+    #[cfg(not(unix))]
+    // SAFETY: as above; Windows resolves imports at load.
+    unsafe {
+        libloading::Library::new(path)
+    }
+}
+
 /// The libcamera minors that load in this process, newest first.
 fn installed_minors() -> Vec<u32> {
     (0..=MAX_MINOR)
@@ -317,9 +343,13 @@ fn candidates(minors: &[u32], dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = vec![PathBuf::from(SHIM_SONAME)];
     for m in minors {
         for dir in dirs {
-            let path = dir.join(format!("libcamera-0.{m}")).join(SHIM_SONAME);
-            if path.exists() {
-                out.push(path);
+            for build in SHIM_BUILDS {
+                let path = dir
+                    .join(format!("libcamera-0.{m}{build}"))
+                    .join(SHIM_SONAME);
+                if path.exists() {
+                    out.push(path);
+                }
             }
         }
     }
@@ -330,6 +360,34 @@ fn candidates(minors: &[u32], dirs: &[PathBuf]) -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
+    /// A shim whose libcamera lacks one of its symbols must fail to load,
+    /// so the loader moves on, not abort the process at its first call.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_library_with_an_unresolved_symbol_fails_to_load() {
+        let root = std::env::temp_dir().join(format!("efcam-lc-unresolved-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (src, lib) = (root.join("shim.c"), root.join("shim.so"));
+        std::fs::write(
+            &src,
+            "extern int efcam_no_such_symbol(void);\nint f(void) { return efcam_no_such_symbol(); }\n",
+        )
+        .unwrap();
+        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+        let built = std::process::Command::new(cc)
+            .args(["-shared", "-fPIC", "-o"])
+            .arg(&lib)
+            .arg(&src)
+            .status()
+            .unwrap();
+        assert!(built.success());
+        let opened = open_now(&lib);
+        std::fs::remove_dir_all(&root).unwrap();
+        let err = opened.expect_err("an unresolved symbol must fail the load");
+        let why = std::error::Error::source(&err).unwrap().to_string();
+        assert!(why.contains("efcam_no_such_symbol"), "{why}");
+    }
+
     #[test]
     fn candidates_try_the_soname_then_each_minor_newest_first() {
         let root = std::env::temp_dir().join(format!("efcam-lc-candidates-{}", std::process::id()));
@@ -338,6 +396,9 @@ mod tests {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join(SHIM_SONAME), b"").unwrap();
         }
+        let vendor = root.join("libcamera-0.7-rpi");
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::write(vendor.join(SHIM_SONAME), b"").unwrap();
         let got = candidates(&[7, 6, 5], std::slice::from_ref(&root));
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(
@@ -345,6 +406,7 @@ mod tests {
             [
                 PathBuf::from(SHIM_SONAME),
                 root.join("libcamera-0.7").join(SHIM_SONAME),
+                root.join("libcamera-0.7-rpi").join(SHIM_SONAME),
                 root.join("libcamera-0.5").join(SHIM_SONAME),
             ]
         );

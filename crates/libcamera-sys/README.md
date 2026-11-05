@@ -19,9 +19,9 @@ One shim is built per libcamera minor, 0.5 and newer.
 
 1. the path in `EDGEFIRST_CAMERA_LIBCAMERA_SHIM`, and nothing else;
 2. `libedgefirst_camera_libcamera.so.1` on the library search path, as a Yocto image or distribution package installs it;
-3. `libcamera-0.<minor>/libedgefirst_camera_libcamera.so.1` for each installed libcamera minor, newest first, under `EDGEFIRST_CAMERA_LIBCAMERA_SHIM_DIR`, the executable's directory, its `../lib/edgefirst-camera`, `/usr/local/lib/edgefirst-camera` and `/usr/lib/edgefirst-camera`.
+3. `libcamera-0.<minor>/libedgefirst_camera_libcamera.so.1`, then `libcamera-0.<minor>-rpi/libedgefirst_camera_libcamera.so.1`, for each installed libcamera minor, newest first, under `EDGEFIRST_CAMERA_LIBCAMERA_SHIM_DIR`, the executable's directory, its `../lib/edgefirst-camera`, `/usr/local/lib/edgefirst-camera` and `/usr/lib/edgefirst-camera`.
 
-A shim built for another minor fails to load because its `DT_NEEDED` names that minor, so the first shim that loads matches the installed libcamera.
+A shim built for another minor fails to load because its `DT_NEEDED` names that minor, so the first shim that loads matches the installed libcamera. The loader resolves every symbol at load, so a shim built against a libcamera with the same minor but different C++ symbols also fails there and the next one is tried. Raspberry Pi's 0.7 is such a libcamera: it uses `std::span` where upstream's 0.7 uses `libcamera::Span`, as upstream does from 0.8, so it has a build of its own.
 
 ## Building the shim
 
@@ -38,6 +38,8 @@ The portable prebuilts are built per minor in Debian bookworm (GCC 12, so they n
 docker run --rm -v $PWD/crates/libcamera-sys/shim:/shim:ro -v $PWD/out:/out debian:bookworm \
     /shim/build-prebuilt.sh v0.7.0 /out [aarch64-linux-gnu]
 ```
+
+For Raspberry Pi's libcamera, pass `-e LIBCAMERA_GIT=https://github.com/raspberrypi/libcamera.git -e SHIM_BUILD=-rpi` and a tag such as `v0.7.2+rpt20261009`, which writes `libcamera-0.7-rpi/`.
 
 The script builds libcamera's core library without pipelines, builds the shim against it, and runs `check-symbols.sh`: the shim exports only `efcam_lc_*`, every libcamera symbol it imports is exported by that libcamera, and its glibc and libstdc++ requirements stay within the oldest supported target. A native build also loads it and starts a `CameraManager`. CI does this for 0.5, 0.6 and 0.7 on x86_64 and aarch64. The 0.7 prebuilt runs unchanged on the NXP i.MX 95 (libcamera 0.7.1 with the `nxp/neo` pipeline) and the Raspberry Pi 5 (0.7.0+rpt).
 

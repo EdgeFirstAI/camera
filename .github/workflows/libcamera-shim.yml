@@ -1,9 +1,10 @@
 # One prebuilt libcamera shim per supported libcamera minor and
 # architecture, as the release ships them: built in Debian bookworm (GCC 12)
 # against the upstream vX.Y.0 tag, then import-checked against that
-# libcamera and loaded natively. The libcamera board lane takes the aarch64
-# ones from the calling run (board-setup.sh). Called by ci.yml and
-# nightly.yml.
+# libcamera and loaded natively. Raspberry Pi's libcamera gets a build of its
+# own: its 0.7 has upstream's SONAME but uses std::span in its C++ API. The
+# libcamera board lane takes the aarch64 ones from the calling run
+# (board-setup.sh). Called by ci.yml and nightly.yml.
 #
 # Action Versions (hash-pinned):
 # - actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 (v7.0.1)
@@ -28,16 +29,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        libcamera: [v0.5.0, v0.6.0, v0.7.0]
+        libcamera: [v0.5.0, v0.6.0, v0.7.0, v0.8.0]
         arch: [x86_64, aarch64]
         include:
           - arch: x86_64
             runner: ubuntu-24.04
           - arch: aarch64
             runner: ubuntu-24.04-arm
+          - libcamera: v0.7.2+rpt20261009
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+            git: https://github.com/raspberrypi/libcamera.git
+            build: -rpi
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Build and check the shim
+        env:
+          LIBCAMERA_GIT: ${{ matrix.git }}
+          SHIM_BUILD: ${{ matrix.build }}
         run: crates/libcamera-sys/shim/build-prebuilt.sh "${{ matrix.libcamera }}" "$RUNNER_TEMP/shim"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:

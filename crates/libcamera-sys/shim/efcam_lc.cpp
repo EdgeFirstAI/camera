@@ -10,7 +10,9 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include <sys/eventfd.h>
@@ -19,6 +21,28 @@
 #include <libcamera/libcamera.h>
 
 using namespace libcamera;
+
+namespace {
+
+/*
+ * The span type of libcamera's control values: libcamera::Span up to 0.7,
+ * std::span in 0.8 and in Raspberry Pi's 0.7 builds. Read from a control's
+ * declaration, as no version macro tells them apart.
+ */
+template<typename C>
+struct SpanOf;
+
+template<template<typename, std::size_t> class S, typename T, std::size_t N>
+struct SpanOf<Control<S<T, N>>> {
+	template<typename U, std::size_t M>
+	using type = S<U, M>;
+};
+
+template<typename T, std::size_t N = std::dynamic_extent>
+using ControlSpan =
+	typename SpanOf<std::remove_cv_t<decltype(controls::ColourGains)>>::template type<T, N>;
+
+} /* namespace */
 
 struct efcam_lc_mgr {
 	std::unique_ptr<CameraManager> cm;
@@ -71,15 +95,15 @@ double to_double(const ControlValue &v)
 	bool arr = v.isArray();
 	switch (v.type()) {
 	case ControlTypeBool:
-		return arr ? v.get<Span<const bool>>()[0] : v.get<bool>();
+		return arr ? v.get<ControlSpan<const bool>>()[0] : v.get<bool>();
 	case ControlTypeByte:
-		return arr ? v.get<Span<const uint8_t>>()[0] : v.get<uint8_t>();
+		return arr ? v.get<ControlSpan<const uint8_t>>()[0] : v.get<uint8_t>();
 	case ControlTypeInteger32:
-		return arr ? v.get<Span<const int32_t>>()[0] : v.get<int32_t>();
+		return arr ? v.get<ControlSpan<const int32_t>>()[0] : v.get<int32_t>();
 	case ControlTypeInteger64:
-		return double(arr ? v.get<Span<const int64_t>>()[0] : v.get<int64_t>());
+		return double(arr ? v.get<ControlSpan<const int64_t>>()[0] : v.get<int64_t>());
 	case ControlTypeFloat:
-		return arr ? v.get<Span<const float>>()[0] : v.get<float>();
+		return arr ? v.get<ControlSpan<const float>>()[0] : v.get<float>();
 	default:
 		return 0.0;
 	}
@@ -116,7 +140,7 @@ void apply_controls(const Camera &camera, ControlList &list,
 	if (c.frame_duration_min_us > 0 && c.frame_duration_max_us > 0) {
 		std::array<int64_t, 2> lim{ c.frame_duration_min_us,
 					    c.frame_duration_max_us };
-		list.set(controls::FrameDurationLimits, Span<const int64_t, 2>(lim));
+		list.set(controls::FrameDurationLimits, ControlSpan<const int64_t, 2>(lim));
 	}
 
 	/*
@@ -151,7 +175,7 @@ void apply_controls(const Camera &camera, ControlList &list,
 		list.set(controls::ColourTemperature, c.colour_temperature);
 	if (c.colour_gains[0] > 0 && c.colour_gains[1] > 0) {
 		std::array<float, 2> g{ c.colour_gains[0], c.colour_gains[1] };
-		list.set(controls::ColourGains, Span<const float, 2>(g));
+		list.set(controls::ColourGains, ControlSpan<const float, 2>(g));
 	}
 }
 
