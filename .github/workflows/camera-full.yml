@@ -44,7 +44,7 @@ jobs:
       # rust-toolchain.toml is the single source of the compiler version.
       - name: Install the pinned toolchain
         run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" --profile minimal --component clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
         with:
           shared-key: rust-macos
           cache-on-failure: true
@@ -79,7 +79,7 @@ jobs:
         run: |
           choco install nasm --no-progress -y
           echo 'C:\Program Files\NASM' >> "$GITHUB_PATH"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
         with:
           shared-key: rust-windows
           cache-on-failure: true
