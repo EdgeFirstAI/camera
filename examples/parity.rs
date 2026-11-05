@@ -308,6 +308,18 @@ impl ProcSampler {
 }
 
 fn record(topic: &mut Topic, msg: Received, h264_out: &mut Option<File>) {
+    record_timing(topic, &msg);
+    if msg.key.ends_with("camera/frame") {
+        record_frame(topic, &msg.payload);
+    } else if msg.encoding.contains("CompressedVideo") {
+        let main = msg.key.ends_with("camera/h264");
+        record_video(topic, &msg.payload, h264_out.as_mut().filter(|_| main));
+    }
+}
+
+/// Arrival, size, header-stamp latency and the sample timestamp's
+/// agreement with the header, common to every topic.
+fn record_timing(topic: &mut Topic, msg: &Received) {
     let now = Instant::now();
     let t = &mut topic.report;
     t.key.clone_from(&msg.key);
@@ -322,58 +334,64 @@ fn record(topic: &mut Topic, msg: Received, h264_out: &mut Option<File>) {
         topic.latency.push((msg.arrival_ns - stamp) as f64 / 1e6);
         topic.stamps.push(stamp);
     }
-    if let Some((ts, id)) = msg.timestamp_ns {
-        topic.publishers.insert(id);
-        if let Some(stamp) = stamp {
-            let us = ((ts - stamp) as f64 / 1e3).abs();
-            let worst = t.sample_vs_header_us.get_or_insert(0.0);
-            *worst = worst.max(us);
+    let Some((ts, id)) = &msg.timestamp_ns else {
+        return;
+    };
+    topic.publishers.insert(id.clone());
+    if let Some(stamp) = stamp {
+        let us = ((ts - stamp) as f64 / 1e3).abs();
+        let worst = t.sample_vs_header_us.get_or_insert(0.0);
+        *worst = worst.max(us);
+    }
+}
+
+/// A `camera/frame` message's tensor layout and `seq` gaps.
+fn record_frame(topic: &mut Topic, payload: &[u8]) {
+    let t = &mut topic.report;
+    let frame = match CameraFrame::from_cdr(payload) {
+        Ok(frame) => frame,
+        Err(e) => {
+            t.errors.insert(format!("CameraFrame: {e}"));
+            return;
+        }
+    };
+    let tensor = frame.tensor();
+    let layout = t.frame.get_or_insert_with(Default::default);
+    layout.shape = tensor.shape().collect();
+    layout.format = tensor.format().to_owned();
+    layout.planes = tensor.num_planes();
+    layout.inline_planes = tensor.planes().filter(|p| p.is_inline()).count() as u32;
+    let seq = frame.seq();
+    if let Some(last) = topic.last_seq {
+        layout.seq_gaps += seq.saturating_sub(last + 1);
+    }
+    topic.last_seq = Some(seq);
+}
+
+/// An H.264 message's keyframes and parameter sets, written to `out`
+/// when given.
+fn record_video(topic: &mut Topic, payload: &[u8], out: Option<&mut File>) {
+    let t = &mut topic.report;
+    let video = match FoxgloveCompressedVideo::from_cdr(payload) {
+        Ok(video) => video,
+        Err(e) => {
+            t.errors.insert(format!("CompressedVideo: {e}"));
+            return;
+        }
+    };
+    let layout = t.h264.get_or_insert_with(Default::default);
+    layout.format = video.format().to_owned();
+    layout.messages += 1;
+    let types = nal_types(video.data());
+    if types.contains(&5) {
+        layout.idr += 1;
+        if types.contains(&7) && types.contains(&8) {
+            layout.idr_with_parameter_sets += 1;
         }
     }
-
-    if msg.key.ends_with("camera/frame") {
-        match CameraFrame::from_cdr(msg.payload.as_slice()) {
-            Ok(frame) => {
-                let tensor = frame.tensor();
-                let layout = t.frame.get_or_insert_with(Default::default);
-                layout.shape = tensor.shape().collect();
-                layout.format = tensor.format().to_owned();
-                layout.planes = tensor.num_planes();
-                layout.inline_planes = tensor.planes().filter(|p| p.is_inline()).count() as u32;
-                let seq = frame.seq();
-                if let Some(last) = topic.last_seq {
-                    layout.seq_gaps += seq.saturating_sub(last + 1);
-                }
-                topic.last_seq = Some(seq);
-            }
-            Err(e) => {
-                t.errors.insert(format!("CameraFrame: {e}"));
-            }
-        }
-    } else if msg.encoding.contains("CompressedVideo") {
-        match FoxgloveCompressedVideo::from_cdr(msg.payload.as_slice()) {
-            Ok(video) => {
-                let layout = t.h264.get_or_insert_with(Default::default);
-                layout.format = video.format().to_owned();
-                layout.messages += 1;
-                let types = nal_types(video.data());
-                if types.contains(&5) {
-                    layout.idr += 1;
-                    if types.contains(&7) && types.contains(&8) {
-                        layout.idr_with_parameter_sets += 1;
-                    }
-                }
-                if msg.key.ends_with("camera/h264") {
-                    if let Some(out) = h264_out {
-                        if let Err(e) = out.write_all(video.data()) {
-                            t.errors.insert(format!("writing H.264: {e}"));
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                t.errors.insert(format!("CompressedVideo: {e}"));
-            }
+    if let Some(out) = out {
+        if let Err(e) = out.write_all(video.data()) {
+            t.errors.insert(format!("writing H.264: {e}"));
         }
     }
 }
@@ -495,9 +513,24 @@ struct Floor {
     latency_ms_p99: f64,
 }
 
+/// Topic reports keyed by their key without the host prefix.
+type Topics = BTreeMap<String, TopicReport>;
+
+fn pass(ok: bool) -> &'static str {
+    if ok {
+        "pass"
+    } else {
+        "FAIL"
+    }
+}
+
+/// `v` to `digits` places, or `-`.
+fn opt(v: Option<f64>, digits: usize) -> String {
+    v.map_or("-".to_owned(), |v| format!("{v:.digits$}"))
+}
+
 fn compare(before: &Report, after: &Report, floor: Option<&Floor>) -> String {
-    let mut out = String::new();
-    let index = |r: &Report| -> BTreeMap<String, TopicReport> {
+    let index = |r: &Report| -> Topics {
         r.topics
             .iter()
             .map(|t| (short_key(&t.key).to_owned(), t.clone()))
@@ -505,48 +538,44 @@ fn compare(before: &Report, after: &Report, floor: Option<&Floor>) -> String {
     };
     let (a, b) = (index(before), index(after));
     let keys: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
-    let software_jpeg = b.contains_key("camera/jpeg");
-    let pass = |ok: bool| if ok { "pass" } else { "FAIL" };
-    let opt = |v: Option<f64>, digits: usize| v.map_or("-".to_owned(), |v| format!("{v:.digits$}"));
+    let labels = (before.label.as_str(), after.label.as_str());
 
-    out += &format!(
-        "## Topics\n\n| Topic | {0} encoding | {1} encoding | {0} fps | {1} fps | {0} p50/p95 ms | {1} p50/p95 ms | {1} target |\n|---|---|---|---|---|---|---|---|\n",
-        before.label, after.label
+    let mut out = topics_section(labels, &keys, (&a, &b), floor);
+    out += &clock_section(labels, &keys, (&a, &b));
+    out += &layout_section(labels, (&a, &b));
+    if let Some(f) = floor {
+        out += &format!(
+            "\nDriver delivery, capture stamp to dequeue with the service stopped: p50 {:.2} ms, p99 {:.2} ms. `camera/frame` latency includes it.\n",
+            f.latency_ms_p50, f.latency_ms_p99
+        );
+    }
+    if before.process.is_some() || after.process.is_some() {
+        out += &process_section(before, after, b.contains_key("camera/jpeg"));
+    }
+    out
+}
+
+/// Each topic's encoding, rate and latency in both reports, and `after`'s
+/// result against the targets.
+fn topics_section(
+    (x_label, y_label): (&str, &str),
+    keys: &BTreeSet<&String>,
+    (a, b): (&Topics, &Topics),
+    floor: Option<&Floor>,
+) -> String {
+    let mut out = format!(
+        "## Topics\n\n| Topic | {x_label} encoding | {y_label} encoding | {x_label} fps | {y_label} fps | {x_label} p50/p95 ms | {y_label} p50/p95 ms | {y_label} target |\n|---|---|---|---|---|---|---|---|\n"
     );
-    for key in &keys {
+    let enc =
+        |t: Option<&TopicReport>| t.map_or("absent".to_owned(), |t| format!("`{}`", t.encoding));
+    let fps = |t: Option<&TopicReport>| opt(t.map(|t| t.fps), 2);
+    let lat = |t: Option<&TopicReport>| {
+        t.and_then(|t| t.latency_ms.as_ref())
+            .map_or("-".to_owned(), |l| format!("{:.2} / {:.2}", l.p50, l.p95))
+    };
+    for key in keys {
         let (x, y) = (a.get(*key), b.get(*key));
-        let enc = |t: Option<&TopicReport>| {
-            t.map_or("absent".to_owned(), |t| format!("`{}`", t.encoding))
-        };
-        let fps = |t: Option<&TopicReport>| opt(t.map(|t| t.fps), 2);
-        let lat = |t: Option<&TopicReport>| {
-            t.and_then(|t| t.latency_ms.as_ref())
-                .map_or("-".to_owned(), |l| format!("{:.2} / {:.2}", l.p50, l.p95))
-        };
-        let target = y.map_or("-".to_owned(), |t| {
-            let p95 = t.latency_ms.as_ref().map_or(f64::INFINITY, |l| l.p95);
-            match short_key(&t.key) {
-                "camera/frame" => match (floor, &t.latency_ms) {
-                    (Some(f), Some(l)) => {
-                        let own = l.p50 - f.latency_ms_p50;
-                        format!(
-                            "{} (≥{TARGET_FPS} fps, {own:.2} ms after delivery at p50, <{TARGET_FRAME_MS} ms)",
-                            pass(t.fps >= TARGET_FPS && own < TARGET_FRAME_MS)
-                        )
-                    }
-                    _ => format!(
-                        "{} (≥{TARGET_FPS} fps, p95 <{TARGET_FRAME_MS} ms)",
-                        pass(t.fps >= TARGET_FPS && p95 < TARGET_FRAME_MS)
-                    ),
-                },
-                "camera/jpeg" => "reported only (software JPEG)".to_owned(),
-                "camera/h264" => format!(
-                    "{} (≥{TARGET_FPS} fps, p95 <{TARGET_H264_MS} ms)",
-                    pass(t.fps >= TARGET_FPS && p95 < TARGET_H264_MS)
-                ),
-                _ => "-".to_owned(),
-            }
-        });
+        let target = y.map_or("-".to_owned(), |t| topic_target(t, floor));
         out += &format!(
             "| `{key}` | {} | {} | {} | {} | {} | {} | {target} |\n",
             enc(x),
@@ -557,17 +586,52 @@ fn compare(before: &Report, after: &Report, floor: Option<&Floor>) -> String {
             lat(y)
         );
     }
+    out
+}
 
-    out += &format!(
-        "\n## Clock domain\n\n| Topic | {0} stamps on a frame | {1} stamps on a frame | {0} sample−header µs | {1} sample−header µs |\n|---|---|---|---|---|\n",
-        before.label, after.label
+/// A topic's result against its rate and latency targets. `camera/frame`
+/// is judged on the latency it adds after the driver's delivery, when the
+/// driver's floor is known.
+fn topic_target(t: &TopicReport, floor: Option<&Floor>) -> String {
+    let p95 = t.latency_ms.as_ref().map_or(f64::INFINITY, |l| l.p95);
+    match short_key(&t.key) {
+        "camera/frame" => match (floor, &t.latency_ms) {
+            (Some(f), Some(l)) => {
+                let own = l.p50 - f.latency_ms_p50;
+                format!(
+                    "{} (≥{TARGET_FPS} fps, {own:.2} ms after delivery at p50, <{TARGET_FRAME_MS} ms)",
+                    pass(t.fps >= TARGET_FPS && own < TARGET_FRAME_MS)
+                )
+            }
+            _ => format!(
+                "{} (≥{TARGET_FPS} fps, p95 <{TARGET_FRAME_MS} ms)",
+                pass(t.fps >= TARGET_FPS && p95 < TARGET_FRAME_MS)
+            ),
+        },
+        "camera/jpeg" => "reported only (software JPEG)".to_owned(),
+        "camera/h264" => format!(
+            "{} (≥{TARGET_FPS} fps, p95 <{TARGET_H264_MS} ms)",
+            pass(t.fps >= TARGET_FPS && p95 < TARGET_H264_MS)
+        ),
+        _ => "-".to_owned(),
+    }
+}
+
+/// How often each topic's stamp matches its frame's, and how far its
+/// sample timestamp is from its header stamp.
+fn clock_section(
+    (x_label, y_label): (&str, &str),
+    keys: &BTreeSet<&String>,
+    (a, b): (&Topics, &Topics),
+) -> String {
+    let mut out = format!(
+        "\n## Clock domain\n\n| Topic | {x_label} stamps on a frame | {y_label} stamps on a frame | {x_label} sample−header µs | {y_label} sample−header µs |\n|---|---|---|---|---|\n"
     );
-    for key in &keys {
+    let m =
+        |t: Option<&TopicReport>| opt(t.and_then(|t| t.frame_stamp_match).map(|v| v * 100.0), 1);
+    let s = |t: Option<&TopicReport>| opt(t.and_then(|t| t.sample_vs_header_us), 0);
+    for key in keys {
         let (x, y) = (a.get(*key), b.get(*key));
-        let m = |t: Option<&TopicReport>| {
-            opt(t.and_then(|t| t.frame_stamp_match).map(|v| v * 100.0), 1)
-        };
-        let s = |t: Option<&TopicReport>| opt(t.and_then(|t| t.sample_vs_header_us), 0);
         out += &format!(
             "| `{key}` | {}% | {}% | {} | {} |\n",
             m(x),
@@ -576,9 +640,13 @@ fn compare(before: &Report, after: &Report, floor: Option<&Floor>) -> String {
             s(y)
         );
     }
+    out
+}
 
-    out += "\n## Frame and H.264 layout\n\n";
-    for (label, r) in [(&before.label, &a), (&after.label, &b)] {
+/// The frame tensor and H.264 stream layouts, and any decode errors.
+fn layout_section((x_label, y_label): (&str, &str), (a, b): (&Topics, &Topics)) -> String {
+    let mut out = "\n## Frame and H.264 layout\n\n".to_owned();
+    for (label, r) in [(x_label, a), (y_label, b)] {
         if let Some(f) = r.get("camera/frame").and_then(|t| t.frame.as_ref()) {
             out += &format!(
                 "- {label} `camera/frame`: shape {:?}, format `{}`, {} plane(s), {} inline, {} sequence gaps\n",
@@ -597,33 +665,24 @@ fn compare(before: &Report, after: &Report, floor: Option<&Floor>) -> String {
             }
         }
     }
+    out
+}
 
-    if let Some(f) = floor {
-        out += &format!(
-            "\nDriver delivery, capture stamp to dequeue with the service stopped: p50 {:.2} ms, p99 {:.2} ms. `camera/frame` latency includes it.\n",
-            f.latency_ms_p50, f.latency_ms_p99
-        );
-    }
-
-    if before.process.is_none() && after.process.is_none() {
-        return out;
-    }
-    out += &format!(
+/// CPU, memory and threads of both processes, and `after`'s result against
+/// the targets. CPU is not judged with software JPEG on.
+fn process_section(before: &Report, after: &Report, software_jpeg: bool) -> String {
+    let mut out = format!(
         "\n## Process\n\n| | {0} | {1} | {1} target |\n|---|---|---|---|\n",
         before.label, after.label
     );
     let p = |r: &Report, f: fn(&ProcessReport) -> f64| opt(r.process.as_ref().map(f), 1);
+    let after_is = |ok: fn(&ProcessReport) -> bool| after.process.as_ref().is_some_and(ok);
     let cpu_target = if software_jpeg {
         "reported only (software JPEG)".to_owned()
     } else {
         format!(
             "{} (<{TARGET_CPU}%)",
-            pass(
-                after
-                    .process
-                    .as_ref()
-                    .is_some_and(|p| p.cpu_percent < TARGET_CPU)
-            )
+            pass(after_is(|p| p.cpu_percent < TARGET_CPU))
         )
     };
     out += &format!(
@@ -635,12 +694,7 @@ fn compare(before: &Report, after: &Report, floor: Option<&Floor>) -> String {
         "| Resident memory, max MB | {} | {} | {} (<{TARGET_RSS_MB} MB) |\n",
         p(before, |p| p.rss_mb_max),
         p(after, |p| p.rss_mb_max),
-        pass(
-            after
-                .process
-                .as_ref()
-                .is_some_and(|p| p.rss_mb_max < TARGET_RSS_MB)
-        )
+        pass(after_is(|p| p.rss_mb_max < TARGET_RSS_MB))
     );
     out += &format!(
         "| Threads | {} | {} | |\n",

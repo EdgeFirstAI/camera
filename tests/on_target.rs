@@ -111,7 +111,6 @@ struct Arrivals {
 /// never goes back, and a prompt, clean exit after SIGTERM.
 fn stream(args: &[String], expected: &[(&'static str, Expect)]) -> TestResult {
     let topics: Vec<&'static str> = expected.iter().map(|&(t, _)| t).collect();
-    let fps = expected_fps();
     let endpoint = free_endpoint()?;
     let mut args = args.to_vec();
     args.extend([
@@ -125,74 +124,115 @@ fn stream(args: &[String], expected: &[(&'static str, Expect)]) -> TestResult {
     let arrivals: Vec<Arc<Mutex<Arrivals>>> = topics.iter().map(|_| Arc::default()).collect();
     let watched = (|| -> TestResult {
         let session = subscriber_session(&endpoint)?;
-        let mut subscribers = Vec::new();
-        for (&topic, log) in topics.iter().zip(&arrivals) {
-            let log = Arc::clone(log);
-            // The binary namespaces its keys with the host name.
-            let subscriber = session
-                .declare_subscriber(format!("*/{topic}"))
-                .callback(move |sample| {
-                    let now = Instant::now();
-                    let mut log = log.lock().unwrap();
-                    log.times.push(now);
-                    if topic == FRAME_TOPIC {
-                        match CameraFrame::from_cdr(sample.payload().to_bytes().into_owned()) {
-                            Ok(frame) => log.seqs.push(frame.seq()),
-                            Err(e) => log.errors.push(e.to_string()),
-                        }
-                    }
-                })
-                .wait()?;
-            subscribers.push(subscriber);
-        }
-
-        let first = |log: &Arc<Mutex<Arrivals>>| log.lock().unwrap().times.first().copied();
-        loop {
-            if let Some(status) = child.try_wait()? {
-                return Err(format!("{args:?} exited early with {status}").into());
-            }
-            let firsts: Vec<_> = arrivals.iter().map(first).collect();
-            if firsts.iter().all(Option::is_some) {
-                let last_first = firsts.into_iter().flatten().max().ok_or("no topics")?;
-                eprintln!(
-                    "every topic started {:?} after launch",
-                    last_first - started
-                );
-                // Every window has closed once the last topic's has.
-                let end = last_first + RATE_WINDOW + Duration::from_millis(500);
-                while Instant::now() < end {
-                    if let Some(status) = child.try_wait()? {
-                        return Err(format!("{args:?} exited early with {status}").into());
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                }
-                break;
-            }
-            if started.elapsed() > FIRST_SAMPLE {
-                let missing: Vec<_> = topics
-                    .iter()
-                    .zip(&firsts)
-                    .filter(|(_, f)| f.is_none())
-                    .map(|(t, _)| *t)
-                    .collect();
-                return Err(format!("no sample on {missing:?} within {FIRST_SAMPLE:?}").into());
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        drop(subscribers);
-        Ok(())
+        let _subscribers = subscribe(&session, &topics, &arrivals)?;
+        watch_windows(&mut child, &args, &topics, &arrivals, started)
     })();
     let stopped = stop(child, &args);
     watched?;
     stopped?;
 
-    let wanted = MIN_RATE * fps * RATE_WINDOW.as_secs_f64();
-    let half = RATE_WINDOW / 2;
-    let mut failures = Vec::new();
-    for ((topic, expect), log) in expected.iter().zip(&arrivals) {
-        let log = log.lock().unwrap();
-        let first = log.times[0];
-        let in_window: Vec<Duration> = log
+    let fps = expected_fps();
+    let failures: Vec<String> = expected
+        .iter()
+        .zip(&arrivals)
+        .flat_map(|(&(topic, expect), log)| log.lock().unwrap().failures(topic, expect, fps))
+        .collect();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; ").into())
+    }
+}
+
+/// One subscriber per topic, logging each sample's arrival in `arrivals`.
+fn subscribe(
+    session: &zenoh::Session,
+    topics: &[&'static str],
+    arrivals: &[Arc<Mutex<Arrivals>>],
+) -> zenoh::Result<Vec<zenoh::pubsub::Subscriber<()>>> {
+    topics
+        .iter()
+        .zip(arrivals)
+        .map(|(&topic, log)| {
+            let log = Arc::clone(log);
+            // The binary namespaces its keys with the host name.
+            session
+                .declare_subscriber(format!("*/{topic}"))
+                .callback(move |sample| log.lock().unwrap().record(topic, &sample))
+                .wait()
+        })
+        .collect()
+}
+
+/// Fails if the binary has exited.
+fn still_running(child: &mut Child, args: &[String]) -> TestResult {
+    match child.try_wait()? {
+        Some(status) => Err(format!("{args:?} exited early with {status}").into()),
+        None => Ok(()),
+    }
+}
+
+/// Waits for the first sample on every topic, within [`FIRST_SAMPLE`] of
+/// `started`, then for the last topic's [`RATE_WINDOW`] to close, with the
+/// binary running throughout.
+fn watch_windows(
+    child: &mut Child,
+    args: &[String],
+    topics: &[&'static str],
+    arrivals: &[Arc<Mutex<Arrivals>>],
+    started: Instant,
+) -> TestResult {
+    let last_first = loop {
+        still_running(child, args)?;
+        let firsts: Vec<_> = arrivals
+            .iter()
+            .map(|log| log.lock().unwrap().times.first().copied())
+            .collect();
+        if let Some(last) = firsts.iter().copied().collect::<Option<Vec<_>>>() {
+            break last.into_iter().max().ok_or("no topics")?;
+        }
+        if started.elapsed() > FIRST_SAMPLE {
+            let missing: Vec<_> = topics
+                .iter()
+                .zip(&firsts)
+                .filter(|(_, f)| f.is_none())
+                .map(|(t, _)| *t)
+                .collect();
+            return Err(format!("no sample on {missing:?} within {FIRST_SAMPLE:?}").into());
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+    eprintln!(
+        "every topic started {:?} after launch",
+        last_first - started
+    );
+    // Every window has closed once the last topic's has.
+    let end = last_first + RATE_WINDOW + Duration::from_millis(500);
+    while Instant::now() < end {
+        still_running(child, args)?;
+        thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
+}
+
+impl Arrivals {
+    /// Logs one sample of `topic`, with its `seq` on `camera/frame`.
+    fn record(&mut self, topic: &str, sample: &zenoh::sample::Sample) {
+        self.times.push(Instant::now());
+        if topic == FRAME_TOPIC {
+            match CameraFrame::from_cdr(sample.payload().to_bytes().into_owned()) {
+                Ok(frame) => self.seqs.push(frame.seq()),
+                Err(e) => self.errors.push(e.to_string()),
+            }
+        }
+    }
+
+    /// What `topic` failed of `expect` over its [`RATE_WINDOW`], at the
+    /// requested `fps`, and of its samples' contents.
+    fn failures(&self, topic: &str, expect: Expect, fps: f64) -> Vec<String> {
+        let mut failures = Vec::new();
+        let first = self.times[0];
+        let in_window: Vec<Duration> = self
             .times
             .iter()
             .map(|&t| t.duration_since(first))
@@ -202,12 +242,14 @@ fn stream(args: &[String], expected: &[(&'static str, Expect)]) -> TestResult {
         let rate = count as f64 / RATE_WINDOW.as_secs_f64();
         match expect {
             Expect::Rate => {
+                let wanted = MIN_RATE * fps * RATE_WINDOW.as_secs_f64();
                 eprintln!(
                     "{topic}: {count} samples in {RATE_WINDOW:?} ({rate:.2}/s, expected {fps})"
                 );
                 if (count as f64) < wanted {
                     failures.push(format!(
-                        "{topic}: {count} samples in {RATE_WINDOW:?}, under {wanted:.0} ({MIN_RATE} of {fps}/s)"
+                        "{topic}: {count} samples in {RATE_WINDOW:?}, under {wanted:.0} \
+                         ({MIN_RATE} of {fps}/s)"
                     ));
                 }
             }
@@ -215,31 +257,27 @@ fn stream(args: &[String], expected: &[(&'static str, Expect)]) -> TestResult {
                 eprintln!(
                     "{topic}: {count} samples in {RATE_WINDOW:?} ({rate:.2}/s, no rate expected)"
                 );
-                if !in_window.iter().any(|&d| d >= half) {
+                if !in_window.iter().any(|&d| d >= RATE_WINDOW / 2) {
                     failures.push(format!(
                         "{topic}: no sample in the second half of {RATE_WINDOW:?}; it stopped"
                     ));
                 }
             }
         }
-        if !log.errors.is_empty() {
-            failures.push(format!("{topic}: undecodable samples: {:?}", log.errors));
+        if !self.errors.is_empty() {
+            failures.push(format!("{topic}: undecodable samples: {:?}", self.errors));
         }
-        if let Some(w) = log.seqs.windows(2).find(|w| w[1] < w[0]) {
+        if let Some(w) = self.seqs.windows(2).find(|w| w[1] < w[0]) {
             failures.push(format!("{topic}: seq went back from {} to {}", w[0], w[1]));
         }
-        if *topic == FRAME_TOPIC && log.seqs.len() != log.times.len() {
+        if topic == FRAME_TOPIC && self.seqs.len() != self.times.len() {
             failures.push(format!(
                 "{topic}: {} of {} samples carried a seq",
-                log.seqs.len(),
-                log.times.len()
+                self.seqs.len(),
+                self.times.len()
             ));
         }
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures.join("; ").into())
+        failures
     }
 }
 
