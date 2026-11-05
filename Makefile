@@ -12,8 +12,15 @@
 # ===========================================================================
 
 PROJECT_TYPE := rust
-SRC_DIRS := src tests benches
-TEST_CMD := cargo test --lib --bins
+SRC_DIRS := src tests crates
+# The host tests CI's Quick tier runs (nextest-args in .github/workflows/ci.yml).
+TEST_RUNNER ?= cargo nextest run
+TEST_ARGS := --workspace --locked \
+	--features edgefirst-camera/mock,edgefirst-camera/schemas,edgefirst-camera/file \
+	--lib --bin edgefirst-camera \
+	--test env_scrub --test on_target --test board --test publish --test subcommands \
+	--test mock --test schema --test file --test v4l2_vivid --test layout
+TEST_CMD := $(TEST_RUNNER) $(TEST_ARGS)
 VERSION_FILE := Cargo.toml
 VERSION_FILES := Cargo.toml CHANGELOG.md
 
@@ -26,8 +33,11 @@ help:
 	@echo "Available targets:"
 	@echo "  make format         - Format Rust code with cargo fmt"
 	@echo "  make lint           - Run cargo clippy"
-	@echo "  make test           - Run lib/bin unit tests (not G2D image tests)"
+	@echo "  make test           - Run the workspace host tests CI runs (cargo nextest;"
+	@echo "                        TEST_RUNNER=\"cargo test\" without nextest)"
 	@echo "  make sbom           - Generate SBOM and check license policy"
+	@echo "  make abi-check      - Trace the vivid tests for V4L2 ioctl ABI mismatches"
+	@echo "  make bench-capture  - Run the SDK capture benchmarks on a V4L2 camera"
 	@echo "  make verify-version - Verify version consistency across files"
 	@echo "  make pre-release    - Run all pre-release checks"
 	@echo "  make clean          - Clean build artifacts"
@@ -48,13 +58,13 @@ format:
 .PHONY: lint
 lint:
 	@echo "Running clippy..."
-	@cargo clippy --workspace --all-features -- -D warnings
+	@cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 	@echo "✓ Linting complete"
 
 # Run tests
 .PHONY: test
 test:
-	@echo "Running lib/bin unit tests..."
+	@echo "Running the workspace host tests..."
 	@$(TEST_CMD)
 	@echo "✓ Tests complete"
 
@@ -131,6 +141,18 @@ bench:
 	@echo "Running benchmarks..."
 	@cargo bench
 	@echo "✓ Benchmarks complete"
+
+.PHONY: bench-capture
+bench-capture:
+	@echo "Running the SDK capture benchmarks..."
+	@cargo bench -p edgefirst-camera --bench capture
+	@echo "✓ Capture benchmarks complete"
+
+.PHONY: abi-check
+abi-check:
+	@echo "Checking V4L2 ioctls against the kernel ABI (needs vivid and strace)..."
+	@bash .github/scripts/ioctl-abi-check.sh
+	@echo "✓ ioctl ABI check passed"
 
 .PHONY: coverage
 coverage:

@@ -33,8 +33,6 @@ from typing import Set, List, Dict, Tuple
 # License overrides for dependencies with missing or incorrect metadata
 LICENSE_OVERRIDES = {
     "sublime_fuzzy@0.7.0": "Apache-2.0",  # Confirmed from upstream repo
-    "dma-buf@0.4.0": "MIT",  # Confirmed from https://github.com/mripard/dma-buf
-    "dma-buf@0.5.0": "MIT",  # Same MIT LICENSE as 0.4.0 (transitive via videostream)
     "dma-heap@0.4.1": "MIT"  # Confirmed from https://github.com/mripard/dma-heap
 }
 

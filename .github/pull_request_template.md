@@ -52,10 +52,8 @@ JIRA: EDGEAI-
 **Automated tests (local):**
 
 - [ ] `cargo fmt --check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo test --lib` passes (unit tests)
-- [ ] `cargo test --doc` passes (doc tests)
-- [ ] `cargo test --test '*'` passes (integration tests)
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes
+- [ ] `cargo test --workspace` passes (unit, integration and doc tests)
 - [ ] `cargo build --release` succeeds
 
 **Platform testing:**
@@ -73,6 +71,32 @@ edgefirst-camera --jpeg --h264
 # Expected: Camera streams successfully at 30 FPS
 # Actual: ...
 ```
+
+### Camera hardware validation
+
+<!--
+Required when the PR touches capture behaviour: crates/camera/src/backend/,
+buffer or frame lifetime in the SDK, controls or timestamps, or the
+application capture pipeline. Otherwise write "Not applicable" and why.
+Hosted macOS and Windows runners have no camera; their CI lanes do not
+validate capture.
+-->
+
+**Scope.** List the backends and platforms this change can affect (V4L2 vvcam / ISI / UVC, libcamera neo / pisp, codec, mock only).
+
+**Devices tested.** One row per device:
+
+| Device | Sensor and path | Kernel / BSP | libcamera | Runner offline and rebooted first |
+|---|---|---|---|---|
+| <!-- e.g. imx8mpevk-06 --> | <!-- OS08A20 on vvcam --> | <!-- 6.18.20-2.0.0 --> | <!-- n/a --> | <!-- yes / not a fleet board --> |
+
+A board that also serves as a CI runner is taken offline and rebooted before measuring, and brought back afterwards.
+
+**Probe results.** Paste or link the output of `cargo run -p edgefirst-camera --example probe -- --source <spec> --frames 300 --close-test --json` for each device. Note any change from the previous run on the same device: negotiated format and pitch, `Auto` resolution, contiguity, fps, drops, dequeue latency, timestamp clock and source, close/reopen result.
+
+**Not tested.** List the platforms this change can affect but that were not tested, and why.
+
+**Application changes.** For changes to the camera application, give the 2.12 parity results (`scripts/parity.sh`): topics and schemas, fps, and `camera/frame`, JPEG and H.264 publish latency against the installed release.
 
 ## Documentation
 
@@ -120,7 +144,7 @@ edgefirst-camera --jpeg --h264
 
 <!-- If applicable, paste cargo bench output or manual timing results -->
 
-```
+```text
 # cargo bench output or manual performance measurements
 ```
 
@@ -145,7 +169,7 @@ Provide migration instructions for users upgrading from previous versions.
 
 <!-- For reviewers: Verify the following before approving -->
 
-- [ ] Code quality meets project standards (see [AGENTS.md](../AGENTS.md))
+- [ ] Code quality meets project standards (see [copilot-instructions.md](copilot-instructions.md))
 - [ ] Test coverage is adequate (70% minimum, 80% for core modules)
 - [ ] Documentation is complete and accurate
 - [ ] No security concerns or hardcoded credentials
@@ -154,6 +178,5 @@ Provide migration instructions for users upgrading from previous versions.
 
 <!-- 
 Assign reviewers using @mentions or request reviews via GitHub UI.
-For main branch: Requires 2 approvals
-For develop branch: Requires 1 approval
+Merges to main require 2 approvals
 -->

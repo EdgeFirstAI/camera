@@ -30,9 +30,9 @@ This project adheres to the [Contributor Covenant Code of Conduct](CODE_OF_CONDU
 **Development Environment:**
 
 - Linux (Ubuntu 20.04+ or Debian 11+ recommended)
-- Rust 1.90.0 or later
-- For ARM64 cross-compilation: `gcc-aarch64-linux-gnu`
-- For hardware testing: NXP i.MX8M Plus device
+- Rust 1.94 or later (`rust-toolchain.toml` pins 1.94.0)
+- For ARM64 cross-compilation: `cargo-zigbuild` and Zig
+- For hardware testing: a board such as the NXP i.MX8M Plus (V4L2) or i.MX 95 (libcamera)
 
 **Install Rust:**
 
@@ -49,9 +49,11 @@ sudo apt-get update
 sudo apt-get install build-essential pkg-config libv4l-dev
 
 # For cross-compilation
-sudo apt-get install gcc-aarch64-linux-gnu
+cargo install cargo-zigbuild
 rustup target add aarch64-unknown-linux-gnu
 ```
+
+Install Zig from <https://ziglang.org/download/>, or with `pip install ziglang`.
 
 ### Clone Repository
 
@@ -60,19 +62,27 @@ git clone https://github.com/EdgeFirstAI/camera.git
 cd camera
 ```
 
+### Workspace
+
+The repository is a Cargo workspace:
+
+- The root package, `edgefirst-camera-app`, is the service. Its binary is `edgefirst-camera`.
+- `crates/camera` is the `edgefirst-camera` SDK: the V4L2, libcamera, file and mock backends. See its [architecture](crates/camera/ARCHITECTURE.md) and [testing guide](crates/camera/TESTING.md).
+- `crates/libcamera-sys` is `edgefirst-libcamera-sys`: Rust bindings that load a C shim over libcamera at run time. The shim is C++ in `crates/libcamera-sys/shim`, built with meson against the installed libcamera (`meson setup build crates/libcamera-sys/shim && ninja -C build`). Nothing links libcamera, so `cargo build` needs neither libcamera nor the shim; see the crate's [README](crates/libcamera-sys/README.md) for building and finding the shim.
+
 ### Build and Run
 
 ```bash
 # Build debug binary
 cargo build
 
-# Run tests
-cargo test
+# Run tests for the whole workspace
+cargo test --workspace
 
 # Build release binary
 cargo build --release
 
-# Run (requires camera hardware)
+# Run (requires camera hardware, or use --source mock --h264 false)
 cargo run -- --camera /dev/video0 --jpeg
 ```
 
@@ -82,72 +92,43 @@ cargo run -- --camera /dev/video0 --jpeg
 
 ### Branch Strategy
 
-**Main Branches:**
+Development is trunk-based. `main` is the only long-lived branch and is protected. Create short-lived branches from `main`, named `<type>/EDGEAI-###[-description]`:
 
-- `main` - Stable release branch (protected)
-- `develop` - Integration branch for features (protected)
-
-**Feature Branches:**
-Create branches from `develop` using the pattern:
-
+```text
+feature/EDGEAI-123-add-udp-streaming
+bugfix/EDGEAI-124-tile-frame-drops
+hotfix/EDGEAI-125-fix-description
 ```
-feature/<description>
-bugfix/<description>
-hotfix/<description>
-```
-
-**Example:**
 
 ```bash
-git checkout develop
-git pull origin develop
-git checkout -b feature/add-udp-streaming
+git checkout main
+git pull origin main
+git checkout -b feature/EDGEAI-123-add-udp-streaming
 ```
 
 ### Commit Messages
 
-Use clear, descriptive commit messages:
+Commits use the JIRA key and a short description of what was done, and are signed off with `-s`:
 
-```
-<type>: <short summary>
-
-<detailed description if needed>
+```text
+EDGEAI-123: Brief description of the change
 ```
 
-**Types:**
-
-- `feat`: New feature
-- `fix`: Bug fix
-- `docs`: Documentation only
-- `style`: Code style/formatting (no logic change)
-- `refactor`: Code refactoring (no functional change)
-- `perf`: Performance improvement
-- `test`: Add or update tests
-- `chore`: Build process, dependencies, etc.
-
-**Examples:**
-
+```bash
+git commit -s -m "EDGEAI-123: Add UDP streaming for JPEG frames"
 ```
-feat: add UDP streaming support for JPEG frames
 
-Implements direct UDP multicast streaming as alternative to Zenoh for
-low-latency local network distribution.
-
-fix: prevent frame drops during 4K tile encoding
-
-Increased tile channel buffer from 1 to 3 frames to accommodate
-parallel encoding latency variance.
-```
+Keep the first line to 50 to 72 characters. Add a body when the reason for the change is not obvious from the diff.
 
 ### Development Loop
 
-1. **Create feature branch** from `develop`
+1. **Create a branch** from `main`
 2. **Make changes** with atomic commits
 3. **Write tests** for new functionality
 4. **Run linters** and formatters
 5. **Test locally** on hardware if applicable
 6. **Push branch** to GitHub
-7. **Open pull request** to `develop`
+7. **Open a pull request** to `main`
 8. **Address review** feedback
 9. **Merge** after approval
 
@@ -157,164 +138,27 @@ parallel encoding latency variance.
 
 ### Tracy Profiler Setup
 
-The camera node includes Tracy profiler integration for detailed performance analysis. Tracy is a real-time profiler that provides frame timing, CPU profiling, memory tracking, and GPU activity visualization.
+The camera node includes Tracy profiler integration. The Tracy GUI is available from <https://github.com/wolfpld/tracy/releases>. Match the GUI to the version of `tracy-client` in `Cargo.lock`.
 
-#### Installing Tracy Profiler
-
-**Download Tracy:**
-
-Tracy profiler GUI is available from the official repository:
+Tracy is enabled by default (the `tracy` feature). The `profiling` feature adds allocation tracking, sampling and system tracing:
 
 ```bash
-# Clone Tracy repository
-git clone https://github.com/wolfpld/tracy.git
-cd tracy
-
-# Build profiler GUI (requires X11, OpenGL)
-cd profiler/build/unix
-make release
-
-# Binary will be in: tracy/profiler/build/unix/Tracy-release
-```
-
-**Platform Requirements:**
-- Linux: X11, OpenGL 3.2+
-- macOS: Supported via XQuartz
-- Windows: Native support
-
-**Pre-built Binaries:**
-
-Pre-built Tracy releases are available at: https://github.com/wolfpld/tracy/releases
-
-#### Using Tracy with Camera Node
-
-**1. Build with Tracy Support:**
-
-Tracy is enabled by default. For standard profiling:
-
-```bash
-# Build with basic Tracy support (default)
-cargo build --release
-
-# Build with advanced profiling (memory, sampling)
 cargo build --release --profile=profiling --features=profiling
 ```
 
-**2. Run Camera Node with Tracy:**
+Run the service with `--tracy` (or `TRACY=true`) and connect the Tracy GUI to the device:
 
 ```bash
-# Start camera with Tracy enabled
 ./target/release/edgefirst-camera --tracy --camera /dev/video0 --jpeg --h264
 ```
 
-**3. Connect Tracy Profiler:**
+What the service emits:
 
-```bash
-# In separate terminal, start Tracy GUI
-./Tracy-release
+- **Frame markers:** the capture loop marks each frame, and the encoders mark secondary frames named `h264` and `jpeg`.
+- **Plots:** `fps` (capture rate), `h264_kb` (H.264 access unit size in kilobytes) and `jpeg_kb` (JPEG size in kilobytes).
+- **Zones:** `camera_read` and `camera_publish` on the capture thread, and `h264` (with the stage name) and `jpeg` on the encoder threads.
 
-# Tracy will automatically discover and connect to the camera node
-```
-
-**4. Alternative: Manual Connection:**
-
-If automatic discovery doesn't work:
-- In Tracy GUI, click "Connect" button
-- Enter IP address of device running camera node
-- Default port: 8086
-
-#### Tracy Features Available
-
-**Frame Markers:**
-
-The camera node emits frame markers for different processing stages:
-- **Main frames**: Camera capture rate (30 FPS)
-- **H.264 frames**: H.264 encoding rate
-- **JPEG frames**: JPEG encoding rate
-- **Tile frames**: 4K tile encoding rate (if enabled)
-
-In Tracy, switch between frame views using the frame dropdown menu.
-
-**Performance Plots:**
-
-Real-time plots visible in Tracy:
-- `fps`: Camera frames per second
-- `jpeg_kb`: JPEG compressed size in kilobytes
-
-**Zones and Spans:**
-
-All instrumented functions appear as zones in Tracy timeline:
-- Camera read operations
-- G2D conversions
-- JPEG/H.264 encoding
-- Zenoh publishing
-- Frame distribution
-
-Zones are automatically named from Rust function names via the `#[instrument]` attribute.
-
-**Memory Profiling:**
-
-When built with `profiling` feature:
-- Memory allocations tracked
-- Call stacks recorded
-- Memory leaks detected
-- Allocation statistics available
-
-#### Profiling Workflow
-
-**1. Identify Performance Issues:**
-
-```bash
-# Run with Tracy enabled
-./edgefirst-camera --tracy --camera /dev/video0 --jpeg --h264
-
-# In Tracy GUI:
-# - Check frame timing consistency
-# - Look for dropped frames (gaps in timeline)
-# - Identify long-running zones
-# - Monitor FPS plot
-```
-
-**2. Investigate Specific Functions:**
-
-- Click on zones in timeline to see call stacks
-- Use statistics view to find slowest functions
-- Compare frame timing between good/bad frames
-- Check memory allocations in hot paths
-
-**3. Validate Optimizations:**
-
-After making changes:
-- Capture new Tracy trace
-- Compare zone timings before/after
-- Verify frame rate improvements
-- Check for regressions in other areas
-
-#### Common Profiling Scenarios
-
-**Scenario 1: Dropped Frames**
-
-If you see gaps in the main frame timeline:
-
-1. Check FPS plot - should be steady at 30 FPS
-2. Look for long-running zones (>33ms for 30 FPS)
-3. Identify which encoding thread is slow:
-   - Check secondary frame markers (h264, jpeg, h264_tile)
-   - Compare zone timings across threads
-
-**Scenario 2: High CPU Usage**
-
-1. Use Tracy's CPU sampling (profiling feature)
-2. Identify functions consuming most CPU time
-3. Check for unexpected software fallbacks (should use G2D hardware)
-4. Verify encoder threads aren't blocking each other
-
-**Scenario 3: Memory Growth**
-
-1. Enable memory profiling (profiling feature)
-2. Capture trace over several minutes
-3. Check memory plot for growth trend
-4. Use allocation list to find leaks
+Profile on the target hardware rather than a development machine, and compare a trace before and after a change.
 
 #### Tokio Console (Async Debugging)
 
@@ -340,6 +184,7 @@ tokio-console
 ```
 
 **Use Cases:**
+
 - Identify blocking async tasks
 - Find deadlocks
 - Monitor task wake/sleep patterns
@@ -348,21 +193,24 @@ tokio-console
 #### Performance Best Practices
 
 **During Development:**
+
 - Profile early and often
 - Establish baseline performance
 - Use Tracy to validate assumptions
 - Check both average and worst-case timings
 
 **Before Release:**
+
 - Capture Tracy trace of typical workload
 - Verify frame timing meets requirements
 - Check for memory leaks (long-running test)
 - Profile on target hardware (i.MX8), not development machine
 
 **Optimization Guidelines:**
+
 - Profile before optimizing (measure, don't guess)
 - Focus on hot paths (zones that appear frequently)
-- Prefer hardware acceleration (G2D, H.264 encoder)
+- Prefer hardware acceleration (HAL image conversion, H.264 encoder)
 - Avoid allocations in encoding threads
 
 ---
@@ -386,7 +234,7 @@ cargo fmt --all
 **Lint Code:**
 
 ```bash
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 ### Code Quality Principles
@@ -430,26 +278,22 @@ cargo clippy --all-targets --all-features -- -D warnings
 **Example:**
 
 ```rust
-/// Encodes a frame using NXP G2D hardware acceleration.
+/// Opens the platform's hardware H.264 encoder for `config`.
 ///
 /// # Arguments
-/// * `src` - Source DMA buffer in YUYV format
-/// * `dst_format` - Target format (NV12, RGBA, etc.)
+/// * `config` - Stream size, input format, frame rate and bitrate
 ///
 /// # Returns
-/// Encoded frame in destination DMA buffer
+/// The encoder, ready for its first frame.
 ///
 /// # Errors
-/// Returns error if G2D device is unavailable or operation fails.
+/// Returns the codec error when no V4L2 memory-to-memory encoder is present
+/// or it refuses the configuration.
 ///
 /// # Platform Requirements
-/// Requires NXP i.MX8 G2D hardware. Falls back to software on other platforms.
-///
-/// # Example
-/// ```no_run
-/// let dst = encode_frame(&src_buffer, G2D_NV12)?;
-/// ```
-pub fn encode_frame(src: &Image, dst_format: G2dFormat) -> Result<Image> {
+/// Linux with a V4L2 memory-to-memory H.264 encoder (vsi_v4l2 on
+/// i.MX 8M Plus). There is no software fallback.
+pub(crate) fn open_hardware(config: EncoderConfig) -> Result<Box<dyn Encode>, CodecError> {
     // Implementation
 }
 ```
@@ -459,23 +303,17 @@ pub fn encode_frame(src: &Image, dst_format: G2dFormat) -> Result<Image> {
 **Platform Conditionals:**
 
 ```rust
-#[cfg(target_arch = "aarch64")]
-fn use_g2d_acceleration() -> bool {
-    // Check for NXP hardware
-    std::path::Path::new("/dev/galcore").exists()
-}
-
-#[cfg(not(target_arch = "aarch64"))]
-fn use_g2d_acceleration() -> bool {
-    false
-}
+let clock = if cfg!(unix) {
+    CaptureClock::Monotonic
+} else {
+    CaptureClock::Realtime
+};
 ```
 
-**Fallback Implementations:**
+**Fallbacks:**
 
-- Always provide software fallback for hardware features
-- Gracefully degrade when hardware unavailable
-- Log when using fallback: `warn!("G2D unavailable, using software conversion")`
+- Fall back only where the design says to, and log it: `warn!("cannot allocate the capture pool, using the camera's: {e}")`
+- Report a missing hardware encoder or decoder as an error. There is no software H.264 fallback.
 
 ---
 
@@ -497,28 +335,48 @@ fn use_g2d_acceleration() -> bool {
 
 **Benchmarks:**
 
-- Performance tests in `benches/` directory
+- The SDK capture benchmark is `crates/camera/benches/capture.rs`
 - Use `criterion` framework
-- Run with `cargo bench`
+- Run on a board with `EDGEFIRST_CAMERA_BENCH_SOURCE=/dev/video3 cargo bench -p edgefirst-camera --bench capture`
 
 ### Running Tests
 
 **All Tests (no hardware):**
 
 ```bash
-cargo test --lib
+cargo test --workspace
 ```
 
 **Integration Tests:**
 
 ```bash
-cargo test --test test_image
+cargo test --test env_scrub
 ```
 
 **Hardware-Dependent Tests (on device):**
 
+The SDK's V4L2 tests run on a host against the kernel's vivid driver; see [`crates/camera/TESTING.md`](crates/camera/TESTING.md) for loading it. Both board suites below run against `EDGEFIRST_CAMERA_SOURCE`: a V4L2 node (default `/dev/video3`), `libcamera:<id>`, or `libcamera` for the first libcamera camera. On the i.MX 95, also set `LIBCAMERA_PIPELINES_MATCH_LIST=nxp/neo`, and `EDGEFIRST_CAMERA_LIBCAMERA_SHIM_DIR` unless the shim is installed. In CI, `.github/scripts/board-setup.sh` sets these per board.
+
 ```bash
-cargo test -- --ignored --test-threads=1
+cargo test --test on_target -- --include-ignored
+
+# Platform validation of the SDK with the image and codec crates; see the
+# file's header for EDGEFIRST_SOAK_SECS (600 for the ten-minute run) and
+# EDGEFIRST_CAMERA_RECORDING (a 2.x recording to decode).
+cargo test --test board -- --include-ignored --test-threads 1
+```
+
+**Parity with the installed release (Maivin, from a host):**
+
+```bash
+# Cross-build the service, the parity probe and the SDK's probe, then
+# compare them with the board's installed edgefirst-camera under its own
+# camera.service. Results and Markdown tables land in the output directory.
+cargo zigbuild --target aarch64-unknown-linux-gnu.2.35 --release --locked \
+    --bin edgefirst-camera --example parity
+cargo zigbuild --target aarch64-unknown-linux-gnu.2.35 --release --locked \
+    -p edgefirst-camera --example probe
+scripts/parity.sh torizon@<maivin> parity-results
 ```
 
 **With Coverage:**
@@ -538,17 +396,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_timestamp_conversion() {
-        let ros_time = unix_to_ros_time(1234567890);
-        assert_eq!(ros_time.sec, 1234567890);
-        assert_eq!(ros_time.nanosec, 0);
-    }
-
-    #[test]
-    #[ignore]  // Requires hardware
-    fn test_g2d_conversion() {
-        let g2d = G2dContext::new().expect("G2D device required");
-        // Hardware test
+    fn record_requires_h264() {
+        let err = validate(&args(&["--record", "a.h264", "--h264", "false"])).unwrap_err();
+        assert!(err.to_string().contains("--h264"), "{err}");
+        validate(&args(&["--record", "a.h264"])).unwrap();
     }
 }
 ```
@@ -556,26 +407,23 @@ mod tests {
 **Integration Test Example:**
 
 ```rust
-// tests/test_jpeg_encoding.rs
-use edgefirst_camera::image::*;
-
+// tests/on_target.rs
 #[test]
-fn test_jpeg_round_trip() {
-    let img = create_test_image(640, 480);
-    let jpeg = encode_jpeg(&img, 95).unwrap();
-    assert!(jpeg.len() > 0);
-    assert!(jpeg.len() < img.data.len());  // Compressed
+#[serial]
+#[ignore = "requires a V4L2 camera (run with --include-ignored on a board)"]
+fn jpeg_capture() -> Result<(), Box<dyn Error>> {
+    run_for(&capture(&["--jpeg"]), Duration::from_secs(15))
 }
 ```
 
 ### Coverage Requirements
 
 - **Minimum overall**: 70%
-- **Core modules** (`image.rs`, `video.rs`): 80%+
+- **Core modules** (`pipeline.rs`, `encode.rs`, `source.rs`): 80%+
 - **Public APIs**: 100%
 - **Hardware paths**: Best effort (requires device)
 
-**Coverage is measured in CI** by the nightly **Full** run, which covers host, board and SonarCloud every day `main` changes. Every PR runs the **Quick** tier (`ci-gate`), **including draft PRs** — CI is not gated on “Ready for review”; the expected flow is a green `ci-gate` before reviewers start. Full and hardware runs on a PR are opt-in, decided per change: apply `ci:full` for host coverage, board tests and Sonar when a change warrants it. Apply `ci:hardware` when on-target validation alone is needed: it runs on a board with a V4L2 camera (runner label `camera-v4l2`) and covers JPEG/H.264 capture, record and replay (`tests/on_target.rs`) and the G2D image tests (`tests/test_image.rs`).
+**Coverage is measured in CI** by the nightly **Full** run, which covers host, board and SonarCloud every day `main` changes. Every PR runs the **Quick** tier (`ci-gate`), **including draft PRs** — CI is not gated on “Ready for review”; the expected flow is a green `ci-gate` before reviewers start. Full and hardware runs on a PR are opt-in, decided per change: apply `ci:full` for host coverage, board tests and Sonar when a change warrants it. Apply `ci:hardware` when on-target validation alone is needed: it runs on an i.MX 8M Plus through V4L2 (runner labels `camera-v4l2` and `imx8mp`) and on the i.MX 95 through libcamera (`camera-libcamera` and `imx95`), and covers JPEG/H.264 capture, record and replay (`tests/on_target.rs`) and the platform checks in `tests/board.rs` with a 20-second soak.
 
 ---
 
@@ -586,11 +434,11 @@ fn test_jpeg_round_trip() {
 **Checklist:**
 
 - [ ] Code follows Rust style guidelines (`cargo fmt`)
-- [ ] All lints pass (`cargo clippy -- -D warnings`)
-- [ ] Tests pass (`cargo test`)
+- [ ] All lints pass (`cargo clippy --workspace --all-targets -- -D warnings`)
+- [ ] Tests pass (`cargo test --workspace`)
 - [ ] New functionality has tests
 - [ ] Documentation is updated (README, rustdoc)
-- [ ] Commit messages are clear and descriptive
+- [ ] Commits follow `EDGEAI-###: Description` and are signed off with `-s`
 - [ ] No secrets or credentials committed
 - [ ] SBOM license policy compliance verified
 
@@ -599,36 +447,15 @@ fn test_jpeg_round_trip() {
 1. **Push your branch** to GitHub:
 
    ```bash
-   git push origin feature/your-feature
+   git push origin feature/EDGEAI-123-your-feature
    ```
 
 2. **Open PR** via GitHub web interface:
-   - Base: `develop` (or `main` for hotfixes)
+   - Base: `main`
    - Provide clear title and description
    - Link related issues: "Fixes #123" or "Related to #456"
 
-3. **Fill out PR template:**
-
-   ```markdown
-   ## Summary
-   Brief description of changes
-
-   ## Changes
-   - Added feature X
-   - Fixed bug Y
-   - Updated documentation Z
-
-   ## Testing
-   - [ ] Unit tests added/updated
-   - [ ] Integration tests pass
-   - [ ] Tested on hardware (if applicable)
-
-   ## Checklist
-   - [ ] Code formatted with `rustfmt`
-   - [ ] No `clippy` warnings
-   - [ ] Tests pass
-   - [ ] Documentation updated
-   ```
+3. **Fill out the [pull request template](.github/pull_request_template.md).** GitHub loads it when you open the PR.
 
 ### Review Process
 
@@ -650,7 +477,6 @@ fn test_jpeg_round_trip() {
 
 **Approval requirements:**
 
-- **1 approval** for merges to `develop`
 - **2 approvals** for merges to `main`
 - All CI checks must pass (required check: **`ci-gate`**)
 
@@ -690,24 +516,9 @@ This project is licensed under **Apache-2.0**. All dependencies must comply with
 
 **If license checker fails, DO NOT merge**
 
-See [SBOM_PROCESS.md](SBOM_PROCESS.md) for details.
-
 ---
 
 ## Development Tips
-
-### Profiling with Tracy
-
-```bash
-# Build with profiling
-cargo build --release --features profiling
-
-# Run with Tracy enabled
-./target/release/edgefirst-camera --tracy --jpeg --h264
-
-# Connect Tracy profiler GUI
-# Download from: https://github.com/wolfpld/tracy
-```
 
 ### Debugging with Tokio Console
 
@@ -726,28 +537,19 @@ tokio-console
 ### Cross-Compilation for ARM64
 
 ```bash
-# Set linker in .cargo/config.toml
-mkdir -p .cargo
-cat > .cargo/config.toml <<EOF
-[target.aarch64-unknown-linux-gnu]
-linker = "aarch64-linux-gnu-gcc"
-EOF
-
-# Build for ARM64
-cargo build --release --target aarch64-unknown-linux-gnu
+# Build against glibc 2.35, the floor for board binaries
+cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.35
 
 # Binary at: target/aarch64-unknown-linux-gnu/release/edgefirst-camera
 ```
 
 ### Testing on Hardware
 
-**Copy to Device:**
-
 ```bash
-# Build ARM64 binary
-cargo build --release --target aarch64-unknown-linux-gnu
+# Build the ARM64 binary
+cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.35
 
-# Copy to device
+# Copy to the device
 scp target/aarch64-unknown-linux-gnu/release/edgefirst-camera user@device:/tmp/
 
 # SSH and test
@@ -780,7 +582,6 @@ cd /tmp
 
 Contributors will be acknowledged in:
 
-- [CONTRIBUTORS.md](CONTRIBUTORS.md) - Hall of fame
 - Release notes for significant contributions
 - GitHub contribution graph
 
@@ -794,4 +595,4 @@ Every contribution, no matter how small, helps make EdgeFirst Camera better for 
 
 ---
 
-_Last updated: 2025-11-14_
+_Last updated: 2026-11-04_

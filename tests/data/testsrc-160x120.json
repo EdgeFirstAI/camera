@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "codec": "h264",
+  "fps": 30,
+  "width": 160,
+  "height": 120,
+  "colorimetry": {
+    "color_space": "",
+    "color_transfer": "",
+    "color_encoding": "",
+    "color_range": ""
+  },
+  "camera_info": {
+    "frame_id": "camera",
+    "width": 160,
+    "height": 120,
+    "distortion_model": "plumb_bob",
+    "d": [],
+    "k": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "r": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+    "p": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "binning_x": 1,
+    "binning_y": 1,
+    "roi": {
+      "x_offset": 0,
+      "y_offset": 0,
+      "height": 0,
+      "width": 0,
+      "do_rectify": false
+    }
+  },
+  "tf_static": {
+    "base_frame_id": "base_link",
+    "child_frame_id": "camera",
+    "translation": [0.0, 0.0, 0.0],
+    "rotation": [-1.0, 1.0, -1.0, 1.0]
+  }
+}
