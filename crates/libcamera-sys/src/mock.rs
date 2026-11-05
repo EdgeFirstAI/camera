@@ -19,7 +19,15 @@ use std::ffi::{c_char, c_int, CStr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 
-use crate::abi::*;
+use crate::abi::{
+    efcam_lc_buffer, efcam_lc_cam, efcam_lc_camera_info, efcam_lc_completion,
+    efcam_lc_control_info, efcam_lc_controls, efcam_lc_format, efcam_lc_mgr, efcam_lc_stream_info,
+    efcam_lc_stream_request, Functions, EFCAM_LC_ABI_VERSION, EFCAM_LC_CONTROL_ANALOGUE_GAIN,
+    EFCAM_LC_CONTROL_AWB_ENABLE, EFCAM_LC_CONTROL_COLOUR_TEMPERATURE,
+    EFCAM_LC_CONTROL_EXPOSURE_TIME, EFCAM_LC_CONTROL_FRAME_DURATION_LIMITS,
+    EFCAM_LC_ORIENTATION_DEFAULT, EFCAM_LC_ORIENTATION_ROTATE0, EFCAM_LC_STATUS_CANCELLED,
+    EFCAM_LC_STATUS_OK,
+};
 
 /// DRM fourcc of NV12.
 pub const NV12: u32 = u32::from_le_bytes(*b"NV12");
@@ -358,7 +366,7 @@ unsafe extern "C" fn mgr_formats(
             // `stride` bytes.
             let e = unsafe { out.cast::<u8>().add(i * stride) }.cast::<efcam_lc_format>();
             // SAFETY: as above; the element's size field is written first.
-            unsafe { *(e as *mut u32) = stride as u32 };
+            unsafe { e.cast::<u32>().write(stride as u32) };
             copy_out(e, v, |v| &mut v.size);
         }
     }

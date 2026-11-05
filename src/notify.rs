@@ -10,7 +10,7 @@
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex, OnceLock,
+        Mutex, OnceLock, PoisonError,
     },
     time::{Duration, Instant},
 };
@@ -47,7 +47,7 @@ pub(crate) fn watchdog() {
     };
     let now = Instant::now();
     {
-        let mut last = n.last_ping.lock().unwrap_or_else(|e| e.into_inner());
+        let mut last = n.last_ping.lock().unwrap_or_else(PoisonError::into_inner);
         if last.is_some_and(|t| now.duration_since(t) < every) {
             return;
         }

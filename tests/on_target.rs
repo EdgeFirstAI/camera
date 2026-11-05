@@ -259,7 +259,7 @@ fn capture(args: &[&str]) -> Option<Vec<String>> {
         "--camera-fps",
         &fps,
     ];
-    Some(camera.iter().chain(args).map(|s| s.to_string()).collect())
+    Some(camera.iter().chain(args).map(ToString::to_string).collect())
 }
 
 fn sidecar(recording: &Path) -> PathBuf {

@@ -86,7 +86,7 @@ jobs:
         run: |
           set -euo pipefail
           archive="$RUNNER_TEMP/zig.tar.xz"
-          curl -fsSL --retry 5 --retry-connrefused -o "$archive" \
+          curl -fsSL --proto '=https' --tlsv1.2 --retry 5 --retry-connrefused -o "$archive" \
             "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
           echo "${SHA256_X86_64}  ${archive}" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/zig"

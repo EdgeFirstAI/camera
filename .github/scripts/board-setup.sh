@@ -33,7 +33,7 @@ case "$compatible" in
     mkdir -p "$shims"
     auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
     api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100"
-    curl -fsSL --retry 3 "${auth[@]}" "$api" >"$shims/artifacts.json"
+    curl -fsSL --proto '=https' --tlsv1.2 --retry 3 "${auth[@]}" "$api" >"$shims/artifacts.json"
     urls=$(python3 - "$shims/artifacts.json" <<'PY'
 import json, sys
 for a in json.load(open(sys.argv[1]))["artifacts"]:
@@ -46,7 +46,7 @@ PY
       exit 1
     fi
     while read -r url; do
-      curl -fsSL --retry 3 "${auth[@]}" -o "$shims/shim.zip" "$url"
+      curl -fsSL --proto '=https' --tlsv1.2 --retry 3 "${auth[@]}" -o "$shims/shim.zip" "$url"
       python3 -m zipfile -e "$shims/shim.zip" "$shims"
     done <<<"$urls"
     rm -f "$shims/shim.zip" "$shims/artifacts.json"

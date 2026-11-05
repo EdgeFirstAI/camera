@@ -30,13 +30,14 @@ report() {
 }
 
 unavailable() {
+    local why=$1
     if [[ "${EDGEFIRST_CAMERA_ALLOW_NO_VIVID:-0}" == 1 ]]; then
-        report "vivid: unavailable, V4L2 tests skipped as allowed by EDGEFIRST_CAMERA_ALLOW_NO_VIVID ($1)"
-        echo "::warning::vivid is unavailable ($1); the V4L2 tests skip"
+        report "vivid: unavailable, V4L2 tests skipped as allowed by EDGEFIRST_CAMERA_ALLOW_NO_VIVID ($why)"
+        echo "::warning::vivid is unavailable ($why); the V4L2 tests skip"
         exit 0
     fi
-    report "vivid: unavailable ($1)"
-    echo "::error::vivid is unavailable ($1), so the V4L2 tests would pass as skips. Set the repository variable CAMERA_ALLOW_NO_VIVID=true, or label the pull request ci:no-vivid, to allow that."
+    report "vivid: unavailable ($why)"
+    echo "::error::vivid is unavailable ($why), so the V4L2 tests would pass as skips. Set the repository variable CAMERA_ALLOW_NO_VIVID=true, or label the pull request ci:no-vivid, to allow that."
     exit 1
 }
 

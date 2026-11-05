@@ -42,15 +42,17 @@ if [ -s "$tmp/missing" ]; then
 fi
 
 newest() {
-    objdump -T "$SHIM" | grep -oE "\\b$1_[0-9.]+" | sed "s/^$1_//" | sort -Vu | tail -1
+    local lib=$1
+    objdump -T "$SHIM" | grep -oE "\\b${lib}_[0-9.]+" | sed "s/^${lib}_//" | sort -Vu | tail -1
 }
 check_max() {
-    got=$(newest "$1")
-    if [ -n "$got" ] && [ "$(printf '%s\n%s\n' "$got" "$2" | sort -V | tail -1)" != "$2" ]; then
-        echo "error: requires $1_$got, newer than $1_$2" >&2
+    local lib=$1 max=$2
+    got=$(newest "$lib")
+    if [ -n "$got" ] && [ "$(printf '%s\n%s\n' "$got" "$max" | sort -V | tail -1)" != "$max" ]; then
+        echo "error: requires ${lib}_$got, newer than ${lib}_$max" >&2
         fail=1
     fi
-    echo "$1: ${got:-none} (max $2)"
+    echo "$lib: ${got:-none} (max $max)"
 }
 check_max GLIBC "$MAX_GLIBC"
 check_max GLIBCXX "$MAX_GLIBCXX"

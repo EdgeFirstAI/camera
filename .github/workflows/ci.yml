@@ -88,9 +88,10 @@ jobs:
               full="$DISPATCH_FULL"
               hardware="$DISPATCH_HARDWARE"
               ;;
+            *) ;;
           esac
-          case ",$LABELS," in *,ci:full,*) full=true ;; esac
-          case ",$LABELS," in *,ci:hardware,*) hardware=true ;; esac
+          case ",$LABELS," in *,ci:full,*) full=true ;; *) ;; esac
+          case ",$LABELS," in *,ci:hardware,*) hardware=true ;; *) ;; esac
           echo "full=$full" >> "$GITHUB_OUTPUT"
           echo "hardware=$hardware" >> "$GITHUB_OUTPUT"
 

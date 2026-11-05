@@ -17,7 +17,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, PoisonError,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -134,6 +134,14 @@ struct Progress {
     ready: bool,
     /// The encoder reported as stalled, so it is reported once.
     stalled: Option<&'static str>,
+}
+
+impl Progress {
+    /// Whether `max_frames` or `max_duration` is reached.
+    fn limit_reached(&self, settings: &Settings) -> bool {
+        settings.max_frames.is_some_and(|max| self.captured >= max)
+            || self.deadline.is_some_and(|d| Instant::now() >= d)
+    }
 }
 
 /// A recording's sidecar and the stream it describes.
@@ -276,23 +284,10 @@ pub(crate) fn run(
     } else {
         settings.stream_size
     };
-    let encodes = settings.h264 || settings.jpeg.is_some();
-    if !file && encodes && (stream.0 > config.width || stream.1 > config.height) {
-        return Err(Failure::new(
-            Status::InvalidArgs,
-            format!(
-                "STREAM_SIZE {}x{} is larger than capture size {}x{}; lower STREAM_SIZE, or \
-                 raise CAMERA_SIZE / choose a larger CAMERA_MODE that the sensor supports.",
-                stream.0, stream.1, config.width, config.height
-            ),
-        )
-        .into());
+    if !file {
+        check_stream_size(settings, stream, &config)?;
     }
     let tiles = tiles_enabled(settings.tiles, settings.auto_tiles, &config);
-
-    // Dropped on every return, so an error while the later encoders start
-    // still closes and joins the earlier ones.
-    let mut workers = Workers::default();
 
     let mut sidecar = None;
     let recorder = match &settings.record {
@@ -305,74 +300,26 @@ pub(crate) fn run(
         _ => None,
     };
 
+    // Dropped on every return, so an error while the later encoders start
+    // still closes and joins the earlier ones.
+    let mut workers = Workers::default();
+    let encoders = Encoders {
+        session,
+        settings,
+        config: &config,
+        open_encoder,
+        fps,
+        stream,
+        software_mirror,
+    };
     if settings.h264 && !file {
-        let plan = Plan {
-            label: "h264".into(),
-            size: stream,
-            region: None,
-            mirror: software_mirror,
-            frame_rate: fps,
-            bitrate: settings.bitrate,
-            limit_fps: 0,
-        };
-        let stage = Stage::new(plan, &config, open_encoder)?;
-        let (tx, rx) = kanal::bounded(H264_QUEUE);
-        let out = Output::new(session, &settings.h264_topic, &settings.frame_id)?;
-        let tracy = settings.tracy;
-        let sink = Sink::new("h264", Queue::Fifo(tx));
-        let heartbeat = Arc::clone(&sink.heartbeat);
-        workers.threads.push(spawn("h264", move || {
-            run_stage(stage, &rx, out, recorder, tracy, &heartbeat)
-        })?);
-        workers.sinks.push(sink);
+        encoders.add_main_h264(&mut workers, recorder)?;
     }
-
     if tiles {
-        let size = encode::tile_output(config.width, config.height);
-        let tile_fps = settings.tile_fps;
-        for (i, tile) in TILES.iter().enumerate() {
-            let limited = tile_fps > 0 && f64::from(tile_fps) < fps;
-            let plan = Plan {
-                label: tile.label.into(),
-                size,
-                region: Some(encode::tile_region(
-                    i,
-                    config.width,
-                    config.height,
-                    software_mirror,
-                )),
-                mirror: software_mirror,
-                frame_rate: if limited { f64::from(tile_fps) } else { fps },
-                bitrate: settings.bitrate,
-                limit_fps: tile_fps,
-            };
-            let stage = Stage::new(plan, &config, open_encoder)?;
-            let (tx, rx) = kanal::bounded(H264_QUEUE);
-            let frame_id = format!("{}_{}", settings.frame_id, tile.frame_suffix);
-            let out = Output::new(session, &settings.tile_topics[i], &frame_id)?;
-            let tracy = settings.tracy;
-            let sink = Sink::new(tile.label, Queue::Fifo(tx));
-            let heartbeat = Arc::clone(&sink.heartbeat);
-            workers
-                .threads
-                .push(spawn(&format!("h264_{}", tile.name), move || {
-                    run_stage(stage, &rx, out, None, tracy, &heartbeat)
-                })?);
-            workers.sinks.push(sink);
-        }
+        encoders.add_tiles(&mut workers)?;
     }
-
     if let Some(quality) = settings.jpeg {
-        let stage = JpegStage::new(&config, stream, software_mirror, quality)?;
-        let (tx, rx) = latest();
-        let out = Output::new(session, &settings.jpeg_topic, &settings.frame_id)?;
-        let tracy = settings.tracy;
-        let sink = Sink::new("jpeg", Queue::Latest(tx));
-        let heartbeat = Arc::clone(&sink.heartbeat);
-        workers.threads.push(spawn("jpeg", move || {
-            run_jpeg(stage, &rx, out, tracy, &heartbeat)
-        })?);
-        workers.sinks.push(sink);
+        encoders.add_jpeg(&mut workers, quality)?;
     }
 
     let forward = if settings.h264 && file {
@@ -433,25 +380,9 @@ pub(crate) fn run(
             break Err(e);
         };
         warn!("the camera stopped delivering ({e}); reopening it");
-        if let Some(mut old) = camera.take() {
-            if let Err(e) = old.stop() {
-                debug!("stopping the camera: {e}");
-            }
-        }
-        match reopen() {
-            Ok(Some(next)) => {
-                if let Err(e) = same_stream(&config, software_mirror, &next) {
-                    break Err(e);
-                }
-                let mut next = next.camera;
-                discard_waiting(next.as_mut());
-                info!("Camera reopened; capturing again");
-                progress.seq_base = progress.next_seq;
-                progress.since_open = 0;
-                progress.measured = false;
-                camera = Some(next);
-            }
-            Ok(None) => break Ok(()),
+        match replace_camera(reopen, &mut camera, &config, software_mirror, &mut progress) {
+            Ok(true) => {}
+            Ok(false) => break Ok(()),
             Err(e) => break Err(e),
         }
     };
@@ -465,6 +396,165 @@ pub(crate) fn run(
         }
     }
     result
+}
+
+/// Refuses a stream larger than the capture: the encoders scale down only.
+fn check_stream_size(
+    settings: &Settings,
+    stream: (u32, u32),
+    config: &StreamConfig,
+) -> Result<(), Box<dyn Error>> {
+    let encodes = settings.h264 || settings.jpeg.is_some();
+    if encodes && (stream.0 > config.width || stream.1 > config.height) {
+        return Err(Failure::new(
+            Status::InvalidArgs,
+            format!(
+                "STREAM_SIZE {}x{} is larger than capture size {}x{}; lower STREAM_SIZE, or \
+                 raise CAMERA_SIZE / choose a larger CAMERA_MODE that the sensor supports.",
+                stream.0, stream.1, config.width, config.height
+            ),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Stops `camera` and opens the next one in its place. `Ok(false)` when a
+/// shutdown came first.
+fn replace_camera(
+    reopen: Reopen<'_>,
+    camera: &mut Option<Box<dyn Camera>>,
+    config: &StreamConfig,
+    software_mirror: Option<Mirror>,
+    progress: &mut Progress,
+) -> Result<bool, Box<dyn Error>> {
+    if let Some(mut old) = camera.take() {
+        if let Err(e) = old.stop() {
+            debug!("stopping the camera: {e}");
+        }
+    }
+    let Some(next) = reopen()? else {
+        return Ok(false);
+    };
+    same_stream(config, software_mirror, &next)?;
+    let mut next = next.camera;
+    discard_waiting(next.as_mut());
+    info!("Camera reopened; capturing again");
+    progress.seq_base = progress.next_seq;
+    progress.since_open = 0;
+    progress.measured = false;
+    *camera = Some(next);
+    Ok(true)
+}
+
+/// What every encoder of one run starts from.
+struct Encoders<'a> {
+    session: &'a Session,
+    settings: &'a Settings,
+    config: &'a StreamConfig,
+    open_encoder: OpenEncoder,
+    fps: f64,
+    /// The size of the main stream and JPEG.
+    stream: (u32, u32),
+    software_mirror: Option<Mirror>,
+}
+
+impl Encoders<'_> {
+    /// The main H.264 stream, recorded when `recorder` is set.
+    fn add_main_h264(
+        &self,
+        workers: &mut Workers,
+        recorder: Option<BufWriter<File>>,
+    ) -> Result<(), Box<dyn Error>> {
+        let plan = Plan {
+            label: "h264".into(),
+            size: self.stream,
+            region: None,
+            mirror: self.software_mirror,
+            frame_rate: self.fps,
+            bitrate: self.settings.bitrate,
+            limit_fps: 0,
+        };
+        let s = self.settings;
+        self.add_h264(
+            workers,
+            plan,
+            &s.h264_topic,
+            &s.frame_id,
+            "h264",
+            "h264",
+            recorder,
+        )
+    }
+
+    /// The four tiles, each at most 1080p and at the tile rate limit.
+    fn add_tiles(&self, workers: &mut Workers) -> Result<(), Box<dyn Error>> {
+        let (width, height) = (self.config.width, self.config.height);
+        let size = encode::tile_output(width, height);
+        let tile_fps = self.settings.tile_fps;
+        let limited = tile_fps > 0 && f64::from(tile_fps) < self.fps;
+        for (i, tile) in TILES.iter().enumerate() {
+            let plan = Plan {
+                label: tile.label.into(),
+                size,
+                region: Some(encode::tile_region(i, width, height, self.software_mirror)),
+                mirror: self.software_mirror,
+                frame_rate: if limited {
+                    f64::from(tile_fps)
+                } else {
+                    self.fps
+                },
+                bitrate: self.settings.bitrate,
+                limit_fps: tile_fps,
+            };
+            let frame_id = format!("{}_{}", self.settings.frame_id, tile.frame_suffix);
+            let thread = format!("h264_{}", tile.name);
+            let topic = &self.settings.tile_topics[i];
+            self.add_h264(workers, plan, topic, &frame_id, tile.label, &thread, None)?;
+        }
+        Ok(())
+    }
+
+    /// One H.264 encoder thread publishing on `topic`.
+    #[allow(clippy::too_many_arguments)]
+    fn add_h264(
+        &self,
+        workers: &mut Workers,
+        plan: Plan,
+        topic: &str,
+        frame_id: &str,
+        sink: &'static str,
+        thread: &str,
+        recorder: Option<BufWriter<File>>,
+    ) -> Result<(), Box<dyn Error>> {
+        let stage = Stage::new(plan, self.config, self.open_encoder)?;
+        let (tx, rx) = kanal::bounded(H264_QUEUE);
+        let out = Output::new(self.session, topic, frame_id)?;
+        let tracy = self.settings.tracy;
+        let sink = Sink::new(sink, Queue::Fifo(tx));
+        let heartbeat = Arc::clone(&sink.heartbeat);
+        workers.threads.push(spawn(thread, move || {
+            run_stage(stage, &rx, out, recorder, tracy, &heartbeat)
+        })?);
+        workers.sinks.push(sink);
+        Ok(())
+    }
+
+    /// The JPEG encoder thread.
+    fn add_jpeg(&self, workers: &mut Workers, quality: u8) -> Result<(), Box<dyn Error>> {
+        let stage = JpegStage::new(self.config, self.stream, self.software_mirror, quality)?;
+        let (tx, rx) = latest();
+        let s = self.settings;
+        let out = Output::new(self.session, &s.jpeg_topic, &s.frame_id)?;
+        let tracy = s.tracy;
+        let sink = Sink::new("jpeg", Queue::Latest(tx));
+        let heartbeat = Arc::clone(&sink.heartbeat);
+        workers.threads.push(spawn("jpeg", move || {
+            run_jpeg(stage, &rx, out, tracy, &heartbeat)
+        })?);
+        workers.sinks.push(sink);
+        Ok(())
+    }
 }
 
 /// Whether a reopen may recover the camera failure `e`.
@@ -677,7 +767,7 @@ fn latest<T>() -> (LatestSender<T>, LatestReceiver<T>) {
 
 impl<T> Mailbox<T> {
     fn lock(&self) -> std::sync::MutexGuard<'_, MailboxSlot<T>> {
-        self.slot.lock().unwrap_or_else(|e| e.into_inner())
+        self.slot.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -717,7 +807,11 @@ impl<T> LatestReceiver<T> {
             if slot.sender_gone {
                 return None;
             }
-            slot = self.0.filled.wait(slot).unwrap_or_else(|e| e.into_inner());
+            slot = self
+                .0
+                .filled
+                .wait(slot)
+                .unwrap_or_else(PoisonError::into_inner);
         }
     }
 }
@@ -837,21 +931,7 @@ fn capture(
     progress: &mut Progress,
     shutdown: &AtomicBool,
 ) -> Result<(), Box<dyn Error>> {
-    let frames = session
-        .declare_publisher(settings.frame_topic.clone())
-        .priority(Priority::Data)
-        .congestion_control(CongestionControl::Drop)
-        .wait()
-        .map_err(|e| format!("cannot declare publisher {}: {e}", settings.frame_topic))?;
-    let infos = session
-        .declare_publisher(settings.info_topic.clone())
-        .priority(Priority::Background)
-        .congestion_control(CongestionControl::Drop)
-        .wait()
-        .map_err(|e| format!("cannot declare publisher {}: {e}", settings.info_topic))?;
-    let frame_enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/CameraFrame");
-    let info_enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/CameraInfo");
-
+    let mut publisher = FramePublisher::new(session, settings, config)?;
     let timeout = READ_TIMEOUT.max(Duration::from_secs_f64(3.0 / fps));
     let mut retry = ReadRetry::new(MAX_CONSECUTIVE_READ_FAILURES);
     let mut drops = DropStats::new(DROP_REPORT_INTERVAL, Instant::now());
@@ -859,55 +939,20 @@ fn capture(
     // Frames the camera lost before the first one read (while the encoders
     // started) are not capture losses; the baseline is the first frame's.
     let mut lost: Option<u64> = None;
-    let mut cdr = Vec::new();
 
     while !shutdown.load(Ordering::SeqCst) {
-        if settings
-            .max_frames
-            .is_some_and(|max| progress.captured >= max)
-            || progress.deadline.is_some_and(|d| Instant::now() >= d)
-        {
+        if progress.limit_reached(settings) {
             info!("Captured {} frames; stopping", progress.captured);
             break;
         }
-        let frame = match info_span!("camera_read").in_scope(|| camera.next_frame(Some(timeout))) {
-            Ok(frame) => {
-                retry.on_success();
-                frame
-            }
-            Err(e) => match e.kind() {
-                ErrorKind::EndOfStream => {
-                    info!("End of the recording");
-                    break;
-                }
-                ErrorKind::Interrupted => continue,
-                ErrorKind::Timeout if retry.should_retry() => {
-                    warn!(
-                        attempt = retry.consecutive(),
-                        max = MAX_CONSECUTIVE_READ_FAILURES,
-                        "no frame within {timeout:?}, retrying"
-                    );
-                    continue;
-                }
-                _ => {
-                    error!("camera read failed: {e}");
-                    return Err(e.into());
-                }
-            },
+        let frame = match read_frame(camera, timeout, &mut retry)? {
+            Read::Frame(frame) => frame,
+            Read::Retry => continue,
+            Read::End => break,
         };
         progress.captured += 1;
         progress.since_open += 1;
-        if !progress.measured {
-            if let Some(measured) = camera.measured_frame_rate() {
-                progress.measured = true;
-                report_rate(
-                    measured,
-                    camera.config().frame_rate,
-                    fps,
-                    progress.sidecar.as_mut(),
-                );
-            }
-        }
+        note_measured_rate(camera, progress, fps);
         let seq = progress.seq_base + frame.seq();
         progress.next_seq = seq + 1;
         if settings.tracy {
@@ -918,81 +963,12 @@ fn capture(
         // encoder threads must not take another, or a clock step between
         // them would split the frame across two time domains.
         let stamp = schema::stamp(&frame).unwrap_or_else(schema::now);
-        let ts = sample_timestamp(session, stamp);
-
-        info_span!("camera_publish").in_scope(|| -> Result<(), Box<dyn Error>> {
-            let tensor = FrameTensor::new(&frame, config.colorimetry.as_ref())?;
-            cdr.clear();
-            tensor.with_fields(|fields| {
-                CameraFrame::builder()
-                    .stamp(stamp)
-                    .frame_id(settings.frame_id.as_str())
-                    .seq(seq)
-                    .tensor(fields)
-                    .encode_into_vec(&mut cdr)
-            })?;
-            if let Err(e) = frames
-                .put(ZBytes::from(cdr.as_slice()))
-                .encoding(frame_enc.clone())
-                .timestamp(ts)
-                .wait()
-            {
-                warn!("publishing {}: {e}", settings.frame_topic);
-            }
-            let info = settings.info.build_msg(stamp)?;
-            if let Err(e) = infos
-                .put(ZBytes::from(info.into_cdr()))
-                .encoding(info_enc.clone())
-                .timestamp(ts)
-                .wait()
-            {
-                warn!("publishing {}: {e}", settings.info_topic);
-            }
-            Ok(())
-        })?;
-
+        info_span!("camera_publish").in_scope(|| publisher.publish(&frame, seq, stamp))?;
         if let (Some(out), Some(au)) = (forward, frame.encoded()) {
             out.video(au, stamp);
         }
-
-        let frame = Arc::new(frame);
-        for sink in sinks {
-            let offer = sink.offer((Arc::clone(&frame), stamp));
-            if offer == Offer::Closed {
-                return Err(Failure::new(
-                    Status::Software,
-                    format!("the {} encoder stopped", sink.name),
-                )
-                .into());
-            }
-            drops.record(sink.name, offer);
-        }
-        drop(frame);
-
-        if !progress.ready {
-            progress.ready = true;
-            notify::ready();
-            notify::status(&format!(
-                "Capturing {}x{} at {fps} fps",
-                config.width, config.height
-            ));
-        }
-        let now = Instant::now();
-        match sinks.iter().find(|s| s.heartbeat.age(now) > STAGE_STALL) {
-            None => {
-                progress.stalled = None;
-                notify::watchdog();
-            }
-            Some(sink) if progress.stalled != Some(sink.name) => {
-                error!(
-                    "the {} encoder has not finished a frame in {:?}",
-                    sink.name,
-                    sink.heartbeat.age(now)
-                );
-                progress.stalled = Some(sink.name);
-            }
-            Some(_) => {}
-        }
+        hand_to_encoders(sinks, frame, stamp, &mut drops)?;
+        report_health(sinks, progress, config, fps);
 
         let dropped = camera.stats().dropped;
         drops.record_camera(dropped.saturating_sub(lost.unwrap_or(dropped)));
@@ -1005,6 +981,190 @@ fn capture(
         }
     }
     Ok(())
+}
+
+/// What one read of the camera gave.
+enum Read {
+    Frame(Frame),
+    /// Nothing yet, within the retry budget.
+    Retry,
+    /// The recording ended.
+    End,
+}
+
+/// Reads the next frame, retrying timeouts within `retry`'s budget. Any
+/// other failure, or a budget spent, is an error.
+fn read_frame(
+    camera: &mut dyn Camera,
+    timeout: Duration,
+    retry: &mut ReadRetry,
+) -> Result<Read, Box<dyn Error>> {
+    match info_span!("camera_read").in_scope(|| camera.next_frame(Some(timeout))) {
+        Ok(frame) => {
+            retry.on_success();
+            Ok(Read::Frame(frame))
+        }
+        Err(e) => match e.kind() {
+            ErrorKind::EndOfStream => {
+                info!("End of the recording");
+                Ok(Read::End)
+            }
+            ErrorKind::Interrupted => Ok(Read::Retry),
+            ErrorKind::Timeout if retry.should_retry() => {
+                warn!(
+                    attempt = retry.consecutive(),
+                    max = MAX_CONSECUTIVE_READ_FAILURES,
+                    "no frame within {timeout:?}, retrying"
+                );
+                Ok(Read::Retry)
+            }
+            _ => {
+                error!("camera read failed: {e}");
+                Err(e.into())
+            }
+        },
+    }
+}
+
+/// Reports the camera's measured rate once per camera, when it has one.
+fn note_measured_rate(camera: &dyn Camera, progress: &mut Progress, fps: f64) {
+    if progress.measured {
+        return;
+    }
+    if let Some(measured) = camera.measured_frame_rate() {
+        progress.measured = true;
+        report_rate(
+            measured,
+            camera.config().frame_rate,
+            fps,
+            progress.sidecar.as_mut(),
+        );
+    }
+}
+
+/// Offers `frame` to every encoder. An encoder thread that is gone ends
+/// the run.
+fn hand_to_encoders(
+    sinks: &[Sink],
+    frame: Frame,
+    stamp: Time,
+    drops: &mut DropStats,
+) -> Result<(), Box<dyn Error>> {
+    let frame = Arc::new(frame);
+    for sink in sinks {
+        let offer = sink.offer((Arc::clone(&frame), stamp));
+        if offer == Offer::Closed {
+            return Err(Failure::new(
+                Status::Software,
+                format!("the {} encoder stopped", sink.name),
+            )
+            .into());
+        }
+        drops.record(sink.name, offer);
+    }
+    Ok(())
+}
+
+/// Tells systemd the service is ready after its first frame, and alive
+/// while every encoder keeps finishing frames.
+fn report_health(sinks: &[Sink], progress: &mut Progress, config: &StreamConfig, fps: f64) {
+    if !progress.ready {
+        progress.ready = true;
+        notify::ready();
+        notify::status(&format!(
+            "Capturing {}x{} at {fps} fps",
+            config.width, config.height
+        ));
+    }
+    let now = Instant::now();
+    match sinks.iter().find(|s| s.heartbeat.age(now) > STAGE_STALL) {
+        None => {
+            progress.stalled = None;
+            notify::watchdog();
+        }
+        Some(sink) if progress.stalled != Some(sink.name) => {
+            error!(
+                "the {} encoder has not finished a frame in {:?}",
+                sink.name,
+                sink.heartbeat.age(now)
+            );
+            progress.stalled = Some(sink.name);
+        }
+        Some(_) => {}
+    }
+}
+
+/// Publishes `camera/frame` and `camera/info`, reusing one CDR buffer.
+struct FramePublisher<'a> {
+    session: &'a Session,
+    settings: &'a Settings,
+    config: &'a StreamConfig,
+    frames: Publisher<'static>,
+    infos: Publisher<'static>,
+    frame_enc: Encoding,
+    info_enc: Encoding,
+    cdr: Vec<u8>,
+}
+
+impl<'a> FramePublisher<'a> {
+    fn new(
+        session: &'a Session,
+        settings: &'a Settings,
+        config: &'a StreamConfig,
+    ) -> Result<Self, Box<dyn Error>> {
+        let declare = |topic: &str, priority: Priority| {
+            session
+                .declare_publisher(topic.to_string())
+                .priority(priority)
+                .congestion_control(CongestionControl::Drop)
+                .wait()
+                .map_err(|e| format!("cannot declare publisher {topic}: {e}"))
+        };
+        Ok(Self {
+            session,
+            settings,
+            config,
+            frames: declare(&settings.frame_topic, Priority::Data)?,
+            infos: declare(&settings.info_topic, Priority::Background)?,
+            frame_enc: Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/CameraFrame"),
+            info_enc: Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/CameraInfo"),
+            cdr: Vec::new(),
+        })
+    }
+
+    fn publish(&mut self, frame: &Frame, seq: u64, stamp: Time) -> Result<(), Box<dyn Error>> {
+        let ts = sample_timestamp(self.session, stamp);
+        let tensor = FrameTensor::new(frame, self.config.colorimetry.as_ref())?;
+        self.cdr.clear();
+        tensor.with_fields(|fields| {
+            CameraFrame::builder()
+                .stamp(stamp)
+                .frame_id(self.settings.frame_id.as_str())
+                .seq(seq)
+                .tensor(fields)
+                .encode_into_vec(&mut self.cdr)
+        })?;
+        if let Err(e) = self
+            .frames
+            .put(ZBytes::from(self.cdr.as_slice()))
+            .encoding(self.frame_enc.clone())
+            .timestamp(ts)
+            .wait()
+        {
+            warn!("publishing {}: {e}", self.settings.frame_topic);
+        }
+        let info = self.settings.info.build_msg(stamp)?;
+        if let Err(e) = self
+            .infos
+            .put(ZBytes::from(info.into_cdr()))
+            .encoding(self.info_enc.clone())
+            .timestamp(ts)
+            .wait()
+        {
+            warn!("publishing {}: {e}", self.settings.info_topic);
+        }
+        Ok(())
+    }
 }
 
 fn run_stage(

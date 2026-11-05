@@ -9,7 +9,7 @@
 
 use std::ffi::CString;
 use std::ptr::NonNull;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use edgefirst_libcamera_sys::{self as sys, LoadError, LoadErrorKind, Shim};
 
@@ -53,14 +53,14 @@ impl Manager {
 
     /// The running manager, starting one on the loaded shim if none runs.
     pub(crate) fn shared() -> Result<Arc<Self>> {
-        let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+        let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(m) = running.upgrade() {
             return Ok(m);
         }
         let shim = shim()?;
         if let Some(list) = MATCH_LIST
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
         {
             std::env::set_var(MATCH_LIST_ENV, list);
@@ -155,8 +155,8 @@ pub(crate) fn shim() -> Result<Arc<Shim>> {
 /// Sets the pipeline handlers libcamera may use, as
 /// `LIBCAMERA_PIPELINES_MATCH_LIST` does.
 pub(crate) fn set_match_list(list: Option<&str>) -> Result<()> {
-    let running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
-    let mut current = MATCH_LIST.lock().unwrap_or_else(|e| e.into_inner());
+    let running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut current = MATCH_LIST.lock().unwrap_or_else(PoisonError::into_inner);
     if running.strong_count() > 0 && current.as_deref() != list {
         return Err(Error::new(
             ErrorKind::InvalidConfig,

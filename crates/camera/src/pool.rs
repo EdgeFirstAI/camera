@@ -21,7 +21,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use edgefirst_tensor::TensorDyn;
 
@@ -59,7 +59,7 @@ impl Shared {
     fn lock(&self) -> MutexGuard<'_, State> {
         // A panic while holding the lock leaves the slot bookkeeping
         // consistent (every update is a single assignment), so recover.
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -223,7 +223,7 @@ impl SlotTable {
         self.shared
             .keep_alive
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .push(owner);
     }
 

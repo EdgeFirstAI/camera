@@ -185,7 +185,7 @@ if [ -f "Cargo.toml" ] && cargo cyclonedx --version &> /dev/null; then
     # Rename output to deps-sbom.json
     # The application package's graph; it includes the SDK crate once the
     # application depends on it.
-    if [ -f "edgefirst-camera-app.cdx.json" ]; then
+    if [[ -f "edgefirst-camera-app.cdx.json" ]]; then
         mv "edgefirst-camera-app.cdx.json" deps-sbom.json
     fi
 fi
@@ -284,7 +284,7 @@ if [ -f "NOTICE" ] && [ -f ".github/scripts/validate_notice.py" ]; then
     # NOTICE covers every workspace package, as ci-notice.sh checks it: the
     # application's merged SBOM plus the SDK crate's dependency SBOM.
     notice_sboms=(sbom.json)
-    if [ -f "crates/camera/edgefirst-camera.cdx.json" ]; then
+    if [[ -f "crates/camera/edgefirst-camera.cdx.json" ]]; then
         notice_sboms+=(crates/camera/edgefirst-camera.cdx.json)
     fi
     python3 .github/scripts/validate_notice.py NOTICE "${notice_sboms[@]}"
