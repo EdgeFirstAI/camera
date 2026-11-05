@@ -80,6 +80,16 @@ PY
       allow+=(not-vvcam)
       echo "::notice::board-setup: $camera is driver '${driver:-unknown}', not the vvcam ISP; the ISP-restart test is expected to skip"
     fi
+    # The OV5640 stops streaming after a runtime-PM suspend and resume,
+    # and only a reboot brings it back: keep it powered. A sensor that has
+    # already stopped is reported by the mirror test, which shows its
+    # colour bars.
+    for name in /sys/bus/i2c/drivers/ov5640/*/name; do
+      [[ -e "$name" ]] || continue
+      sensor=$(dirname "$name")
+      echo on >"$sensor/power/control"
+      echo "board-setup: $(basename "$sensor") (OV5640) kept powered; runtime PM was $(cat "$sensor/power/runtime_status")"
+    done
     echo "board-setup: V4L2 camera"
     ;;
 esac

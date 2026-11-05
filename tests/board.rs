@@ -24,7 +24,7 @@
 
 use std::{
     error::Error,
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     sync::Arc,
     time::{Duration, Instant},
@@ -89,6 +89,57 @@ fn is_vvcam(device: &str) -> bool {
         .unwrap_or_default()
         .iter()
         .any(|c| c.backend == Backend::V4l2 && c.id == device && c.driver.contains("viv"))
+}
+
+/// The OV5640's V4L2 sub-device, when the board's camera is that sensor
+/// (the i.MX 8M Plus EVK's MIPI module, through the ISI).
+fn ov5640_subdev() -> Option<PathBuf> {
+    std::fs::read_dir("/sys/class/video4linux")
+        .ok()?
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("v4l-subdev"))
+        .find(|e| {
+            std::fs::read_to_string(e.path().join("name")).is_ok_and(|n| n.contains("ov5640"))
+        })
+        .map(|e| Path::new("/dev").join(e.file_name()))
+}
+
+/// `V4L2_CID_TEST_PATTERN`; on the OV5640, 1 is colour bars.
+const V4L2_CID_TEST_PATTERN: u32 = 0x009f_0903;
+/// `VIDIOC_S_CTRL`: `_IOWR('V', 28, struct v4l2_control)`.
+const VIDIOC_S_CTRL: u64 = 0xc008_561c;
+
+/// Shows the sensor's colour bars until dropped, so a flip can be seen
+/// whatever the camera points at.
+struct TestPattern(std::fs::File);
+
+impl TestPattern {
+    fn on(subdev: &Path) -> std::io::Result<Self> {
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(subdev)?;
+        set_test_pattern(&f, 1)?;
+        Ok(Self(f))
+    }
+}
+
+impl Drop for TestPattern {
+    fn drop(&mut self) {
+        let _ = set_test_pattern(&self.0, 0);
+    }
+}
+
+fn set_test_pattern(f: &std::fs::File, pattern: i32) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    // struct v4l2_control { __u32 id; __s32 value; }
+    let mut control = [V4L2_CID_TEST_PATTERN as i32, pattern];
+    // SAFETY: an open descriptor and a v4l2_control-sized buffer.
+    let rc = unsafe { libc::ioctl(f.as_raw_fd(), VIDIOC_S_CTRL as _, control.as_mut_ptr()) };
+    if rc < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn env_secs(name: &str, default: u64) -> Duration {
@@ -346,6 +397,10 @@ fn mirror_both_turns_the_image() -> TestResult {
         return Ok(());
     };
     let (cols, rows) = (16, 9);
+    // The OV5640 mirrors through the ISI, but its EVK points at whatever is
+    // in front of it, often nothing: its colour bars give the flip a scene.
+    let ov5640 = ov5640_subdev().filter(|_| !is_vvcam(&t.source));
+    let _pattern = ov5640.as_deref().map(TestPattern::on).transpose()?;
     let capture = |mirror: Mirror| -> Result<(Vec<f64>, ControlValue), Box<dyn Error>> {
         let mut camera = start(|| builder(&t).mirror(mirror))?;
         // Let exposure settle and the flip reach the frames.
@@ -373,6 +428,22 @@ fn mirror_both_turns_the_image() -> TestResult {
     let mean = plain.iter().sum::<f64>() / plain.len() as f64;
     let spread = mean_abs_diff(&plain, &vec![mean; plain.len()]);
     if spread < 4.0 {
+        if ov5640.is_some() {
+            // Its colour bars are never uniform: the sensor is delivering
+            // nothing. The OV5640 stops after a runtime-PM suspend and
+            // resume, until the board reboots; keeping it powered
+            // (power/control=on) avoids it.
+            common::known_failure(
+                "the OV5640",
+                format!(
+                    "{} delivers a flat image (spread {spread:.1}) with the sensor's test \
+                     pattern on: the sensor is not streaming. It stops after a runtime-PM \
+                     resume until the board reboots; reboot it and keep it powered.",
+                    t.source
+                ),
+            );
+            return Ok(());
+        }
         common::skip(
             Skip::UniformScene,
             format!("the scene is too uniform (spread {spread:.1}) to see a flip"),
@@ -382,9 +453,10 @@ fn mirror_both_turns_the_image() -> TestResult {
     let same = mean_abs_diff(&plain, &turned);
     let flipped = mean_abs_diff(&rotated, &turned);
     eprintln!(
-        "mirror: vvcam={} spread {spread:.1}, |plain-turned| {same:.1}, \
-         |rot180(plain)-turned| {flipped:.1}",
-        is_vvcam(&t.source)
+        "mirror: vvcam={} ov5640 test pattern={} spread {spread:.1}, |plain-turned| \
+         {same:.1}, |rot180(plain)-turned| {flipped:.1}",
+        is_vvcam(&t.source),
+        ov5640.is_some()
     );
     assert!(
         flipped < same / 2.0,
