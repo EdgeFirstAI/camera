@@ -142,6 +142,34 @@ fn set_test_pattern(f: &std::fs::File, pattern: i32) -> std::io::Result<()> {
     Ok(())
 }
 
+/// How many times systemd has restarted the ISP daemon this boot.
+fn isp_restarts() -> Option<u64> {
+    let out = Command::new("systemctl")
+        .args(["show", ISP_SERVICE, "-p", "NRestarts", "--value"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// Whether the ISP daemon restarted since `before`, waiting up to
+/// `window` for it: `isp_media_server` can crash some seconds after a
+/// session closes.
+fn isp_crashed_since(before: Option<u64>, window: Duration) -> bool {
+    let Some(before) = before else {
+        return false;
+    };
+    let deadline = Instant::now() + window;
+    loop {
+        if isp_restarts().is_some_and(|n| n > before) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
 fn env_secs(name: &str, default: u64) -> Duration {
     Duration::from_secs(
         std::env::var(name)
@@ -410,8 +438,31 @@ fn mirror_both_turns_the_image() -> TestResult {
         let grid = luma_grid(&camera.next_frame(TIMEOUT)?, cols, rows)?;
         Ok((grid, camera.get_control(ControlId::Mirror)?))
     };
-    let (plain, _) = capture(Mirror::None)?;
-    let (turned, applied) = capture(Mirror::Both)?;
+    let vvcam = is_vvcam(&t.source);
+    let restarts = vvcam.then(isp_restarts).flatten();
+    let captured = (|| Ok::<_, Box<dyn Error>>((capture(Mirror::None)?, capture(Mirror::Both)?)))();
+    // On the i.MX 8M Plus EVK's vvcam ISP, isp_media_server often crashes
+    // after a session that flipped the dewarp unit closes. Waiting it out
+    // here keeps the restart away from the tests that follow.
+    if vvcam && isp_crashed_since(restarts, Duration::from_secs(25)) {
+        let _ = start(|| builder(&t));
+        common::known_failure(
+            "the vvcam ISP",
+            format!(
+                "isp_media_server crashed and restarted after a {} session that flipped the \
+                 dewarp unit closed{}",
+                t.source,
+                match &captured {
+                    Ok(_) => String::new(),
+                    Err(e) => format!(", and the capture failed: {e}"),
+                }
+            ),
+        );
+        if captured.is_err() {
+            return Ok(());
+        }
+    }
+    let ((plain, _), (turned, applied)) = captured?;
     // `ControlId::Mirror` reads back 3 for both axes.
     if applied != ControlValue::Int(3) {
         common::skip(

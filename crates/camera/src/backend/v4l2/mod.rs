@@ -780,6 +780,9 @@ fn untable(table: SlotTable) -> Vec<TensorDyn> {
 
 impl Drop for V4l2Camera {
     fn drop(&mut self) {
+        if let Err(e) = self.ctl.clear_viv_mirror(&self.dev) {
+            tracing::warn!("{}: clearing the ISP flip before closing: {e}", self.path());
+        }
         let deferred = self.pool.as_ref().is_some_and(|p| {
             p.memory == ResolvedMemory::Export && p.table.held() > 0 && !self.orphans()
         });

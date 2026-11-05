@@ -248,6 +248,29 @@ impl Controls {
         Ok(Applied::Driver)
     }
 
+    /// Turns off a flip set through the vvcam JSON control. On the i.MX 8M
+    /// Plus EVK, `isp_media_server` often crashes after a node whose dewarp
+    /// unit is flipped closes; clearing the flip first makes that rarer but
+    /// does not prevent it.
+    pub(crate) fn clear_viv_mirror(&self, dev: &Device) -> Result<()> {
+        let bits = self.viv_mirror.get();
+        let Some(viv) = self.info(quirks::VIV_EXTCTRL).filter(|_| bits != 0) else {
+            return Ok(());
+        };
+        let set = Mirror::from_bits(bits);
+        for (axis, on) in [
+            (Axis::Horizontal, set.horizontal()),
+            (Axis::Vertical, set.vertical()),
+        ] {
+            if on {
+                quirks::viv_flip(dev, viv, axis, false)
+                    .map_err(|e| v4l2_error("S_EXT_CTRLS VIV_EXTCTRL", e))?;
+            }
+        }
+        self.viv_mirror.set(0);
+        Ok(())
+    }
+
     fn exposure_auto(&self, dev: &Device) -> Result<Applied> {
         let Some(info) = self.info(uapi::V4L2_CID_EXPOSURE_AUTO) else {
             return Ok(Applied::Unsupported(Unsupported::Camera));
