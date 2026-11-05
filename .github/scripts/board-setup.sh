@@ -58,8 +58,9 @@ PY
       echo "EDGEFIRST_CAMERA_SOURCE=libcamera"
     } >>"$GITHUB_ENV"
     # The neo ISP has no vvcam daemon to restart, and validate() turns any
-    # orientation back to Rotate0, so it cannot mirror.
-    allow+=(not-vvcam no-mirror)
+    # orientation back to Rotate0, so it cannot mirror. libcamera allocates
+    # its own buffers, so the SDK's memory order does not apply.
+    allow+=(not-vvcam no-mirror not-v4l2)
     echo "board-setup: libcamera camera through nxp/neo"
     ;;
   *)

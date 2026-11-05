@@ -36,9 +36,11 @@ CAMERA="/dev/video3"
 # camera.service. Read by the HAL, not by this program.
 #EDGEFIRST_CODEC_V4L2_ENCODER="/dev/video0"
 
-# How capture buffers are allocated: "import" this service's contiguous
-# buffers, "export" the driver's own, or "auto" to import and fall back to the
-# driver's buffers when it refuses them.
+# How capture buffers are allocated: "import" contiguous (CMA) buffers,
+# "export" the driver's own, or "auto" to import and fall back to the driver's
+# buffers when it refuses them. "auto" prefers CMA, uses the system DMA-BUF heap
+# on a machine with no CMA heap, and uses the driver's buffers when no heap can
+# be opened.
 MEMORY="auto"
 
 # libcamera pipeline selection, i.MX 95 only. Makes libcamera use the nxp/neo

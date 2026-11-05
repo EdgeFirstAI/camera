@@ -47,16 +47,22 @@ pub enum Skip {
     NotMonotonic,
     /// `EDGEFIRST_CAMERA_RECORDING` names no recording.
     NoRecording,
+    /// The camera is not a V4L2 camera, so it takes no pool from the SDK.
+    NotV4l2,
+    /// The machine has no `/dev/dma_heap/linux,cma`.
+    NoCmaHeap,
 }
 
 impl Skip {
-    pub const ALL: [Skip; 6] = [
+    pub const ALL: [Skip; 8] = [
         Skip::NoCamera,
         Skip::NoMirror,
         Skip::UniformScene,
         Skip::NotVvcam,
         Skip::NotMonotonic,
         Skip::NoRecording,
+        Skip::NotV4l2,
+        Skip::NoCmaHeap,
     ];
 
     /// The name a lane lists in `EDGEFIRST_CAMERA_ALLOW_SKIPS`.
@@ -68,6 +74,8 @@ impl Skip {
             Skip::NotVvcam => "not-vvcam",
             Skip::NotMonotonic => "not-monotonic",
             Skip::NoRecording => "no-recording",
+            Skip::NotV4l2 => "not-v4l2",
+            Skip::NoCmaHeap => "no-cma-heap",
         }
     }
 }

@@ -113,7 +113,11 @@ impl Mirror {
 pub enum Contiguity {
     /// Allocate from CMA only; fail with
     /// [`ErrorKind::ContiguousUnavailable`](crate::ErrorKind::ContiguousUnavailable)
-    /// rather than fall back to non-contiguous memory.
+    /// rather than fall back to non-contiguous memory. The exception is
+    /// [`MemoryStrategy::Auto`] on a machine with no CMA heap at all, such as
+    /// a desktop, where the SDK's own pool comes from the system DMA-BUF heap,
+    /// or from the driver when no heap can be opened. A CMA heap that is full
+    /// or not accessible is still an error.
     #[default]
     Required,
     /// Accept any memory the tensor crate allocates.

@@ -76,7 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The application captures through the `edgefirst-camera` SDK instead of `videostream`, converts and scales through `edgefirst-image` (OpenGL, G2D or CPU) and encodes H.264 through `edgefirst-codec` (EDGEAI-1525).
-  - The capture pool is allocated in contiguous memory through the image crate. A device that refuses it falls back to the SDK's buffers with a warning; contiguous memory that cannot be allocated fails startup with a message naming the shortfall.
+  - The SDK allocates the capture pool in contiguous memory, at the pitch the driver negotiates. A device that refuses it falls back to the driver's own buffers. `MEMORY=auto` prefers CMA, uses the system DMA-BUF heap on a machine with no `linux,cma` heap, such as a desktop, and uses the driver's buffers when no heap can be opened; a CMA heap that is full or not accessible, and explicit `MEMORY=import` without one, are still errors (EDGEAI-1533).
   - While any encoder runs, the pool is `CAMERA_BUFFERS` plus two, because frames waiting for or being read by an encoder hold their buffer. `CAMERA_BUFFERS` keeps its meaning for `camera/frame` subscribers and defaults to 4.
   - Camera devices are asked for YUYV, which the encoders take directly; a device without it is captured in its current format.
   - A camera that cannot mirror, or rejects the mirror control, is mirrored in the JPEG and H.264 outputs instead, and `camera/frame` is published unmirrored with a warning.

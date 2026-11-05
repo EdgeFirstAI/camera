@@ -13,7 +13,9 @@
 //!   is exported with `EXPBUF` and wrapped as a tensor.
 //! - **Auto:** Import with the SDK's pool, probed at `start()` by queueing
 //!   every slot and running to the first frame; Export when the driver
-//!   refuses. Caller pools never fall back.
+//!   refuses. The pool comes from CMA, from the system DMA-BUF heap on a
+//!   machine with no CMA heap, and Export replaces it when no heap can be
+//!   opened. Caller pools never fall back.
 //!
 //! `stop()` is `STREAMOFF` then `REQBUFS(0)`: on the i.MX 8M Plus ISP a bare
 //! `STREAMOFF`/`STREAMON` delivers no frames and the next close crashes
@@ -278,11 +280,11 @@ impl V4l2Camera {
     }
 
     /// Allocates the SDK's Import pool at the driver's pitch and size.
-    fn allocate(&self) -> Result<(Vec<TensorDyn>, Option<bool>)> {
+    fn allocate(&self, contiguity: Contiguity) -> Result<(Vec<TensorDyn>, Option<bool>)> {
         let (w, h) = (self.neg.width as usize, self.neg.height as usize);
         let format = self.neg.mapping.format;
         let (pitch, size) = (self.neg.strides[0], self.neg.sizes[0]);
-        let required = self.request.contiguity == Contiguity::Required;
+        let required = contiguity == Contiguity::Required;
         let mut heaps = Vec::with_capacity(self.request.buffers);
         let mut pool = Vec::with_capacity(self.request.buffers);
         for _ in 0..self.request.buffers {
@@ -290,7 +292,7 @@ impl V4l2Camera {
                 .with_memory(Some(TensorMemory::DmaBuf))
                 .with_access(CpuAccess::ReadWrite)
                 .with_contiguous(required);
-            let t = TensorDyn::image_desc(&desc).map_err(|e| self.alloc_error(e, size))?;
+            let t = TensorDyn::image_desc(&desc).map_err(|e| alloc_error(e, size, required))?;
             let fits = t.effective_row_stride() == Some(pitch) && t.capacity_bytes() >= size;
             let t = if fits {
                 t
@@ -305,7 +307,7 @@ impl V4l2Camera {
                         .with_access(CpuAccess::ReadWrite)
                         .with_contiguous(required),
                 )
-                .map_err(|e| self.alloc_error(e, size))?;
+                .map_err(|e| alloc_error(e, size, required))?;
                 heaps.push(raw.contiguity());
                 let fd = raw.clone_fd()?;
                 let mut t = TensorDyn::from_fd(fd, &self.shape()?, DType::U8, None)?;
@@ -320,15 +322,33 @@ impl V4l2Camera {
         Ok((pool, contiguity_of(heaps)))
     }
 
-    fn alloc_error(&self, e: edgefirst_tensor::Error, bytes: usize) -> Error {
-        if self.request.contiguity == Contiguity::Required {
-            Error::new(
-                ErrorKind::ContiguousUnavailable,
-                format!("{bytes} bytes of physically contiguous memory per buffer: {e}"),
-            )
-            .with_source(e)
-        } else {
-            Error::from(e)
+    /// The SDK's pool under `Auto`, from the best memory the machine has: CMA,
+    /// then the system DMA-BUF heap where there is no CMA heap. `None` when no
+    /// heap can be opened, so that the driver's buffers are used. A CMA heap
+    /// that is full or not accessible stays an error.
+    fn allocate_auto(&self) -> Result<Option<(Vec<TensorDyn>, Option<bool>)>> {
+        let allocated = match self.allocate(self.request.contiguity) {
+            Err(e) if no_cma_heap(&e) => {
+                let pool = self.allocate(Contiguity::Any);
+                if pool.is_ok() {
+                    tracing::info!(
+                        "{}: no /dev/dma_heap/linux,cma; using the system DMA-BUF heap",
+                        self.path()
+                    );
+                }
+                pool
+            }
+            other => other,
+        };
+        match allocated {
+            Err(e) if no_usable_heap(&e) => {
+                tracing::info!(
+                    "{}: no usable DMA-BUF heap ({e}); using the driver's buffers",
+                    self.path()
+                );
+                Ok(None)
+            }
+            other => other.map(Some),
         }
     }
 
@@ -490,8 +510,14 @@ impl V4l2Camera {
                 let c = contiguity_of(pool.iter().map(|t| t.contiguity()));
                 (pool, c, true)
             }
+            None if self.request.memory == MemoryStrategy::Auto => {
+                let Some((pool, c)) = self.allocate_auto()? else {
+                    return Ok(false);
+                };
+                (pool, c, false)
+            }
             None => {
-                let (pool, c) = self.allocate()?;
+                let (pool, c) = self.allocate(self.request.contiguity)?;
                 (pool, c, false)
             }
         };
@@ -751,6 +777,43 @@ fn planes(
             l
         })
         .collect()
+}
+
+fn alloc_error(e: edgefirst_tensor::Error, bytes: usize, required: bool) -> Error {
+    if required {
+        Error::new(
+            ErrorKind::ContiguousUnavailable,
+            format!("{bytes} bytes of physically contiguous memory per buffer: {e}"),
+        )
+        .with_source(e)
+    } else {
+        Error::from(e)
+    }
+}
+
+/// The I/O error behind a failed tensor allocation.
+fn allocation_io_kind(e: &Error) -> Option<std::io::ErrorKind> {
+    match std::error::Error::source(e)?.downcast_ref::<edgefirst_tensor::Error>()? {
+        edgefirst_tensor::Error::IoError(io) => Some(io.kind()),
+        _ => None,
+    }
+}
+
+/// Whether a contiguous allocation failed because the machine has no CMA
+/// heap at all, as opposed to one that is full or not accessible.
+fn no_cma_heap(e: &Error) -> bool {
+    e.kind() == ErrorKind::ContiguousUnavailable
+        && allocation_io_kind(e) == Some(std::io::ErrorKind::NotFound)
+}
+
+/// Whether an allocation from any heap failed because none could be opened,
+/// as opposed to one that ran out of memory.
+fn no_usable_heap(e: &Error) -> bool {
+    e.kind() == ErrorKind::Tensor
+        && matches!(
+            allocation_io_kind(e),
+            Some(std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied)
+        )
 }
 
 /// What a pool's memory is known to be: `Some(true)` when every buffer is
@@ -1161,5 +1224,41 @@ impl V4l2Camera {
                 ),
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_missing_heap_counts_as_no_cma_heap() {
+        let failed = |kind: std::io::ErrorKind| {
+            Error::new(ErrorKind::ContiguousUnavailable, "no memory")
+                .with_source(edgefirst_tensor::Error::IoError(kind.into()))
+        };
+        assert!(no_cma_heap(&failed(std::io::ErrorKind::NotFound)));
+        assert!(!no_cma_heap(&failed(std::io::ErrorKind::OutOfMemory)));
+        assert!(!no_cma_heap(&failed(std::io::ErrorKind::PermissionDenied)));
+        assert!(!no_cma_heap(&Error::new(ErrorKind::NotFound, "no device")));
+    }
+
+    #[test]
+    fn only_a_heap_that_cannot_be_opened_counts_as_no_usable_heap() {
+        let failed =
+            |kind: std::io::ErrorKind| Error::from(edgefirst_tensor::Error::IoError(kind.into()));
+        assert!(no_usable_heap(&failed(std::io::ErrorKind::NotFound)));
+        assert!(no_usable_heap(&failed(
+            std::io::ErrorKind::PermissionDenied
+        )));
+        assert!(!no_usable_heap(&failed(std::io::ErrorKind::OutOfMemory)));
+
+        // A CMA heap with bad permissions must not lose its contiguous memory
+        // to a quiet fall back.
+        let cma = Error::new(ErrorKind::ContiguousUnavailable, "no memory").with_source(
+            edgefirst_tensor::Error::IoError(std::io::ErrorKind::PermissionDenied.into()),
+        );
+        assert!(!no_usable_heap(&cma));
+        assert!(!no_cma_heap(&cma));
     }
 }
