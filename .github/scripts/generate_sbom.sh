@@ -27,6 +27,10 @@ set -e  # Exit on error
 # ===========================================================================
 
 PROJECT_NAME="edgefirst-camera"
+# The Cargo package of the application, which the SBOM describes in its
+# metadata rather than as a component. Not PROJECT_NAME: that is also the
+# name of the SDK crate, a component like any other dependency.
+ROOT_PACKAGE="edgefirst-camera-app"
 PROJECT_TYPE="application"  # Options: library, application, framework
 VERSION_FILE="Cargo.toml"  # Single source of truth for version
 
@@ -106,6 +110,7 @@ import os
 
 VERSION = "$VERSION"
 PROJECT_NAME = "$PROJECT_NAME"
+ROOT_PACKAGE = "$ROOT_PACKAGE"
 PROJECT_TYPE = "$PROJECT_TYPE"
 
 def load_sbom(filename):
@@ -140,7 +145,7 @@ for filename in sbom_files:
     if 'components' in sbom:
         for component in sbom['components']:
             # Skip main project component from scancode - we define it in metadata
-            if component.get('name') == PROJECT_NAME.lower():
+            if component.get('name') == ROOT_PACKAGE:
                 continue
             all_components.append(component)
 
@@ -230,6 +235,7 @@ python3 << EOF
 import json
 
 PROJECT_NAME = "$PROJECT_NAME"
+ROOT_PACKAGE = "$ROOT_PACKAGE"
 
 # Load the merged SBOM
 with open('sbom-temp.json', 'r') as f:
@@ -243,7 +249,7 @@ with open('deps-sbom.json', 'r') as f:
 if 'components' in sbom:
     sbom['components'] = [
         c for c in sbom['components']
-        if c.get('name') != PROJECT_NAME.lower()
+        if c.get('name') != ROOT_PACKAGE
     ]
 
 # Restore dependency graph from deps-sbom (lost during merge)
@@ -284,9 +290,12 @@ if [ -f "NOTICE" ] && [ -f ".github/scripts/validate_notice.py" ]; then
     # NOTICE covers every workspace package, as ci-notice.sh checks it: the
     # application's merged SBOM plus the SDK crate's dependency SBOM.
     notice_sboms=(sbom.json)
-    if [[ -f "crates/camera/edgefirst-camera.cdx.json" ]]; then
-        notice_sboms+=(crates/camera/edgefirst-camera.cdx.json)
-    fi
+    for crate_sbom in crates/camera/edgefirst-camera.cdx.json \
+        crates/libcamera-sys/edgefirst-libcamera-sys.cdx.json; do
+        if [[ -f "$crate_sbom" ]]; then
+            notice_sboms+=("$crate_sbom")
+        fi
+    done
     python3 .github/scripts/validate_notice.py NOTICE "${notice_sboms[@]}"
     NOTICE_EXIT=$?
     if [ $NOTICE_EXIT -ne 0 ]; then

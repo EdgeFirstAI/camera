@@ -55,8 +55,12 @@ fn devices_lists_formats_sizes_rates_and_modes() -> Result<(), BoxError> {
     let modes = yuyv["modes"].as_array().ok_or("no modes")?;
     assert!(modes.contains(&"1080p240".into()), "{modes:?}");
 
-    // Every V4L2 camera here (vivid on CI) has formats with named modes.
-    for camera in cameras.iter().filter(|c| c["backend"] == "v4l2") {
+    // vivid (on CI) offers formats with named modes. Other cameras on the
+    // host may legitimately offer neither, so they are not checked.
+    for camera in cameras
+        .iter()
+        .filter(|c| c["backend"] == "v4l2" && c["driver"] == "vivid")
+    {
         let formats = camera["formats"].as_array().ok_or("no formats")?;
         assert!(!formats.is_empty(), "{camera}");
         assert!(

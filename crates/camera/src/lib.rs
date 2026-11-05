@@ -115,15 +115,24 @@ pub fn enumerate() -> Result<Vec<CameraDescriptor>> {
 /// SDK never switches pipelines on its own.
 ///
 /// Applies when libcamera's `CameraManager` starts: call it before the
-/// first libcamera [`enumerate`] or open.
+/// first libcamera [`enumerate`] or open. It sets the environment variable,
+/// or with `None` removes it.
 ///
 /// # Errors
 ///
 /// [`ErrorKind::InvalidConfig`] when a libcamera camera is open with a
 /// different list.
+///
+/// # Safety
+///
+/// It changes the process environment, which is undefined behaviour on
+/// Unix while another thread reads or writes it (libraries read it
+/// unannounced). Call it before the process starts other threads, as at
+/// the top of `main`, or set the variable outside the process instead.
 #[cfg(all(target_os = "linux", feature = "libcamera"))]
-pub fn set_libcamera_pipelines(list: Option<&str>) -> Result<()> {
-    backend::libcamera::set_match_list(list)
+pub unsafe fn set_libcamera_pipelines(list: Option<&str>) -> Result<()> {
+    // SAFETY: the caller upholds the contract above.
+    unsafe { backend::libcamera::set_match_list(list) }
 }
 
 /// Probes a camera's full size and rate table.

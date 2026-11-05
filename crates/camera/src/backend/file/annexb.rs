@@ -19,6 +19,10 @@ const CHUNK: usize = 256 * 1024;
 /// Bytes kept when a buffer holds no start code: a start code may straddle
 /// the next read.
 const START_CODE_TAIL: usize = 3;
+/// The largest access unit read, far above any real one (a 4K IDR at a
+/// high bitrate is a few megabytes): a damaged file with no next start
+/// code is refused instead of being buffered to its end.
+const MAX_ACCESS_UNIT: usize = 32 * 1024 * 1024;
 
 #[derive(Debug)]
 pub(crate) struct AccessUnitReader<R> {
@@ -27,6 +31,7 @@ pub(crate) struct AccessUnitReader<R> {
     /// Start of the unread bytes in `buf`.
     start: usize,
     eof: bool,
+    max_unit: usize,
 }
 
 impl<R: Read + Seek> AccessUnitReader<R> {
@@ -36,6 +41,7 @@ impl<R: Read + Seek> AccessUnitReader<R> {
             buf: Vec::with_capacity(2 * CHUNK),
             start: 0,
             eof: false,
+            max_unit: MAX_ACCESS_UNIT,
         }
     }
 
@@ -61,6 +67,15 @@ impl<R: Read + Seek> AccessUnitReader<R> {
                 continue;
             }
             if units.next().is_none() && !self.eof {
+                if pending.len() > self.max_unit {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "an H.264 access unit runs past {} bytes with no next start code",
+                            self.max_unit
+                        ),
+                    ));
+                }
                 self.fill()?;
                 continue;
             }
@@ -114,6 +129,17 @@ impl<R: Read + Seek> AccessUnitReader<R> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn an_access_unit_with_no_end_is_refused() {
+        let mut data = IDR.to_vec();
+        data.resize(4 * CHUNK, 0x55);
+        data.extend_from_slice(IDR);
+        let mut r = AccessUnitReader::new(Cursor::new(data));
+        r.max_unit = CHUNK;
+        let err = r.next_unit().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
 
     const SPS: &[u8] = &[0, 0, 0, 1, 0x67, 0x64, 0x00, 0x28];
     const PPS: &[u8] = &[0, 0, 0, 1, 0x68, 0xee, 0x3c, 0x80];

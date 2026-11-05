@@ -9,7 +9,7 @@
 
 use std::ffi::CString;
 use std::ptr::NonNull;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
 use edgefirst_libcamera_sys::{self as sys, LoadError, LoadErrorKind, Shim};
 
@@ -19,8 +19,24 @@ use crate::{Error, ErrorKind, Result};
 const MATCH_LIST_ENV: &str = "LIBCAMERA_PIPELINES_MATCH_LIST";
 
 static SHIM: OnceLock<std::result::Result<Arc<Shim>, LoadError>> = OnceLock::new();
-static RUNNING: Mutex<Weak<Manager>> = Mutex::new(Weak::new());
-static MATCH_LIST: Mutex<Option<String>> = Mutex::new(None);
+static LIFECYCLE: Mutex<Lifecycle> = Mutex::new(Lifecycle {
+    running: Weak::new(),
+    live: false,
+});
+/// Signalled when a manager has been destroyed.
+static DESTROYED: Condvar = Condvar::new();
+
+/// The process's manager. `live` stays set from its start until its
+/// `CameraManager` is destroyed, which is after `running` stops upgrading:
+/// a new manager may start only once the old one is gone.
+struct Lifecycle {
+    running: Weak<Manager>,
+    live: bool,
+}
+
+fn lifecycle() -> MutexGuard<'static, Lifecycle> {
+    LIFECYCLE.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// A started `CameraManager`.
 #[derive(Debug)]
@@ -52,19 +68,21 @@ impl Manager {
     }
 
     /// The running manager, starting one on the loaded shim if none runs.
+    /// Waits for a manager that is being dropped to be destroyed first.
     pub(crate) fn shared() -> Result<Arc<Self>> {
-        let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(m) = running.upgrade() {
-            return Ok(m);
+        let mut state = lifecycle();
+        loop {
+            if let Some(m) = state.running.upgrade() {
+                return Ok(m);
+            }
+            if !state.live {
+                break;
+            }
+            state = DESTROYED
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
         }
         let shim = shim()?;
-        if let Some(list) = MATCH_LIST
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
-        {
-            std::env::set_var(MATCH_LIST_ENV, list);
-        }
         tracing::debug!(
             "libcamera {} through {} (built against {})",
             shim.runtime_version(),
@@ -72,7 +90,8 @@ impl Manager {
             shim.build_version()
         );
         let m = Self::start(shim)?;
-        *running = Arc::downgrade(&m);
+        state.running = Arc::downgrade(&m);
+        state.live = true;
         Ok(m)
     }
 
@@ -136,6 +155,13 @@ impl Drop for Manager {
         // SAFETY: the handle is live and every camera that used it has
         // dropped its `Arc`.
         unsafe { (self.functions().mgr_destroy)(self.raw()) };
+        let mut state = lifecycle();
+        // A manager started through `start` alone, outside `shared`, is
+        // not the process's manager.
+        if state.running.strong_count() == 0 {
+            state.live = false;
+            DESTROYED.notify_all();
+        }
     }
 }
 
@@ -152,19 +178,26 @@ pub(crate) fn shim() -> Result<Arc<Shim>> {
         })
 }
 
-/// Sets the pipeline handlers libcamera may use, as
-/// `LIBCAMERA_PIPELINES_MATCH_LIST` does.
-pub(crate) fn set_match_list(list: Option<&str>) -> Result<()> {
-    let running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut current = MATCH_LIST.lock().unwrap_or_else(PoisonError::into_inner);
-    if running.strong_count() > 0 && current.as_deref() != list {
+/// Sets or removes `LIBCAMERA_PIPELINES_MATCH_LIST`, which libcamera reads
+/// when its `CameraManager` starts.
+///
+/// # Safety
+///
+/// It changes the process environment, so no other thread may read or
+/// write the environment during the call.
+pub(crate) unsafe fn set_match_list(list: Option<&str>) -> Result<()> {
+    let state = lifecycle();
+    if state.live && std::env::var(MATCH_LIST_ENV).ok().as_deref() != list {
         return Err(Error::new(
             ErrorKind::InvalidConfig,
             "the libcamera pipeline match list applies when the CameraManager starts; \
              close every libcamera camera first",
         ));
     }
-    *current = list.map(str::to_owned);
+    match list {
+        Some(list) => std::env::set_var(MATCH_LIST_ENV, list),
+        None => std::env::remove_var(MATCH_LIST_ENV),
+    }
     Ok(())
 }
 
