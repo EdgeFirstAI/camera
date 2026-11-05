@@ -280,11 +280,11 @@ impl V4l2Camera {
     }
 
     /// Allocates the SDK's Import pool at the driver's pitch and size.
-    fn allocate(&self) -> Result<(Vec<TensorDyn>, Option<bool>)> {
+    fn allocate(&self, contiguity: Contiguity) -> Result<(Vec<TensorDyn>, Option<bool>)> {
         let (w, h) = (self.neg.width as usize, self.neg.height as usize);
         let format = self.neg.mapping.format;
         let (pitch, size) = (self.neg.strides[0], self.neg.sizes[0]);
-        let required = self.request.contiguity == Contiguity::Required;
+        let required = contiguity == Contiguity::Required;
         let mut heaps = Vec::with_capacity(self.request.buffers);
         let mut pool = Vec::with_capacity(self.request.buffers);
         for _ in 0..self.request.buffers {
@@ -292,7 +292,7 @@ impl V4l2Camera {
                 .with_memory(Some(TensorMemory::DmaBuf))
                 .with_access(CpuAccess::ReadWrite)
                 .with_contiguous(required);
-            let t = TensorDyn::image_desc(&desc).map_err(|e| self.alloc_error(e, size))?;
+            let t = TensorDyn::image_desc(&desc).map_err(|e| alloc_error(e, size, required))?;
             let fits = t.effective_row_stride() == Some(pitch) && t.capacity_bytes() >= size;
             let t = if fits {
                 t
@@ -307,7 +307,7 @@ impl V4l2Camera {
                         .with_access(CpuAccess::ReadWrite)
                         .with_contiguous(required),
                 )
-                .map_err(|e| self.alloc_error(e, size))?;
+                .map_err(|e| alloc_error(e, size, required))?;
                 heaps.push(raw.contiguity());
                 let fd = raw.clone_fd()?;
                 let mut t = TensorDyn::from_fd(fd, &self.shape()?, DType::U8, None)?;
@@ -326,11 +326,10 @@ impl V4l2Camera {
     /// then the system DMA-BUF heap where there is no CMA heap. `None` when no
     /// heap can be opened, so that the driver's buffers are used. A CMA heap
     /// that is full or not accessible stays an error.
-    fn allocate_auto(&mut self) -> Result<Option<(Vec<TensorDyn>, Option<bool>)>> {
-        let allocated = match self.allocate() {
+    fn allocate_auto(&self) -> Result<Option<(Vec<TensorDyn>, Option<bool>)>> {
+        let allocated = match self.allocate(self.request.contiguity) {
             Err(e) if no_cma_heap(&e) => {
-                self.request.contiguity = Contiguity::Any;
-                let pool = self.allocate();
+                let pool = self.allocate(Contiguity::Any);
                 if pool.is_ok() {
                     tracing::info!(
                         "{}: no /dev/dma_heap/linux,cma; using the system DMA-BUF heap",
@@ -350,18 +349,6 @@ impl V4l2Camera {
                 Ok(None)
             }
             other => other.map(Some),
-        }
-    }
-
-    fn alloc_error(&self, e: edgefirst_tensor::Error, bytes: usize) -> Error {
-        if self.request.contiguity == Contiguity::Required {
-            Error::new(
-                ErrorKind::ContiguousUnavailable,
-                format!("{bytes} bytes of physically contiguous memory per buffer: {e}"),
-            )
-            .with_source(e)
-        } else {
-            Error::from(e)
         }
     }
 
@@ -530,7 +517,7 @@ impl V4l2Camera {
                 (pool, c, false)
             }
             None => {
-                let (pool, c) = self.allocate()?;
+                let (pool, c) = self.allocate(self.request.contiguity)?;
                 (pool, c, false)
             }
         };
@@ -790,6 +777,18 @@ fn planes(
             l
         })
         .collect()
+}
+
+fn alloc_error(e: edgefirst_tensor::Error, bytes: usize, required: bool) -> Error {
+    if required {
+        Error::new(
+            ErrorKind::ContiguousUnavailable,
+            format!("{bytes} bytes of physically contiguous memory per buffer: {e}"),
+        )
+        .with_source(e)
+    } else {
+        Error::from(e)
+    }
 }
 
 /// The I/O error behind a failed tensor allocation.

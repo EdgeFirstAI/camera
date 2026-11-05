@@ -681,9 +681,6 @@ fn decodes_a_2x_recording() -> TestResult {
     Ok(())
 }
 
-/// Frames held across `close()` stay readable and unchanged, and the device
-/// reopens at once; for the caller's pool where the backend imports one, and
-/// for driver buffers.
 /// `Auto` must not leave contiguous memory unused where the machine has it,
 /// which an NPU or GPU without an IOMMU depends on for zero-copy.
 #[test]
@@ -693,8 +690,15 @@ fn auto_imports_contiguous_memory_where_there_is_a_cma_heap() -> TestResult {
     let Some(t) = target() else {
         return Ok(());
     };
-    if !t.import || !std::path::Path::new("/dev/dma_heap/linux,cma").exists() {
-        eprintln!("SKIPPED: needs a V4L2 camera and a CMA heap");
+    if !t.import {
+        common::skip(
+            Skip::NotV4l2,
+            format!("{} allocates its own buffers", t.source),
+        );
+        return Ok(());
+    }
+    if !Path::new("/dev/dma_heap/linux,cma").exists() {
+        common::skip(Skip::NoCmaHeap, "no /dev/dma_heap/linux,cma");
         return Ok(());
     }
     let camera = start(|| builder(&t).memory(MemoryStrategy::Auto))?;
@@ -703,6 +707,9 @@ fn auto_imports_contiguous_memory_where_there_is_a_cma_heap() -> TestResult {
     Ok(())
 }
 
+/// Frames held across `close()` stay readable and unchanged, and the device
+/// reopens at once; for the caller's pool where the backend imports one, and
+/// for driver buffers.
 #[test]
 #[serial]
 #[ignore = "requires a camera (run with --include-ignored on a board)"]

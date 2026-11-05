@@ -383,6 +383,39 @@ fn auto_prefers_cma_then_the_system_heap() {
     camera.stop().unwrap();
 }
 
+/// The system-heap fallback is for the SDK's own pool. The camera still
+/// requires contiguous memory of a pool the caller provides afterwards.
+#[test]
+fn auto_without_a_cma_heap_still_requires_contiguity_of_a_caller_pool() {
+    let Some(v) = vivid(SINGLE) else { return };
+    if cma() {
+        let _ = std::io::Write::write_all(
+            &mut std::io::stderr(),
+            b"SKIPPED: a CMA heap is present; this test needs a host without one\n",
+        );
+        return;
+    }
+    let mut camera = builder(&v)
+        .memory(MemoryStrategy::Auto)
+        .contiguity(Contiguity::Required)
+        .open()
+        .unwrap();
+    camera.start().unwrap();
+    assert_eq!(camera.config().contiguous, Some(false));
+    camera.stop().unwrap();
+
+    camera
+        .set_buffers(BufferPool::Provided(caller_pool(3, PixelFormat::Yuyv)))
+        .unwrap();
+    let err = camera.start().unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::BuffersRejected);
+
+    camera.set_buffers(BufferPool::Sdk).unwrap();
+    camera.start().unwrap();
+    assert_eq!(camera.config().memory, ResolvedMemory::Import);
+    assert_eq!(camera.config().contiguous, Some(false));
+}
+
 #[test]
 fn contiguous_memory_unavailable_is_reported() {
     let Some(v) = vivid(SINGLE) else { return };
