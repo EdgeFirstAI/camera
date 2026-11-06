@@ -80,9 +80,9 @@ pub struct FrameMeta {
     pub slot: usize,
     /// SDK frame counter, continuous across restarts and file loops.
     pub seq: u64,
-    /// Raw driver sequence number. It does not count drops on most cameras:
-    /// vvcam, PiSP and neo number the frames they deliver, so a lost frame
-    /// leaves no gap.
+    /// Raw driver sequence number. Its meaning depends on the driver: vvcam,
+    /// PiSP and neo number the frames they deliver, so a lost frame leaves no
+    /// gap, while the ISI and UVC number the frames at the source.
     pub driver_sequence: Option<u32>,
     /// Capture instant in the backend's clock.
     pub timestamp: Timestamp,
@@ -165,8 +165,7 @@ impl Frame {
         self.meta.seq
     }
 
-    /// Raw driver sequence number, which does not count drops on most
-    /// cameras. See [`CaptureStats::dropped`](crate::CaptureStats::dropped).
+    /// Raw driver sequence number, whose meaning depends on the driver.
     pub fn driver_sequence(&self) -> Option<u32> {
         self.meta.driver_sequence
     }

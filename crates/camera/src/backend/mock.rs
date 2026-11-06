@@ -400,7 +400,6 @@ impl Camera for MockCamera {
             self.periods += 1;
             let Some(slot) = self.next_driver_slot() else {
                 // Every buffer is held, so this frame period is lost.
-                self.stats.dropped += 1;
                 if deadline.is_some_and(|d| Instant::now() >= d) {
                     self.stats.timeouts += 1;
                     return Err(Error::new(

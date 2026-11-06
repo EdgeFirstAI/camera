@@ -110,7 +110,6 @@ pub(crate) fn open(builder: CameraBuilder) -> Result<Box<dyn Camera>> {
         logged_clock: false,
         faults: builder.faults,
     };
-    camera.rate.claim(camera.config.frame_rate);
     let mut requested = builder.controls;
     if let Some(m) = camera.request.mirror {
         requested.insert(0, Control::Mirror(m));
@@ -680,11 +679,7 @@ impl V4l2Camera {
             }
         }
         let nanos = i64::try_from(d.timestamp.as_nanos()).unwrap_or(i64::MAX);
-        let tick = self.rate.frame(nanos);
-        self.stats.dropped += tick.dropped;
-        if let Some(mismatch) = tick.mismatch {
-            tracing::warn!("{}: {mismatch}", self.path());
-        }
+        self.rate.frame(nanos);
         let timestamp = Timestamp {
             clock,
             source,
@@ -926,7 +921,7 @@ impl Camera for V4l2Camera {
         self.neg.unapplied_fps = None;
         self.neg.interval = (got.numerator != 0 && got.denominator != 0).then_some(got);
         self.config.frame_rate = self.neg.frame_rate();
-        self.rate.claim(self.config.frame_rate);
+        self.rate.restart();
         Ok(match self.config.frame_rate {
             Some(applied) if (applied - fps).abs() < 0.01 => Applied::Driver,
             Some(applied) => Applied::Clamped(ControlValue::Float(applied)),
@@ -1098,6 +1093,10 @@ impl Camera for V4l2Camera {
         self.rate.measured()
     }
 
+    fn restart_frame_rate_measurement(&mut self) {
+        self.rate.restart();
+    }
+
     fn wait_handle(&self) -> Option<WaitHandle> {
         Some(WaitHandle::new(self.dev.as_fd().as_raw_fd()))
     }
@@ -1195,7 +1194,7 @@ impl V4l2Camera {
                 tracing::debug!("{}: {fps} fps through the ISP", self.path());
                 self.neg.interval = Some(interval_for(fps));
                 self.config.frame_rate = self.neg.frame_rate();
-                self.rate.claim(self.config.frame_rate);
+                self.rate.restart();
                 Ok(())
             }
             Some(Err(e)) => Err(e),

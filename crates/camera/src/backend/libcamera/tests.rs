@@ -9,7 +9,6 @@ use edgefirst_libcamera_sys::mock::{self, Event, Layout};
 use edgefirst_libcamera_sys::Shim;
 
 use super::*;
-use crate::backend::rate::RATE_FRAMES;
 
 const T: Option<Duration> = Some(Duration::from_secs(1));
 const ID: &str = "/base/soc/i2c@42530000/os08a20@36";
@@ -114,7 +113,6 @@ fn frames_carry_sensor_timestamps_and_sequences() {
         assert_eq!(ts.nanos, 1_000_000_000 + i as i64 * 33_333_000);
         assert!(f.realtime().is_some());
     }
-    assert_eq!(c.stats().dropped, 0);
 }
 
 #[test]
@@ -175,24 +173,39 @@ fn a_pipeline_ignoring_the_rate_reports_its_claim_and_measures_the_rest() {
         "libcamera's frame duration"
     );
     assert_eq!(c.measured_frame_rate(), None);
-    for _ in 0..=RATE_FRAMES {
+    for _ in 0..70 {
         c.next_frame(T).unwrap();
     }
     assert_eq!(c.config().frame_rate, Some(62.61));
     assert_eq!(c.measured_frame_rate(), Some(60.0), "from the timestamps");
-    assert_eq!(c.stats().dropped, 0);
 }
 
 #[test]
-fn frames_lengthened_by_auto_exposure_are_not_counted_as_drops() {
+fn restarting_the_measurement_leaves_out_the_time_away() {
+    let mut c = open(Layout::Separate);
+    c.start().unwrap();
+    for _ in 0..40 {
+        c.next_frame(T).unwrap();
+    }
+    assert_eq!(c.measured_frame_rate(), Some(30.0));
+    c.restart_frame_rate_measurement();
+    assert_eq!(c.measured_frame_rate(), None);
+    for _ in 0..40 {
+        c.next_frame(T).unwrap();
+    }
+    assert_eq!(c.measured_frame_rate(), Some(30.0));
+}
+
+#[test]
+fn the_measured_and_reported_rates_follow_auto_exposure() {
     let mut cam = mock::Camera::new(ID, Layout::Separate);
     cam.lengthens_after = Some((3, 66_666));
     let mut c = open_with(vec![cam], |b| b).unwrap();
     c.start().unwrap();
-    for _ in 0..30 {
+    // The first window includes the frames before they lengthened.
+    for _ in 0..40 {
         c.next_frame(T).unwrap();
     }
-    assert_eq!(c.stats().dropped, 0);
     assert_eq!(c.measured_frame_rate(), Some(15.0));
     assert_eq!(
         c.config().frame_rate,

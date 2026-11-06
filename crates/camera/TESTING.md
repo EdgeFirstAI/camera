@@ -24,7 +24,7 @@ These run in every CI lane:
 | Mode naming | `enumerate.rs`: discrete sizes (OV5640 on ISI), stepwise ranges (vvcam), unknown rates, fractional rates |
 | Errors | `error.rs`: rejection reason and slot, errno mapping, error sources |
 | Slot ownership | `pool.rs`: a held slot is never released before its frame drops; release order; detached frames keep their memory and release nothing; a detached table hands out no frames; one slot cannot be framed twice; releases from other threads |
-| Frame lifetime | `frame.rs` and `tests/mock.rs`: release on drop; starvation counted as drops; pool depths 2 to 8; a frame held across `stop()`/`start()` stays valid and requeues on drop; frames outliving a pool change and the camera |
+| Frame lifetime | `frame.rs` and `tests/mock.rs`: release on drop; starvation; pool depths 2 to 8; a frame held across `stop()`/`start()` stays valid and requeues on drop; frames outliving a pool change and the camera |
 | Buffers | `pool.rs`: each rejection reason (including a PBO tensor as `NotNativeHandle`) with its slot, count limits, contiguity and pitch rules. `tests/mock.rs`: caller pools, rejection and recovery through `take_buffers` and `set_buffers` |
 | Controls | `tests/mock.rs`: applied, clamped and unsupported outcomes |
 | File source (`file`) | `backend/file/`, with the decoder mocked: the sidecar (a 2.x sidecar, extras, colorimetry labels, version, codec and field errors); the Annex B reader (units across read boundaries, a start code split by a read, leading garbage, a long stretch without start codes, rewind); pacing (spacing, re-anchoring after a stall, requested rate); every picture then `EndOfStream`; `seq` across loops; `encoded()` reproducing the file byte for byte with a reordering decoder; a rejected unit skipped; a damaged picture counted; held pictures blocking until one drops; caller pools refused and handed back. `tests/file.rs`: missing recording and sidecar, an unsupported codec, no decoder off Linux |
@@ -56,7 +56,7 @@ In CI, `.github/scripts/vivid-setup.sh` (run from `ci-setup.sh` on GitHub-hosted
 | `BuffersRejected` | `a_caller_pool_the_driver_refuses_is_rejected`, `a_mismatched_caller_pool_is_rejected_and_recoverable` |
 | `ContiguousUnavailable` | `contiguous_memory_unavailable_is_reported` (hosts without a CMA heap) |
 | Close with frames held | `exported_frames_held_across_close_stay_readable_and_the_device_reopens`, `close_is_deferred_when_the_driver_cannot_orphan_buffers` |
-| Drops, wait handle, exclusivity | `drops_are_counted_from_timestamp_gaps`, `the_wait_handle_polls_ready`, `an_exclusive_device_is_busy_for_a_second_user` |
+| Measured rate, wait handle, exclusivity | `the_rate_is_measured_from_the_frames`, `the_wait_handle_polls_ready`, `an_exclusive_device_is_busy_for_a_second_user` |
 
 vivid has neither a CMA-backed import path nor the i.MX quirks, so contiguous Import, the vvcam flip and `NotReady` after an ISP restart are validated on the boards by the board test suite (`tests/board.rs`). vivid stamps a frame with its simulated end-of-frame time, about one period ahead of delivery, so the `probe` example reports a negative latency on it.
 

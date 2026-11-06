@@ -21,7 +21,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use edgefirst_camera::{
     Applied, BufferPool, Camera, CameraBuilder, CaptureClock, Contiguity, Control, ControlId,
@@ -557,30 +557,26 @@ fn a_signal_during_the_wait_does_not_fail_it() {
 }
 
 #[test]
-fn drops_are_counted_from_timestamp_gaps() {
+fn the_rate_is_measured_from_the_frames() {
     let Some(v) = vivid(SINGLE) else { return };
-    let mut camera = builder(&v).buffers(2).open().unwrap();
+    let mut camera = builder(&v).open().unwrap();
     camera.start().unwrap();
     let fps = camera
         .config()
         .frame_rate
         .expect("vivid reports a frame rate");
-    for _ in 0..4 {
+    assert_eq!(camera.measured_frame_rate(), None);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let measured = loop {
         next(&mut camera);
-    }
-    let held = [next(&mut camera), next(&mut camera)];
-    // With nothing queued vivid skips frames.
-    let starved = Duration::from_millis(300);
-    std::thread::sleep(starved);
-    drop(held);
-    for _ in 0..3 {
-        next(&mut camera);
-    }
-    let missed = (starved.as_secs_f64() * fps) as u64;
-    let dropped = camera.stats().dropped;
+        if let Some(measured) = camera.measured_frame_rate() {
+            break measured;
+        }
+        assert!(Instant::now() < deadline, "no rate measured");
+    };
     assert!(
-        dropped >= missed / 2 && dropped <= missed + 3,
-        "{dropped} dropped for ~{missed} missed periods at {fps} fps"
+        (measured - fps).abs() <= fps * 0.1,
+        "{measured} fps measured, vivid reports {fps}"
     );
 }
 

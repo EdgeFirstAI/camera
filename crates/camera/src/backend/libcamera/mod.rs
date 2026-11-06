@@ -378,7 +378,6 @@ pub(crate) fn open_on(manager: Arc<Manager>, builder: CameraBuilder) -> Result<B
         rate: RateMeter::default(),
         handle,
     };
-    camera.rate.claim(camera.config.frame_rate);
     if let Some(m) = camera.request.mirror {
         if mirror_of(camera.stream.orientation) != Some(m) {
             tracing::warn!("{id}: the pipeline cannot mirror {m:?}");
@@ -642,7 +641,6 @@ impl LibcameraCamera {
         if c.frame_duration_us > 0 {
             let fps = round_fps(1e6 / c.frame_duration_us as f64);
             self.config.frame_rate = Some(fps);
-            self.rate.reports(fps);
         }
     }
 
@@ -673,11 +671,7 @@ impl LibcameraCamera {
             }
         };
         self.note_rate(&c);
-        let tick = self.rate.frame(timestamp.nanos);
-        self.stats.dropped += tick.dropped;
-        if let Some(mismatch) = tick.mismatch {
-            tracing::warn!("{}: {mismatch}", self.id());
-        }
+        self.rate.frame(timestamp.nanos);
         self.last = Some(c);
 
         let pool = self.pool.as_ref().expect("frames come from a pool");
@@ -807,10 +801,9 @@ impl Camera for LibcameraCamera {
                 let us = (1e6 / got).round() as i64;
                 self.pending.frame_duration_min_us = us;
                 self.pending.frame_duration_max_us = us;
-                self.rate.ask(fps);
                 if !self.streaming {
                     self.config.frame_rate = Some(got);
-                    self.rate.claim(self.config.frame_rate);
+                    self.rate.restart();
                 }
                 Ok(applied(fps, got, ControlValue::Float(got)))
             }
@@ -1006,6 +999,10 @@ impl Camera for LibcameraCamera {
 
     fn measured_frame_rate(&self) -> Option<f64> {
         self.rate.measured()
+    }
+
+    fn restart_frame_rate_measurement(&mut self) {
+        self.rate.restart();
     }
 
     fn stats(&self) -> CaptureStats {

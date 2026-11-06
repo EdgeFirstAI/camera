@@ -235,7 +235,6 @@ These are the Maivin's devices (camera `/dev/video3`, encoder `/dev/video0`), an
 
 - Every 2.12 flag and environment variable still exists with the same name and default. None was removed.
 - Topics, message types and `frame_id` values are unchanged, including the tile suffixes (`topleft`, `topright`, `bottomleft`, `bottomright`) and the 1 Hz `tf_static`.
-- Recordings made by 2.12 replay in 3.0, and 2.12 reads the sidecars 3.0 writes when the rate is a whole number.
 - H.264 streams keep the 2.12 settings: constant bitrate, a key frame every second with SPS and PPS in band, High profile.
 - Stamps are acquisition times from `CLOCK_REALTIME`, and the Zenoh sample timestamp carries the same instant.
 
@@ -291,7 +290,7 @@ New subcommands: `devices`, `info`, `record` and `convert`. Without a subcommand
 - **Drop reporting.** The periodic log line reports each output against the frames offered to it, for example `jpeg=127/300`.
 - **JPEG queue.** The JPEG stage always compresses the newest frame. A frame that arrives while another waits replaces it, and the replaced frame counts as a drop.
 - **Logging.** Under systemd, log lines reach the journal once, through journald, and no longer also as stdout text.
-- **Frame rate.** The service logs the rate the camera delivers once measured and whenever it changes, for example when auto-exposure lengthens frames in dim light, and warns when it settles at a rate the camera doesn't report or wasn't asked for. A recording's sidecar is corrected as it goes and ends at the mean rate, which keeps the recording's duration if the rate changed along the way. Camera drops are gaps in the timestamps compared with the frames around them, so a change of rate is not counted as drops, and a camera that steadily loses every other frame shows as a lower rate rather than as drops.
+- **Frame rate.** The service logs the rate the camera delivers, frames over time across about a second, once measured and whenever it changes, for example when auto-exposure lengthens frames in dim light. A recording's sidecar is corrected as it goes and ends at the rate at which the frames in the file last as long as the capture did, which keeps the recording's duration if the rate changed along the way or the encoder missed frames.
 
 **Measured on a Maivin at 1080p30:** H.264 p95 latency is 9.7 ms against 11.8 ms on 2.12, and CPU use is 8.8% against 13.1%.
 
@@ -686,7 +685,7 @@ The `camera/h264` topic forwards the recorded Annex-B bytes **verbatim** — no 
 
 `--mirror` and `--stream-size` do not apply to a `file:` source: the recording was mirrored when it was made, and every output keeps the recording's size. H.264 tiles are encoded from the decoded frames, so, as with live capture, they apply only to recordings larger than 1080p.
 
-The sidecar format (version 1) is unchanged from 2.x, so 2.x recordings replay.
+Replay a recording with the version that made it. Recordings are not supported across 2.x and 3.0 in either direction.
 
 ### Playback outside the camera service
 

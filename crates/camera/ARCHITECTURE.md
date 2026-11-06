@@ -49,7 +49,7 @@ Caller-provided pools are checked by one shared function, `pool::validate`, at `
 
 - it allocates host-memory tensors, or validates a caller pool with `pool::validate`;
 - it keeps them in a `SlotTable`, with a FIFO standing in for the driver queue;
-- it paces frames at the configured rate and counts a lost period as a drop when every buffer is held.
+- it paces frames at the configured rate and skips a period when every buffer is held.
 
 It behaves like an Import backend:
 
@@ -102,11 +102,11 @@ It behaves like an Import backend:
 
 **Controls.** The `ControlSet` comes from the camera's `ControlInfoMap` after configuration: `FrameDurationLimits` as `FrameRate`, `ExposureTime` as `Exposure` (µs), `AnalogueGain` as `Gain` (a `Float` multiplier) and `ColourTemperature` as `WhiteBalance`. Values outside the range are clamped and reported as `Clamped`; a control the camera lacks is `Unsupported(Camera)`. Manual exposure and gain use `ExposureTimeMode` and `AnalogueGainMode` where the pipeline has them and `AeEnable` elsewhere. Manual white balance needs a settable colour temperature; neo takes only `ColourGains`, which would need a calibration, so it is reported unsupported.
 
-**Frame rate.** A requested rate is sent as `FrameDurationLimits`, but some pipelines ignore it (neo runs the OS08A20 at 60 fps), and neo's `FrameDuration` metadata does not match its frame interval either (15.97 ms at 60 fps). `config().frame_rate` is the rate the latest frame's `FrameDuration` metadata reports, so it follows auto-exposure where the metadata does, as PiSP's does. `Camera::measured_frame_rate()` reports separately the rate measured from sensor timestamps, over the first ten frames and each thirty after that. A delivered rate that settles away from the one `config()` reports is logged, so a pipeline that ignores or misreports the request shows as a difference between the two. On neo, `set_control` still answers `Clamped` with the rate `FrameDurationLimits` was clipped to, which the pipeline then ignores.
+**Frame rate.** A requested rate is sent as `FrameDurationLimits`, but some pipelines ignore it (neo runs the OS08A20 at 60 fps), and neo's `FrameDuration` metadata does not match its frame interval either (15.97 ms at 60 fps). `config().frame_rate` is the rate the latest frame's `FrameDuration` metadata reports, so it follows auto-exposure where the metadata does, as PiSP's does. `Camera::measured_frame_rate()` reports separately the rate measured from sensor timestamps (`backend/rate.rs`, shared with V4L2): frames over time across a window of about a second, skipping the first two intervals of a start. It is the plain mean, because any filter would need a claim about what the camera should be doing, and a mean depends only on the first and last timestamps of its window, so jitter cancels out: a Brio 101 stamps 32 and 36 ms at a true 30 fps. A window with a stall in it reads low, including one in which the application wasn't reading, so a caller that stopped reading on purpose calls `restart_frame_rate_measurement()`. On neo, `set_control` still answers `Clamped` with the rate `FrameDurationLimits` was clipped to, which the pipeline then ignores.
 
-**Drops.** Both backends count drops the same way, in `backend/rate.rs`: an interval's frames lost are how many periods it spans, and the period comes from the frames around it: the median of the five intervals centred on it, or the longer of its two neighbours if that is shorter. Neither metadata source can do this. `FrameBuffer` sequence numbers show no gap across a one-second stall on PiSP and neo, nor do V4L2's on vvcam (the ISI's do, and agree with this count); neo's `FrameDuration` never changes; and not every V4L2 driver reports a rate. The median tells a lost frame, a long interval among short ones, from a change of rate, which persists. It delays a count by two frames, skips the first two intervals of a start, and reads a steady loss such as every other frame as a slower camera, which the measured rate shows.
+**Lost frames are not reported.** No per-frame signal for them holds across cameras. `FrameBuffer` sequence numbers show no gap across a one-second stall on PiSP and neo, nor do V4L2's on vvcam, though the ISI's and UVC's do; neo's `FrameDuration` never changes; and not every V4L2 driver reports a rate. A timestamp gap cannot separate a lost frame from a longer exposure either, so the SDK exposes no count until this is researched and tested on more platforms and under changing light.
 
-**Rates just after boot.** Capture timestamps are on `CLOCK_MONOTONIC`, which time synchronisation slews: on an i.MX 95 it ran 2.3% slow against `CLOCK_MONOTONIC_RAW` right after boot and settled within about 30 s. A rate measured in that time is off by as much, and because the measurement keeps going it corrects itself.
+**Rates just after boot.** Capture timestamps are on `CLOCK_MONOTONIC`, which time synchronisation slews: on an i.MX 95 it ran 2.3% slow against `CLOCK_MONOTONIC_RAW` right after boot and settled within about 30 s. A rate measured in that time is off by as much, and it corrects itself as the measurement carries on.
 
 **Timestamps.** `SensorTimestamp`, which the pipelines copy from the capture node's V4L2 buffer timestamp: `CLOCK_MONOTONIC`, at frame start on the RPi receivers (`rp1-cfe`, `unicam`) and at frame end elsewhere. The capture drivers come from `properties::SystemDevices` through `/sys/dev/char`.
 
@@ -118,7 +118,7 @@ It behaves like an Import backend:
 
 ## The file backend
 
-`backend/file/` (feature `file`) plays a recording made by camera 2.x or 3.0: `<name>.h264`, a raw Annex B stream, and its `<name>.json` sidecar.
+`backend/file/` (feature `file`) plays a recording: `<name>.h264`, a raw Annex B stream, and its `<name>.json` sidecar.
 
 The sidecar is the public `Sidecar` (`sidecar.rs`, feature `file`), which recorders also write: version 1, whose `fps`, `width`, `height` and colorimetry (tensor-crate labels) configure the stream, and every other field (`camera_info`, `tf_static`) is kept verbatim as `extras` for `Camera::extras()`. It writes a whole rate as an integer and unspecified colorimetry as empty labels, as 2.x reads them.
 

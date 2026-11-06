@@ -118,7 +118,7 @@ cd src && cargo build  # Where are we now?
 - **Error handling**:
   - Uses `Result<T, Box<dyn Error>>` pattern
   - Logging via `tracing` with a journald layer on Linux
-  - Periodic drop reports for camera and encoder drops
+  - Periodic drop reports for encoder drops
   - Graceful shutdown on SIGTERM/SIGINT (Ctrl+C/Ctrl+Break on Windows)
   - Bounded retry of consecutive camera read timeouts
 

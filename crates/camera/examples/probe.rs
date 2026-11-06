@@ -9,8 +9,7 @@
 //! ```
 //!
 //! Reports the driver and BSP identity, the negotiated format and pitch, what
-//! `Auto` resolved to, contiguity, the frame rate and drops measured over
-//! `--frames`, dequeue latency (time from the capture timestamp to the frame
+//! `Auto` resolved to, contiguity, the frame rate measured over `--frames`, dequeue latency (time from the capture timestamp to the frame
 //! reaching the caller), and the timestamp clock and source. `--close-test`
 //! holds a frame across close, writes a canary into it, reopens and
 //! captures for a second, and checks the canary survived.
@@ -310,7 +309,6 @@ fn main() -> Result<()> {
     j.num("fps_negotiated", c.frame_rate.unwrap_or(f64::NAN));
     j.num("fps_measured", fps);
     j.raw("frames", stats.frames);
-    j.raw("dropped", stats.dropped);
     j.raw("errored", stats.errors);
     j.num("latency_ms_p50", percentile(&latencies, 0.5));
     j.num("latency_ms_p99", percentile(&latencies, 0.99));
