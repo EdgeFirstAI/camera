@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `--h264-fps` (`H264_FPS`): the rate the H.264 encoder is set up for. `auto`, the default, takes 15, 30 or 60 fps, whichever is nearest the rate the camera reports (60 for the i.MX 95 `nxp/neo` pipeline, which reports 62.61); `measure` watches the camera for up to 3 s first and takes the rate it delivers; a number sets it (EDGEAI-1538).
-- The application logs the frame rate the camera delivers once measured, warns when it differs from the rate the driver reports or the encoders were set up for, and corrects a recording's sidecar to it, so the recording plays back at the speed it was captured (EDGEAI-1538).
+- The application logs the frame rate the camera delivers once measured and whenever it changes, and corrects a recording's sidecar to it, so the recording plays back at the speed it was captured (EDGEAI-1538).
 - The application captures from libcamera cameras (`--source libcamera:<id>`) in NV12 into libcamera's buffers, and accepts `CAMERA_MODE` for them through the libcamera probe (EDGEAI-1540).
 - `edgefirst-camera` SDK crate (`crates/camera`): a camera capture API that delivers frames as `edgefirst-tensor` tensors with capture metadata and wall-clock acquisition time, plus the `mock` backend (EDGEAI-1518).
 - `SlotTable`: slot ownership shared by every backend. A buffer is never handed back to the driver while a frame references it, frames keep their memory across `stop()` and closing the camera, and caller-provided pools are validated at `start()` with a reason and slot for any refusal (EDGEAI-1519).
@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Mirror, exposure, gain, white balance, frame rate and any V4L2 control by ID; the i.MX 8M Plus ISP flip quirk.
   - The `probe` example reports what a camera negotiates and delivers on a platform.
   - Drivers that answer `VIDIOC_ENUM_FRAMESIZES` with an error (NXP's `mxc-isi_v1`) list the standard sizes `VIDIOC_TRY_FMT` takes unchanged, with unknown rates, instead of no formats.
-- `Camera::measured_frame_rate`: the rate a camera delivers, measured from capture timestamps after the first frames of a start, next to the rate the driver reports in `config()`. Drops are counted against the reported rate, and both backends log a warning when the two disagree (EDGEAI-1538).
+- `Camera::measured_frame_rate`: the rate a camera delivers, frames over time from capture timestamps across its latest second or so, next to the rate the driver reports in `config()`. `Camera::restart_frame_rate_measurement` starts it again for a caller that stopped reading (EDGEAI-1538).
 - libcamera backend for the SDK (`libcamera:<id>`, feature `libcamera`, default on Linux) for libcamera 0.5 and newer (EDGEAI-1540).
   - `edgefirst-libcamera-sys` (`crates/libcamera-sys`): a C shim over libcamera with a stable ABI (`shim/`, built with meson), its run-time loader, which picks the shim built for the installed libcamera minor, and a mock of the ABI for tests without libcamera.
   - The shim builds against both C++ APIs of libcamera's spans, `libcamera::Span` (to 0.7) and `std::span` (0.8, and Raspberry Pi's 0.7, which gets a `libcamera-0.7-rpi` build of its own). A shim whose symbols do not match the installed libcamera now fails at load, and the next one is tried, instead of ending the process at its first call (EDGEAI-1537).
@@ -50,13 +50,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Development: a Rust 1.94.0 toolchain pin (EDGEAI-1518); the V4L2 ioctl ABI check on every pull request (`make abi-check`) (EDGEAI-1530); SDK capture benchmarks and the on-demand `Camera benchmarks` workflow (`make bench-capture`) (EDGEAI-1530); the platform validation suite `tests/board.rs` and the board lane on the i.MX 8M Plus (V4L2) and i.MX 95 (libcamera) (EDGEAI-1532, EDGEAI-1538); a shim build for libcamera 0.5, 0.6 and 0.7 on x86_64 and aarch64 with an imports check (EDGEAI-1540); and `scripts/parity.sh`, with the `parity` example, which compares the installed service with a new build on a Maivin (EDGEAI-1529).
 - Caller-pool validation rejects memory the tensor crate reports as non-contiguous while contiguity is required (EDGEAI-1520).
 - `schemas` feature: `schema::FrameTensor` maps a `Frame` to an `edgefirst_msgs/CameraFrame` tensor (addressing-grid shape, byte strides at the real pitch, tensor-ABI storage kind and dtype, one plane per buffer plane, colorimetry), with `schema::stamp` and `schema::ntp64` giving the header stamp and the Zenoh sample timestamp of the same instant (EDGEAI-1521).
-- File source for the SDK (`file:<name>.h264` with its `<name>.json` sidecar, feature `file`): plays a camera 2.x recording through the platform's V4L2 H.264 decoder (EDGEAI-1524).
+- File source for the SDK (`file:<name>.h264` with its `<name>.json` sidecar, feature `file`): plays a recording through the platform's V4L2 H.264 decoder (EDGEAI-1524).
   - Frames are paced at the sidecar's rate or a requested one and stamped at delivery like live frames; `config()` reports the size, rate and colorimetry.
   - `Frame::encoded()` carries the access units behind each frame, so forwarding them reproduces the recording byte for byte.
   - `CameraBuilder::looping` restarts the file with `seq` continuous; without it the end is `ErrorKind::EndOfStream`. `Camera::extras()` returns the sidecar's other fields (`camera_info`, `tf_static`) as JSON.
   - Units the decoder rejects and bytes outside any access unit are skipped with a warning.
   - Frames own their decoded pictures, and `Frame::tensor()` borrows the tensor, so no caller keeps reading a buffer after it goes back to the driver or decoder.
-- `Sidecar` in the SDK (feature `file`) reads and writes the version 1 recording sidecar; whole rates are written as integers and unspecified colorimetry as empty labels, as 2.x reads them (EDGEAI-1525).
+- `Sidecar` in the SDK (feature `file`) reads and writes the version 1 recording sidecar; whole rates are written as integers and unspecified colorimetry as empty labels (EDGEAI-1525).
 - Application flags (EDGEAI-1526):
   - `--source` / `SOURCE` selects the frame source: a device path, `libcamera:<id>`, `file:<name>.h264`, or `mock[:WxH@fps]`. Unset uses `--camera` / `CAMERA`.
   - `--camera-fps` / `CAMERA_FPS` requests a capture rate, or sets the playback rate of a `file:` source.
@@ -81,7 +81,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Camera devices are asked for YUYV, which the encoders take directly; a device without it is captured in its current format.
   - A camera that cannot mirror, or rejects the mirror control, is mirrored in the JPEG and H.264 outputs instead, and `camera/frame` is published unmirrored with a warning.
   - The ISP retry at startup keys on the SDK's `NotReady` (`ENOENT` on open, or no first frame in time).
-  - Drop warnings report frames the camera lost, from timestamp gaps, as well as frames dropped at full encoder queues.
+  - Drop warnings report frames dropped at full encoder queues. Frames the camera loses are not reported, because no signal for them holds across cameras (EDGEAI-1540).
+  - The measured and reported frame rates follow the camera instead of describing its first frames: `measured_frame_rate` keeps measuring, and with libcamera `config().frame_rate` follows the frame duration (EDGEAI-1540).
+  - A recording's sidecar ends at the rate at which the frames in the file last as long as the capture did, so a recording keeps its duration if the camera's rate changed or the encoder missed frames (EDGEAI-1540).
   - H.264 tiles are encoded at the quadrant's size, up to 1920x1080, through the encoder's crop where the device can express it.
 - H.264 streams are encoded as 2.x encoded them: constant bitrate, a key frame every second, High profile at the lowest level that fits, and `--h264-bitrate auto` at 0.16 bits per pixel (about 10 Mbps at 1080p30). An encoder without the profile or level controls uses its defaults with a warning (EDGEAI-1529).
 - Under systemd, log lines reach the journal once, through journald, instead of also as stdout text (EDGEAI-1529).

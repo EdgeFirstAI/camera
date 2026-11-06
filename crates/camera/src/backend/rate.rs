@@ -1,90 +1,53 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Au-Zone Technologies. All Rights Reserved.
 
-//! Drop counting against the reported frame rate, and the delivered rate
-//! measured from capture timestamps.
-//!
-//! `config()` reports the rate the driver or pipeline claims. Frames are
-//! counted lost against that claim, so a camera slower than its claim
-//! shows drops and a faster one none. The measured rate is reported
-//! separately, by `Camera::measured_frame_rate`, and a measurement that
-//! contradicts the claim is logged. Frames are never dropped to meet a
-//! rate.
+//! The delivered rate: frames over time, from capture timestamps, over a window
+//! of about a second. A stall lowers the window it falls in.
 
-/// Frames whose timestamp intervals give the measured rate.
-pub(crate) const RATE_FRAMES: usize = 10;
+/// How long each measurement lasts, at least.
+const WINDOW_NANOS: i64 = 1_000_000_000;
 
-/// Relative difference between the claimed and measured rates that is
-/// logged.
-const TOLERANCE: f64 = 0.01;
+/// Frames at the start of a stream left out of the measurement: the intervals
+/// between them can include the sensor starting up.
+const START_FRAMES: u32 = 3;
 
-/// Counts drops against the claimed rate and measures the delivered one.
+/// Measures the delivered rate.
 #[derive(Debug, Default)]
 pub(crate) struct RateMeter {
-    claimed: Option<f64>,
-    last_nanos: Option<i64>,
-    intervals: Vec<i64>,
+    /// Frames of this start seen, up to `START_FRAMES`.
+    started: u32,
+    /// Where the window in progress began.
+    first_nanos: i64,
+    /// Intervals in the window in progress.
+    intervals: u64,
     measured: Option<f64>,
 }
 
-/// What one frame told the meter.
-#[derive(Debug, Default, PartialEq)]
-pub(crate) struct Tick {
-    /// Frames lost since the previous one, against the claimed rate.
-    pub(crate) dropped: u64,
-    /// The claimed and measured rates, on the frame that completed a
-    /// measurement contradicting the claim.
-    pub(crate) disagrees: Option<(f64, f64)>,
-}
-
 impl RateMeter {
-    /// Sets the rate the driver or pipeline claims and measures again.
-    pub(crate) fn claim(&mut self, fps: Option<f64>) {
-        self.claimed = fps.filter(|f| f.is_finite() && *f > 0.0);
-        self.intervals.clear();
-        self.measured = None;
-    }
-
-    /// Forgets the stream, for a stop: the next frame starts no interval.
+    /// Forgets the stream, for a stop or a new rate.
     pub(crate) fn restart(&mut self) {
-        self.last_nanos = None;
-        self.intervals.clear();
-        self.measured = None;
+        *self = Self::default();
     }
 
-    /// The delivered rate, once measured since the last start or claim.
+    /// The rate over the latest whole window since the last restart.
     pub(crate) fn measured(&self) -> Option<f64> {
         self.measured
     }
 
     /// Takes the capture timestamp of a delivered frame.
-    pub(crate) fn frame(&mut self, nanos: i64) -> Tick {
-        let mut tick = Tick::default();
-        let Some(last) = self.last_nanos.replace(nanos) else {
-            return tick;
-        };
-        let interval = nanos - last;
-        if interval <= 0 {
-            return tick;
+    pub(crate) fn frame(&mut self, nanos: i64) {
+        if self.started < START_FRAMES {
+            self.started += 1;
+            self.first_nanos = nanos;
+            return;
         }
-        if let Some(fps) = self.claimed {
-            let periods = (interval as f64 * fps / 1e9).round() as i64;
-            tick.dropped = periods.saturating_sub(1).max(0) as u64;
+        self.intervals += 1;
+        let span = nanos - self.first_nanos;
+        if span >= WINDOW_NANOS {
+            self.measured = Some(round_fps(self.intervals as f64 * 1e9 / span as f64));
+            self.first_nanos = nanos;
+            self.intervals = 0;
         }
-        if self.measured.is_none() {
-            self.intervals.push(interval);
-            if self.intervals.len() == RATE_FRAMES {
-                // The median ignores intervals that span a lost frame.
-                self.intervals.sort_unstable();
-                let fps = round_fps(1e9 / self.intervals[RATE_FRAMES / 2] as f64);
-                self.measured = Some(fps);
-                tick.disagrees = self
-                    .claimed
-                    .filter(|c| (fps - c).abs() > c * TOLERANCE)
-                    .map(|c| (c, fps));
-            }
-        }
-        tick
     }
 }
 
@@ -98,80 +61,93 @@ mod tests {
     use super::*;
 
     const MS: i64 = 1_000_000;
+    const AT_30_FPS: i64 = 33_333_333;
 
-    fn feed(meter: &mut RateMeter, period: i64, n: usize, start: i64) -> (Vec<Tick>, i64) {
-        let mut t = start;
-        let ticks = (0..n)
-            .map(|_| {
-                let tick = meter.frame(t);
-                t += period;
-                tick
-            })
-            .collect();
-        (ticks, t)
-    }
-
-    #[test]
-    fn a_camera_faster_than_its_claim_drops_nothing_and_is_measured() {
-        let mut m = RateMeter::default();
-        m.claim(Some(30.0));
-        let (ticks, _) = feed(&mut m, 16_667 * 1000, RATE_FRAMES + 1, 0);
-        assert!(ticks.iter().all(|t| t.dropped == 0));
-        assert_eq!(ticks[RATE_FRAMES].disagrees, Some((30.0, 60.0)));
-        assert_eq!(m.measured(), Some(60.0));
-    }
-
-    #[test]
-    fn a_camera_slower_than_its_claim_counts_drops() {
-        let mut m = RateMeter::default();
-        m.claim(Some(60.0));
-        let (ticks, _) = feed(&mut m, 33_333_333, RATE_FRAMES + 1, 0);
-        assert_eq!(
-            ticks.iter().map(|t| t.dropped).sum::<u64>(),
-            RATE_FRAMES as u64
-        );
-        assert_eq!(m.measured(), Some(30.0));
-    }
-
-    #[test]
-    fn a_matching_claim_does_not_disagree() {
-        let mut m = RateMeter::default();
-        m.claim(Some(30.0));
-        let (ticks, _) = feed(&mut m, 33_333_333, RATE_FRAMES + 1, 0);
-        assert!(ticks.iter().all(|t| *t == Tick::default()));
-        assert_eq!(m.measured(), Some(30.0));
-    }
-
-    #[test]
-    fn a_lost_frame_counts_once_and_does_not_skew_the_measurement() {
-        let mut m = RateMeter::default();
-        m.claim(Some(30.0));
-        let mut t = 0;
-        let mut dropped = 0;
-        for i in 0..=RATE_FRAMES {
-            dropped += m.frame(t).dropped;
-            t += if i == 3 { 66 * MS } else { 33 * MS };
+    /// Feeds frames at `intervals`, after any before them.
+    fn feed(meter: &mut RateMeter, last: &mut Option<i64>, intervals: &[i64]) {
+        let mut t = last.unwrap_or_else(|| {
+            meter.frame(0);
+            0
+        });
+        for interval in intervals {
+            t += interval;
+            meter.frame(t);
         }
-        assert_eq!(dropped, 1);
-        assert_eq!(m.measured(), Some(round_fps(1e9 / (33 * MS) as f64)));
+        *last = Some(t);
+    }
+
+    fn measured_after(intervals: &[i64]) -> Option<f64> {
+        let mut meter = RateMeter::default();
+        feed(&mut meter, &mut None, intervals);
+        meter.measured()
     }
 
     #[test]
-    fn no_claim_counts_no_drops_but_still_measures() {
-        let mut m = RateMeter::default();
-        let (ticks, _) = feed(&mut m, 100 * MS, RATE_FRAMES + 1, 0);
-        assert!(ticks.iter().all(|t| *t == Tick::default()));
-        assert_eq!(m.measured(), Some(10.0));
+    fn nothing_is_measured_until_a_window_has_ended() {
+        assert_eq!(measured_after(&[AT_30_FPS; 25]), None);
+        assert_eq!(measured_after(&[AT_30_FPS; 40]), Some(30.0));
     }
 
     #[test]
-    fn a_new_claim_measures_again_and_a_restart_starts_no_interval() {
-        let mut m = RateMeter::default();
-        let (_, t) = feed(&mut m, 33 * MS, RATE_FRAMES + 1, 0);
-        assert!(m.measured().is_some());
-        m.claim(Some(15.0));
-        assert_eq!(m.measured(), None);
-        m.restart();
-        assert_eq!(m.frame(t + 1000 * MS), Tick::default());
+    fn the_start_of_a_stream_is_left_out() {
+        let mut intervals = vec![348 * MS, 200 * MS];
+        intervals.extend([AT_30_FPS; 40]);
+        assert_eq!(measured_after(&intervals), Some(30.0));
+    }
+
+    /// The Brio 101: timestamps quantised to the USB frame, at a true 30 fps.
+    #[test]
+    fn jittery_timestamps_average_out_in_every_window() {
+        let mut meter = RateMeter::default();
+        let mut last = None;
+        for _ in 0..30 {
+            feed(
+                &mut meter,
+                &mut last,
+                &[32 * MS, 32 * MS, 36 * MS].repeat(11),
+            );
+            let fps = meter.measured().unwrap();
+            assert!((fps - 30.0).abs() < 0.3, "{fps}");
+        }
+    }
+
+    #[test]
+    fn a_stall_lowers_the_window_it_is_in_and_no_other() {
+        let mut meter = RateMeter::default();
+        let mut last = None;
+        feed(&mut meter, &mut last, &[AT_30_FPS; 40]);
+        feed(&mut meter, &mut last, &[AT_30_FPS; 2]);
+        feed(&mut meter, &mut last, &[1000 * MS]);
+        assert!(meter.measured().unwrap() < 15.0, "{:?}", meter.measured());
+        feed(&mut meter, &mut last, &[AT_30_FPS; 35]);
+        assert_eq!(meter.measured(), Some(30.0));
+    }
+
+    #[test]
+    fn the_measurement_follows_the_camera() {
+        let mut meter = RateMeter::default();
+        let mut last = None;
+        feed(&mut meter, &mut last, &[AT_30_FPS; 40]);
+        assert_eq!(meter.measured(), Some(30.0));
+        // The window under way when the rate changes, then one at the new rate.
+        feed(&mut meter, &mut last, &[66_666_667; 32]);
+        assert_eq!(meter.measured(), Some(15.0));
+    }
+
+    #[test]
+    fn a_slow_camera_takes_no_longer_than_a_fast_one() {
+        assert_eq!(measured_after(&[200 * MS; 8]), Some(5.0));
+    }
+
+    #[test]
+    fn a_restart_forgets_the_stream() {
+        let mut meter = RateMeter::default();
+        let mut last = None;
+        feed(&mut meter, &mut last, &[AT_30_FPS; 40]);
+        assert!(meter.measured().is_some());
+        meter.restart();
+        assert_eq!(meter.measured(), None);
+        meter.frame(0);
+        assert_eq!(meter.measured(), None);
     }
 }

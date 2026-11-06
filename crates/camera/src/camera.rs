@@ -22,9 +22,6 @@ pub struct CaptureStats {
     pub queued: usize,
     /// Buffers currently held by frames.
     pub held: usize,
-    /// Frames lost, counted from timestamp gaps against the negotiated
-    /// frame interval.
-    pub dropped: u64,
     /// `next_frame` calls that timed out.
     pub timeouts: u64,
     /// Buffers the driver flagged as errored and the backend skipped.
@@ -142,18 +139,21 @@ pub trait Camera: Send + std::fmt::Debug {
     /// Capture counters.
     fn stats(&self) -> CaptureStats;
 
-    /// The frame rate the camera delivers, measured from capture
-    /// timestamps once enough frames have arrived since the last start;
-    /// `None` before then or where the backend does not measure it.
+    /// The frame rate the camera delivers: frames over time, from capture
+    /// timestamps, over the latest window of about a second. It follows the
+    /// camera as auto-exposure or a new rate changes it, and a stall lowers it
+    /// for one window. `None` until a window has ended since the last start,
+    /// or where the backend does not measure it.
     ///
     /// [`StreamConfig::frame_rate`](crate::StreamConfig::frame_rate) is the
-    /// rate the driver reports, which drops are counted against: a camera
-    /// running slower than it reports shows drops, and the measured rate
-    /// tells how fast it actually runs. The backend logs a warning when the
-    /// two disagree.
+    /// rate the camera reports.
     fn measured_frame_rate(&self) -> Option<f64> {
         None
     }
+
+    /// Starts measuring again from the next frame, for a caller that stopped
+    /// reading for a while, so the time it was away is not taken for the rate.
+    fn restart_frame_rate_measurement(&mut self) {}
 
     /// A pollable handle, where the backend has one.
     fn wait_handle(&self) -> Option<WaitHandle>;

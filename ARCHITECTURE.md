@@ -116,9 +116,9 @@ Because queued and in-flight frames hold buffers, the pool is `CAMERA_BUFFERS` p
 
 ### Drops
 
-`try_send` never blocks capture: a full queue drops the frame for that encoder. kanal reports a full channel as `Ok(false)` and a closed one as `Err`, and both count as drops. Frames the camera lost are counted by the SDK from timestamp gaps against the negotiated rate (`CaptureStats::dropped`), which needs a camera that reports its rate. Both are summarised in one warning per 10 s window, with each output reported against the frames offered to it (`jpeg=127/300` is 127 frames accepted of 300 offered).
+`try_send` never blocks capture: a full queue drops the frame for that encoder. kanal reports a full channel as `Ok(false)` and a closed one as `Err`, and both count as drops. They are summarised in one warning per 10 s window, with each output reported against the frames offered to it (`jpeg=127/300` is 127 frames accepted of 300 offered).
 
-At startup, the frames the camera captured while the encoders opened are discarded before the loop begins: they are stale, and the gap behind them is not a capture loss.
+At startup, the frames the camera captured while the encoders opened are discarded before the loop begins, because they are stale. Frames the camera itself loses are not counted: no signal for them holds across cameras (see the SDK's `ARCHITECTURE.md`).
 
 ---
 
@@ -221,7 +221,7 @@ The SDK's `edgefirst_camera::Sidecar` reads and writes it. `fps`, `width`, `heig
 
 ### Recording (`--record <path>`)
 
-The recording file is created and the sidecar written before any frame flows, so a recording that cannot start fails the service without an orphaned sidecar. The sidecar's size is the stream size, its rate the capture rate, its colorimetry the camera's, and its `camera_info` and `tf_static` those being published.
+The recording file is created and the sidecar written before any frame flows, so a recording that cannot start fails the service without an orphaned sidecar. The sidecar's size is the stream size, its rate the capture rate, its colorimetry the camera's, and its `camera_info` and `tf_static` those being published. Once the encoder has drained, the rate is corrected to the one at which the frames written last as long as the capture did: the mean rate of the capture, without the time a camera was away, scaled by the share of its frames that reached the file.
 
 ### Replay (`--source file:<path>`)
 

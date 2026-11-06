@@ -16,7 +16,7 @@ use std::{
     io::{BufWriter, Write},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Condvar, Mutex, PoisonError,
     },
     thread::{self, JoinHandle},
@@ -24,6 +24,7 @@ use std::{
 };
 
 use edgefirst_camera::{
+    rates_differ,
     schema::{self, FrameTensor},
     Camera, ErrorKind, Frame, Mirror, Sidecar, StreamConfig,
 };
@@ -126,9 +127,9 @@ struct Progress {
     since_open: u64,
     /// When `max_duration` runs out.
     deadline: Option<Instant>,
-    /// Whether the current camera's measured rate was reported.
-    measured: bool,
-    /// The recording's sidecar, corrected to the measured rate.
+    /// The current camera's measured rate as last reported.
+    measured: Option<f64>,
+    /// The recording's sidecar, corrected to the rate delivered.
     sidecar: Option<SidecarFile>,
     /// Whether systemd was told the service is ready.
     ready: bool,
@@ -149,6 +150,112 @@ impl Progress {
 struct SidecarFile {
     stream: PathBuf,
     sidecar: Sidecar,
+    captured: CapturedSpan,
+    /// Frames in the recording so far.
+    recorded: Arc<AtomicU64>,
+}
+
+impl SidecarFile {
+    /// Sets the sidecar's rate, unless it is already within the tolerance.
+    fn correct(&mut self, fps: f64) {
+        if !rates_differ(self.sidecar.fps, fps) {
+            return;
+        }
+        self.sidecar.fps = fps;
+        match self.sidecar.write(&self.stream) {
+            Ok(path) => info!("Recording sidecar {} set to {fps} fps", path.display()),
+            Err(e) => error!("cannot correct the recording sidecar: {e}"),
+        }
+    }
+
+    /// Sets the sidecar's rate to the one at which the frames in the file last
+    /// as long as the capture did. Only for when the encoder has drained: until
+    /// then the frames it holds are not in the file yet.
+    fn finish(&mut self) {
+        let recorded = self.recorded.load(Ordering::Relaxed);
+        if let Some(fps) = self.captured.recorded_fps(recorded) {
+            self.correct(fps);
+        }
+    }
+}
+
+/// Where the main stream is recorded.
+#[derive(Debug)]
+struct Recorder {
+    writer: BufWriter<File>,
+    /// Frames written, one per access unit.
+    recorded: Arc<AtomicU64>,
+}
+
+impl Recorder {
+    fn write(&mut self, au: &EncodedFrame) -> std::io::Result<()> {
+        write_recording(&mut self.writer, &au.data, au.keyframe)?;
+        self.recorded.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+/// How long the frames of a recording took, without the time a camera was
+/// away, for the mean rate that keeps a rate-changing recording's duration.
+#[derive(Debug, Default)]
+struct CapturedSpan {
+    /// Frames captured, all of which were offered to the encoder.
+    frames: u64,
+    /// Intervals of the current camera not counted yet, which skip its start.
+    settling: u32,
+    last_nanos: Option<i64>,
+    intervals: u64,
+    nanos: i64,
+}
+
+impl CapturedSpan {
+    /// Intervals at the start of a camera that may include the sensor
+    /// starting up.
+    const SETTLING: u32 = 2;
+    /// Intervals below which a mean during a recording says more about the
+    /// start than the rate. A finished recording has all it will ever have.
+    const MIN_INTERVALS: u64 = 30;
+
+    fn frame(&mut self, nanos: i64) {
+        self.frames += 1;
+        let Some(last) = self.last_nanos.replace(nanos) else {
+            return;
+        };
+        if self.settling < Self::SETTLING {
+            self.settling += 1;
+        } else if nanos > last {
+            self.intervals += 1;
+            self.nanos += nanos - last;
+        }
+    }
+
+    /// The next frame comes from a new camera, or after a gap in this one.
+    fn camera_changed(&mut self) {
+        self.settling = 0;
+        self.last_nanos = None;
+    }
+
+    fn mean(&self) -> Option<f64> {
+        (self.nanos > 0).then(|| round_fps(self.intervals as f64 * 1e9 / self.nanos as f64))
+    }
+
+    /// The mean rate so far, once there are enough intervals to trust.
+    fn mean_fps(&self) -> Option<f64> {
+        self.mean()
+            .filter(|_| self.intervals >= Self::MIN_INTERVALS)
+    }
+
+    /// The mean rate of a finished recording, for the `recorded` of its frames
+    /// that reached the file.
+    fn recorded_fps(&self, recorded: u64) -> Option<f64> {
+        let mean = self.mean()?;
+        (recorded > 0).then(|| round_fps(mean * recorded as f64 / self.frames as f64))
+    }
+}
+
+/// A rate rounded to hundredths, as the SDK reports them.
+fn round_fps(fps: f64) -> f64 {
+    (fps * 100.0).round() / 100.0
 }
 
 /// The rate the encoders are set up for, from `--h264-fps`.
@@ -206,35 +313,18 @@ fn measure(camera: &mut dyn Camera) -> Option<f64> {
     }
 }
 
-/// Relative difference between two frame rates that is reported.
-const RATE_TOLERANCE: f64 = 0.01;
-
-fn rates_differ(a: f64, b: f64) -> bool {
-    (a - b).abs() > b * RATE_TOLERANCE
-}
-
-/// Reports the rate the camera delivers against the one its driver
-/// reports and the one the encoders were set up for, and corrects the
-/// recording's sidecar to it, so a recording plays back at the speed it
-/// was captured.
-fn report_rate(measured: f64, reported: Option<f64>, used: f64, sidecar: Option<&mut SidecarFile>) {
-    info!("Measured {measured} fps");
-    match reported {
-        Some(r) if rates_differ(r, measured) => {
-            warn!("the camera reports {r} fps but delivers {measured} fps");
-        }
-        None => warn!("the camera reports no frame rate; it delivers {measured} fps"),
-        Some(_) => {}
-    }
+/// Reports the rate the camera delivers against the one the encoders were
+/// set up for, and corrects the recording's sidecar, so a recording plays back
+/// at the speed it was captured: to the mean rate so far once there is one,
+/// since a recording has one rate however often the camera's changed.
+fn report_rate(measured: f64, used: f64, sidecar: Option<&mut SidecarFile>) {
     if rates_differ(used, measured) {
-        warn!("the encoders were set up for {used} fps; the camera delivers {measured} fps");
+        info!("Measured {measured} fps; the encoders were set up for {used} fps");
+    } else {
+        info!("Measured {measured} fps");
     }
-    if let Some(file) = sidecar.filter(|f| rates_differ(f.sidecar.fps, measured)) {
-        file.sidecar.fps = measured;
-        match file.sidecar.write(&file.stream) {
-            Ok(path) => info!("Recording sidecar {} set to {measured} fps", path.display()),
-            Err(e) => error!("cannot correct the recording sidecar: {e}"),
-        }
+    if let Some(file) = sidecar {
+        file.correct(file.captured.mean_fps().unwrap_or(measured));
     }
 }
 
@@ -349,7 +439,7 @@ pub(crate) fn run(
         captured: 0,
         since_open: 0,
         deadline: settings.max_duration.map(|d| Instant::now() + d),
-        measured: false,
+        measured: None,
         sidecar,
         ready: false,
         stalled: None,
@@ -388,6 +478,9 @@ pub(crate) fn run(
     };
 
     drop(workers);
+    if let Some(file) = progress.sidecar.as_mut() {
+        file.finish();
+    }
     done.store(true, Ordering::SeqCst);
     let _ = tf.join();
     if let Some(mut camera) = camera {
@@ -442,7 +535,10 @@ fn replace_camera(
     info!("Camera reopened; capturing again");
     progress.seq_base = progress.next_seq;
     progress.since_open = 0;
-    progress.measured = false;
+    progress.measured = None;
+    if let Some(file) = progress.sidecar.as_mut() {
+        file.captured.camera_changed();
+    }
     *camera = Some(next);
     Ok(true)
 }
@@ -464,7 +560,7 @@ impl Encoders<'_> {
     fn add_main_h264(
         &self,
         workers: &mut Workers,
-        recorder: Option<BufWriter<File>>,
+        recorder: Option<Recorder>,
     ) -> Result<(), Box<dyn Error>> {
         let plan = Plan {
             label: "h264".into(),
@@ -525,7 +621,7 @@ impl Encoders<'_> {
         frame_id: &str,
         sink: &'static str,
         thread: &str,
-        recorder: Option<BufWriter<File>>,
+        recorder: Option<Recorder>,
     ) -> Result<(), Box<dyn Error>> {
         let stage = Stage::new(plan, self.config, self.open_encoder)?;
         let (tx, rx) = kanal::bounded(H264_QUEUE);
@@ -596,13 +692,14 @@ fn same_stream(
     Ok(())
 }
 
-/// Discards the frames captured while the encoders started: they are
-/// stale, and the gap behind them is no capture loss.
+/// Discards the frames captured while the encoders started, which are stale,
+/// and measures the rate from the frames after them.
 fn discard_waiting(camera: &mut dyn Camera) {
     let mut stale = 0;
     while camera.next_frame(Some(Duration::ZERO)).is_ok() {
         stale += 1;
     }
+    camera.restart_frame_rate_measurement();
     if stale > 0 {
         debug!("discarded {stale} frames captured while the encoders started");
     }
@@ -708,11 +805,11 @@ impl Sink {
 }
 
 /// When an encoder thread last finished with a frame.
-struct Heartbeat(std::sync::atomic::AtomicU64);
+struct Heartbeat(AtomicU64);
 
 impl Heartbeat {
     fn new() -> Arc<Self> {
-        let h = Arc::new(Self(std::sync::atomic::AtomicU64::new(0)));
+        let h = Arc::new(Self(AtomicU64::new(0)));
         h.beat();
         h
     }
@@ -855,7 +952,7 @@ fn open_recording(
     config: &StreamConfig,
     info: &CameraInfoFields,
     tf: &TfStaticFields,
-) -> Result<(BufWriter<File>, SidecarFile), Box<dyn Error>> {
+) -> Result<(Recorder, SidecarFile), Box<dyn Error>> {
     let file = File::create(path)
         .map_err(|e| format!("cannot create recording file {}: {e}", path.display()))?;
     let mut sidecar = Sidecar::new(fps, stream.0, stream.1);
@@ -867,11 +964,17 @@ fn open_recording(
         path.display(),
         written.display()
     );
+    let recorded = Arc::new(AtomicU64::new(0));
     Ok((
-        BufWriter::with_capacity(256 * 1024, file),
+        Recorder {
+            writer: BufWriter::with_capacity(256 * 1024, file),
+            recorded: Arc::clone(&recorded),
+        },
         SidecarFile {
             stream: path.clone(),
             sidecar,
+            captured: CapturedSpan::default(),
+            recorded,
         },
     ))
 }
@@ -936,9 +1039,6 @@ fn capture(
     let mut retry = ReadRetry::new(MAX_CONSECUTIVE_READ_FAILURES);
     let mut drops = DropStats::new(DROP_REPORT_INTERVAL, Instant::now());
     let mut rate = Rate::new();
-    // Frames the camera lost before the first one read (while the encoders
-    // started) are not capture losses; the baseline is the first frame's.
-    let mut lost: Option<u64> = None;
 
     while !shutdown.load(Ordering::SeqCst) {
         if progress.limit_reached(settings) {
@@ -952,6 +1052,9 @@ fn capture(
         };
         progress.captured += 1;
         progress.since_open += 1;
+        if let Some(file) = progress.sidecar.as_mut() {
+            file.captured.frame(frame.timestamp().nanos);
+        }
         note_measured_rate(camera, progress, fps);
         let seq = progress.seq_base + frame.seq();
         progress.next_seq = seq + 1;
@@ -970,9 +1073,6 @@ fn capture(
         hand_to_encoders(sinks, frame, stamp, &mut drops)?;
         report_health(sinks, progress, config, fps);
 
-        let dropped = camera.stats().dropped;
-        drops.record_camera(dropped.saturating_sub(lost.unwrap_or(dropped)));
-        lost = Some(dropped);
         if let Some(report) = drops.take_report(Instant::now()) {
             warn!("{report}");
         }
@@ -1026,20 +1126,20 @@ fn read_frame(
     }
 }
 
-/// Reports the camera's measured rate once per camera, when it has one.
+/// Reports the camera's measured rate when it first has one and whenever it
+/// changes.
 fn note_measured_rate(camera: &dyn Camera, progress: &mut Progress, fps: f64) {
-    if progress.measured {
+    let Some(measured) = camera.measured_frame_rate() else {
+        return;
+    };
+    if progress
+        .measured
+        .is_some_and(|last| !rates_differ(measured, last))
+    {
         return;
     }
-    if let Some(measured) = camera.measured_frame_rate() {
-        progress.measured = true;
-        report_rate(
-            measured,
-            camera.config().frame_rate,
-            fps,
-            progress.sidecar.as_mut(),
-        );
-    }
+    progress.measured = Some(measured);
+    report_rate(measured, fps, progress.sidecar.as_mut());
 }
 
 /// Offers `frame` to every encoder. An encoder thread that is gone ends
@@ -1171,13 +1271,13 @@ fn run_stage(
     mut stage: Stage,
     rx: &impl Inbox,
     out: Output,
-    mut recorder: Option<BufWriter<File>>,
+    mut recorder: Option<Recorder>,
     tracy: bool,
     heartbeat: &Heartbeat,
 ) {
-    let publish = |au: EncodedFrame, stamp: Time, recorder: &mut Option<BufWriter<File>>| {
-        if let Some(w) = recorder.as_mut() {
-            if let Err(e) = write_recording(w, &au.data, au.keyframe) {
+    let publish = |au: EncodedFrame, stamp: Time, recorder: &mut Option<Recorder>| {
+        if let Some(r) = recorder.as_mut() {
+            if let Err(e) = r.write(&au) {
                 error!("h264 recorder write failed: {e}");
             }
         }
@@ -1222,8 +1322,8 @@ fn run_stage(
             .for_each(|(au, stamp)| publish(au, stamp, &mut recorder)),
         Err(e) => warn!("{}: flushing the encoder: {e}", stage.label()),
     }
-    if let Some(mut w) = recorder.take() {
-        if let Err(e) = w.flush() {
+    if let Some(mut r) = recorder.take() {
+        if let Err(e) = r.writer.flush() {
             error!("h264 recorder final flush failed: {e}");
         }
     }
@@ -1331,8 +1431,8 @@ impl Rate {
     }
 }
 
-/// Counters for frames lost: by the camera (from its capture stats), and
-/// by each encoder that was still busy with an earlier frame.
+/// Counters for frames lost by each encoder that was still busy with an
+/// earlier frame.
 ///
 /// Encoder drops are expected under load, and dropping is the right
 /// response; counting them is what lets an operator see that a recording
@@ -1341,7 +1441,6 @@ impl Rate {
 pub(crate) struct DropStats {
     /// Per sink: frames offered and frames dropped.
     sinks: BTreeMap<&'static str, (u64, u64)>,
-    camera: u64,
     interval: Duration,
     last_report: Instant,
 }
@@ -1350,7 +1449,6 @@ impl DropStats {
     pub(crate) fn new(interval: Duration, now: Instant) -> Self {
         Self {
             sinks: BTreeMap::new(),
-            camera: 0,
             interval,
             last_report: now,
         }
@@ -1365,11 +1463,6 @@ impl DropStats {
         }
     }
 
-    /// Frames the camera lost since the last call.
-    pub(crate) fn record_camera(&mut self, lost: u64) {
-        self.camera = self.camera.saturating_add(lost);
-    }
-
     /// A one-line summary of the window just ended, or `None` while the
     /// interval has not elapsed or nothing was lost. Taking a report resets
     /// the window.
@@ -1378,22 +1471,14 @@ impl DropStats {
             return None;
         }
         self.last_report = now;
-        let mut parts = Vec::new();
-        if self.camera > 0 {
-            parts.push(format!("camera dropped {} frames", self.camera));
-        }
         let busy: Vec<String> = self
             .sinks
             .iter()
             .filter(|(_, (_, dropped))| *dropped > 0)
             .map(|(sink, (offered, dropped))| format!("{sink}={dropped}/{offered}"))
             .collect();
-        if !busy.is_empty() {
-            parts.push(format!("encoders busy, frames dropped: {}", busy.join(" ")));
-        }
         self.sinks.clear();
-        self.camera = 0;
-        (!parts.is_empty()).then(|| parts.join("; "))
+        (!busy.is_empty()).then(|| format!("encoders busy, frames dropped: {}", busy.join(" ")))
     }
 }
 
@@ -1430,14 +1515,19 @@ impl ReadRetry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encode::tests::open_fake;
+    use crate::encode::{tests::open_fake, Encode};
     use crate::source::{self, Request};
     use clap::Parser;
+    use edgefirst_codec::{
+        video::{EncoderConfig, FrameOptions},
+        CodecError,
+    };
     use edgefirst_schemas::{
         foxglove_msgs::FoxgloveCompressedVideo,
         geometry_msgs::TransformStamped,
         sensor_msgs::{CameraInfo, CompressedImage},
     };
+    use edgefirst_tensor::TensorDyn;
     use std::collections::{BTreeSet, HashMap};
     use std::sync::Mutex;
 
@@ -1522,18 +1612,6 @@ mod tests {
         assert!(stats.take_report(t0 + Duration::from_secs(1)).is_none());
         let report = stats.take_report(t0 + Duration::from_secs(11)).unwrap();
         assert_eq!(report, "encoders busy, frames dropped: jpeg=100/300");
-    }
-
-    #[test]
-    fn drop_stats_reports_camera_drops() {
-        let t0 = Instant::now();
-        let mut stats = DropStats::new(Duration::from_secs(10), t0);
-        stats.record_camera(3);
-        stats.record_camera(0);
-        let report = stats.take_report(t0 + Duration::from_secs(11)).unwrap();
-        assert_eq!(report, "camera dropped 3 frames");
-        stats.record("h264", Offer::Sent);
-        assert!(stats.take_report(t0 + Duration::from_secs(22)).is_none());
     }
 
     #[test]
@@ -1907,7 +1985,7 @@ mod tests {
             .sum();
         assert_eq!(std::fs::metadata(&path).unwrap().len() as usize, published);
         let sidecar = Sidecar::load(&path).unwrap();
-        assert_eq!((sidecar.width, sidecar.height, sidecar.fps), (64, 48, 30.0));
+        assert_eq!((sidecar.width, sidecar.height), (64, 48));
         let extras: serde_json::Value = serde_json::from_str(&sidecar.extras).unwrap();
         assert_eq!(extras["camera_info"]["frame_id"], "rec");
         assert_eq!(extras["tf_static"]["child_frame_id"], "rec");
@@ -1940,17 +2018,157 @@ mod tests {
         let mut file = SidecarFile {
             stream: stream.clone(),
             sidecar: Sidecar::new(30.0, 64, 48),
+            captured: CapturedSpan::default(),
+            recorded: Arc::default(),
         };
         file.sidecar.write(&stream).unwrap();
-        report_rate(30.1, Some(30.0), 30.0, Some(&mut file));
+        report_rate(30.1, 30.0, Some(&mut file));
         assert_eq!(
             Sidecar::load(&stream).unwrap().fps,
             30.0,
             "within tolerance"
         );
-        report_rate(60.02, Some(30.0), 30.0, Some(&mut file));
+        report_rate(60.02, 30.0, Some(&mut file));
         assert_eq!(Sidecar::load(&stream).unwrap().fps, 60.02);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_rate_changing_recording_gets_the_mean_rate() {
+        const MS: i64 = 1_000_000;
+        let mut span = CapturedSpan::default();
+        let mut t = 0;
+        // The start, then 100 frames at 10 fps and 100 at 20 fps.
+        span.frame(t);
+        for interval in [500, 500].into_iter().chain([100; 100]).chain([50; 100]) {
+            t += interval * MS;
+            span.frame(t);
+        }
+        assert_eq!(span.mean_fps(), Some(13.33));
+
+        // The time a camera was away is not part of the recording.
+        span.camera_changed();
+        t += 60_000 * MS;
+        span.frame(t);
+        assert_eq!(span.mean_fps(), Some(13.33));
+    }
+
+    #[test]
+    fn a_short_recording_has_no_mean_rate() {
+        let mut span = CapturedSpan::default();
+        for i in 0..10 {
+            span.frame(i * 33_000_000);
+        }
+        assert_eq!(span.mean_fps(), None);
+    }
+
+    #[test]
+    fn frames_that_missed_the_recording_lower_its_rate() {
+        let mut span = CapturedSpan::default();
+        for i in 0..101 {
+            span.frame(i * 33_333_333);
+        }
+        assert_eq!(span.mean_fps(), Some(30.0));
+        assert_eq!(span.recorded_fps(101), Some(30.0));
+        assert_eq!(span.recorded_fps(50), Some(14.85));
+        assert_eq!(span.recorded_fps(0), None);
+    }
+
+    #[test]
+    fn frames_that_missed_a_short_recording_lower_its_rate() {
+        let mut span = CapturedSpan::default();
+        for i in 0..20 {
+            span.frame(i * 200_000_000);
+        }
+        assert_eq!(span.mean_fps(), None);
+        assert_eq!(span.recorded_fps(20), Some(5.0));
+        assert_eq!(span.recorded_fps(10), Some(2.5));
+    }
+
+    #[test]
+    fn a_recording_too_short_to_time_has_no_rate() {
+        let mut span = CapturedSpan::default();
+        for i in 0..3 {
+            span.frame(i * 200_000_000);
+        }
+        assert_eq!(span.recorded_fps(2), None);
+    }
+
+    /// An encoder that skips every other frame and holds the rest until it is
+    /// flushed, so the frames only reach the recording once it has drained.
+    fn open_skipping(_: EncoderConfig) -> Result<Box<dyn Encode>, CodecError> {
+        struct Skipping(Vec<EncodedFrame>);
+        impl Encode for Skipping {
+            fn encode(
+                &mut self,
+                _: &TensorDyn,
+                opts: &FrameOptions,
+            ) -> Result<Option<EncodedFrame>, CodecError> {
+                if opts.pts.is_multiple_of(2) {
+                    self.0.push(EncodedFrame {
+                        data: vec![0; AU_BYTES],
+                        keyframe: false,
+                        pts: opts.pts,
+                    });
+                }
+                Ok(None)
+            }
+            fn flush(&mut self) -> Result<Vec<EncodedFrame>, CodecError> {
+                Ok(std::mem::take(&mut self.0))
+            }
+        }
+        Ok(Box::new(Skipping(Vec::new())))
+    }
+
+    const AU_BYTES: usize = 16;
+
+    /// Records `frames` from a mock camera at `fps`, half of them reaching the
+    /// file. A stall lengthens the capture and the playback alike, so playback
+    /// is held below the time the run took rather than the nominal time.
+    fn assert_recording_lasts_as_long_as_its_capture(frames: u64, fps: u32) {
+        let dir = std::env::temp_dir().join(format!(
+            "edgefirst-camera-span-{}-{frames}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stream = dir.join("rec.h264");
+        let (request, mut settings) = settings(&[
+            "--source",
+            &format!("mock:64x48@{fps}"),
+            "--stream-size",
+            "64",
+            "48",
+            "--record",
+            stream.to_str().unwrap(),
+        ]);
+        settings.max_frames = Some(frames);
+        let session = local_session();
+        let flag = AtomicBool::new(false);
+        let opened = source::open(&request, &flag).unwrap().unwrap();
+        let started = Instant::now();
+        run(opened, &session, &settings, open_skipping, None, &flag).unwrap();
+        let took = started.elapsed().as_secs_f64();
+
+        let recorded = std::fs::metadata(&stream).unwrap().len() as f64 / AU_BYTES as f64;
+        let sidecar_fps = Sidecar::load(&stream).unwrap().fps;
+        let played = recorded / sidecar_fps;
+        let nominal = (frames - 1) as f64 / f64::from(fps);
+        assert!(
+            played > 0.7 * nominal && played < 1.25 * took,
+            "{recorded} frames at {sidecar_fps} fps play for {played:.2} s \
+             of {nominal:.2} s nominal, in a run of {took:.2} s"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_recording_lasts_as_long_as_its_capture_whatever_reached_it() {
+        assert_recording_lasts_as_long_as_its_capture(61, 60);
+    }
+
+    #[test]
+    fn a_short_recording_lasts_as_long_as_its_capture_whatever_reached_it() {
+        assert_recording_lasts_as_long_as_its_capture(31, 30);
     }
 
     #[test]
