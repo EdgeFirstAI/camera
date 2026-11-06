@@ -212,7 +212,8 @@ impl CapturedSpan {
     /// Intervals at the start of a camera that may include the sensor
     /// starting up.
     const SETTLING: u32 = 2;
-    /// Intervals below which a mean says more about the start than the rate.
+    /// Intervals below which a mean during a recording says more about the
+    /// start than the rate. A finished recording has all it will ever have.
     const MIN_INTERVALS: u64 = 30;
 
     fn frame(&mut self, nanos: i64) {
@@ -234,14 +235,20 @@ impl CapturedSpan {
         self.last_nanos = None;
     }
 
-    fn mean_fps(&self) -> Option<f64> {
-        (self.intervals >= Self::MIN_INTERVALS && self.nanos > 0)
-            .then(|| round_fps(self.intervals as f64 * 1e9 / self.nanos as f64))
+    fn mean(&self) -> Option<f64> {
+        (self.nanos > 0).then(|| round_fps(self.intervals as f64 * 1e9 / self.nanos as f64))
     }
 
-    /// The mean rate, for the `recorded` of the frames that reached the file.
+    /// The mean rate so far, once there are enough intervals to trust.
+    fn mean_fps(&self) -> Option<f64> {
+        self.mean()
+            .filter(|_| self.intervals >= Self::MIN_INTERVALS)
+    }
+
+    /// The mean rate of a finished recording, for the `recorded` of its frames
+    /// that reached the file.
     fn recorded_fps(&self, recorded: u64) -> Option<f64> {
-        let mean = self.mean_fps()?;
+        let mean = self.mean()?;
         (recorded > 0).then(|| round_fps(mean * recorded as f64 / self.frames as f64))
     }
 }
@@ -2067,6 +2074,26 @@ mod tests {
         assert_eq!(span.recorded_fps(0), None);
     }
 
+    #[test]
+    fn frames_that_missed_a_short_recording_lower_its_rate() {
+        let mut span = CapturedSpan::default();
+        for i in 0..20 {
+            span.frame(i * 200_000_000);
+        }
+        assert_eq!(span.mean_fps(), None);
+        assert_eq!(span.recorded_fps(20), Some(5.0));
+        assert_eq!(span.recorded_fps(10), Some(2.5));
+    }
+
+    #[test]
+    fn a_recording_too_short_to_time_has_no_rate() {
+        let mut span = CapturedSpan::default();
+        for i in 0..3 {
+            span.frame(i * 200_000_000);
+        }
+        assert_eq!(span.recorded_fps(2), None);
+    }
+
     /// An encoder that skips every other frame and holds the rest until it is
     /// flushed, so the frames only reach the recording once it has drained.
     fn open_skipping(_: EncoderConfig) -> Result<Box<dyn Encode>, CodecError> {
@@ -2095,11 +2122,11 @@ mod tests {
 
     const AU_BYTES: usize = 16;
 
-    #[test]
-    fn a_recording_lasts_as_long_as_its_capture_whatever_reached_it() {
-        const FRAMES: u64 = 61;
-        let dir =
-            std::env::temp_dir().join(format!("edgefirst-camera-span-{}", std::process::id()));
+    fn assert_recording_lasts_as_long_as_its_capture(frames: u64) {
+        let dir = std::env::temp_dir().join(format!(
+            "edgefirst-camera-span-{}-{frames}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let stream = dir.join("rec.h264");
         let (request, mut settings) = settings(&[
@@ -2111,7 +2138,7 @@ mod tests {
             "--record",
             stream.to_str().unwrap(),
         ]);
-        settings.max_frames = Some(FRAMES);
+        settings.max_frames = Some(frames);
         let session = local_session();
         let flag = AtomicBool::new(false);
         let opened = source::open(&request, &flag).unwrap().unwrap();
@@ -2120,12 +2147,22 @@ mod tests {
         let recorded = std::fs::metadata(&stream).unwrap().len() as f64 / AU_BYTES as f64;
         let fps = Sidecar::load(&stream).unwrap().fps;
         let played = recorded / fps;
-        let captured = (FRAMES - 1) as f64 / 60.0;
+        let captured = (frames - 1) as f64 / 60.0;
         assert!(
             (played - captured).abs() / captured < 0.1,
             "{recorded} frames at {fps} fps play for {played:.2} s of {captured:.2} s"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_recording_lasts_as_long_as_its_capture_whatever_reached_it() {
+        assert_recording_lasts_as_long_as_its_capture(61);
+    }
+
+    #[test]
+    fn a_short_recording_lasts_as_long_as_its_capture_whatever_reached_it() {
+        assert_recording_lasts_as_long_as_its_capture(21);
     }
 
     #[test]
