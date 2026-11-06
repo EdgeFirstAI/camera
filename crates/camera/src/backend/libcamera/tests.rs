@@ -194,6 +194,11 @@ fn frames_lengthened_by_auto_exposure_are_not_counted_as_drops() {
     }
     assert_eq!(c.stats().dropped, 0);
     assert_eq!(c.measured_frame_rate(), Some(15.0));
+    assert_eq!(
+        c.config().frame_rate,
+        Some(15.0),
+        "the reported rate follows the frame duration"
+    );
 }
 
 #[test]

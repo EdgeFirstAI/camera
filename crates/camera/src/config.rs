@@ -186,7 +186,10 @@ pub struct StreamConfig {
     pub row_stride: usize,
     /// Number of image planes.
     pub planes: usize,
-    /// Negotiated frame rate, or `None` when the backend cannot report it.
+    /// The rate the camera reports, or `None` when it reports none. With
+    /// libcamera it follows the frame duration of the latest frame. It can
+    /// differ from what the camera delivers, which is
+    /// [`Camera::measured_frame_rate`](crate::Camera::measured_frame_rate).
     pub frame_rate: Option<f64>,
     /// Colorimetry, or `None` when the driver reports it as unspecified.
     pub colorimetry: Option<Colorimetry>,

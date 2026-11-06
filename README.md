@@ -291,7 +291,7 @@ New subcommands: `devices`, `info`, `record` and `convert`. Without a subcommand
 - **Drop reporting.** The periodic log line reports each output against the frames offered to it, for example `jpeg=127/300`.
 - **JPEG queue.** The JPEG stage always compresses the newest frame. A frame that arrives while another waits replaces it, and the replaced frame counts as a drop.
 - **Logging.** Under systemd, log lines reach the journal once, through journald, and no longer also as stdout text.
-- **Frame rate.** The service logs the rate the camera delivers once measured, warns once when it differs from the rate the camera reports or was asked for, and corrects a recording's sidecar to it. Drops are counted against each frame's own duration where libcamera reports it, so auto-exposure lengthening its frames in dim light is not counted as drops.
+- **Frame rate.** The service logs the rate the camera delivers once measured and whenever it changes, for example when auto-exposure lengthens frames in dim light, and warns when it settles at a rate the camera doesn't report or wasn't asked for. A recording's sidecar is corrected as it goes and ends at the mean rate, which keeps the recording's duration if the rate changed along the way. Camera drops are gaps in the timestamps compared with the frames around them, so a change of rate is not counted as drops, and a camera that steadily loses every other frame shows as a lower rate rather than as drops.
 
 **Measured on a Maivin at 1080p30:** H.264 p95 latency is 9.7 ms against 11.8 ms on 2.12, and CPU use is 8.8% against 13.1%.
 

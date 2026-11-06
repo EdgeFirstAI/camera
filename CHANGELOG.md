@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Mirror, exposure, gain, white balance, frame rate and any V4L2 control by ID; the i.MX 8M Plus ISP flip quirk.
   - The `probe` example reports what a camera negotiates and delivers on a platform.
   - Drivers that answer `VIDIOC_ENUM_FRAMESIZES` with an error (NXP's `mxc-isi_v1`) list the standard sizes `VIDIOC_TRY_FMT` takes unchanged, with unknown rates, instead of no formats.
-- `Camera::measured_frame_rate`: the rate a camera delivers, measured from capture timestamps after the first frames of a start, next to the rate the driver reports in `config()`. Drops are counted against the reported rate, and both backends log a warning when the two disagree (EDGEAI-1538).
+- `Camera::measured_frame_rate`: the rate a camera delivers, measured from capture timestamps over its latest frames, next to the rate the driver reports in `config()`. Both backends log a warning when the two disagree (EDGEAI-1538).
 - libcamera backend for the SDK (`libcamera:<id>`, feature `libcamera`, default on Linux) for libcamera 0.5 and newer (EDGEAI-1540).
   - `edgefirst-libcamera-sys` (`crates/libcamera-sys`): a C shim over libcamera with a stable ABI (`shim/`, built with meson), its run-time loader, which picks the shim built for the installed libcamera minor, and a mock of the ABI for tests without libcamera.
   - The shim builds against both C++ APIs of libcamera's spans, `libcamera::Span` (to 0.7) and `std::span` (0.8, and Raspberry Pi's 0.7, which gets a `libcamera-0.7-rpi` build of its own). A shim whose symbols do not match the installed libcamera now fails at load, and the next one is tried, instead of ending the process at its first call (EDGEAI-1537).
@@ -81,8 +81,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Camera devices are asked for YUYV, which the encoders take directly; a device without it is captured in its current format.
   - A camera that cannot mirror, or rejects the mirror control, is mirrored in the JPEG and H.264 outputs instead, and `camera/frame` is published unmirrored with a warning.
   - The ISP retry at startup keys on the SDK's `NotReady` (`ENOENT` on open, or no first frame in time).
-  - Drop warnings report frames the camera lost, from timestamp gaps, as well as frames dropped at full encoder queues. With libcamera the gaps are judged against each frame's own reported duration, so auto-exposure lengthening its frames does not count as drops (EDGEAI-1540).
-  - A measured frame rate that contradicts the reported or requested rate logs one warning from the SDK, where several overlapping warnings came from the SDK and the service (EDGEAI-1540).
+  - Drop warnings report frames the camera lost, from timestamp gaps, as well as frames dropped at full encoder queues. The gaps are judged against the frames around them, so a change of rate, such as auto-exposure lengthening its frames, does not count as drops, and a driver that reports no rate still counts them (EDGEAI-1540).
+  - The measured and reported frame rates follow the camera instead of describing its first frames: `measured_frame_rate` keeps measuring, and with libcamera `config().frame_rate` follows the frame duration (EDGEAI-1540).
+  - A measured frame rate that settles away from the reported or requested rate logs one warning from the SDK, where several overlapping warnings came from the SDK and the service (EDGEAI-1540).
+  - A recording's sidecar ends at the mean rate, so a recording whose rate changed keeps its duration (EDGEAI-1540).
   - H.264 tiles are encoded at the quadrant's size, up to 1920x1080, through the encoder's crop where the device can express it.
 - H.264 streams are encoded as 2.x encoded them: constant bitrate, a key frame every second, High profile at the lowest level that fits, and `--h264-bitrate auto` at 0.16 bits per pixel (about 10 Mbps at 1080p30). An encoder without the profile or level controls uses its defaults with a warning (EDGEAI-1529).
 - Under systemd, log lines reach the journal once, through journald, instead of also as stdout text (EDGEAI-1529).

@@ -565,6 +565,9 @@ fn drops_are_counted_from_timestamp_gaps() {
         .config()
         .frame_rate
         .expect("vivid reports a frame rate");
+    for _ in 0..4 {
+        next(&mut camera);
+    }
     let held = [next(&mut camera), next(&mut camera)];
     // With nothing queued vivid skips frames.
     let starved = Duration::from_millis(300);

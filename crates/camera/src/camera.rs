@@ -22,8 +22,10 @@ pub struct CaptureStats {
     pub queued: usize,
     /// Buffers currently held by frames.
     pub held: usize,
-    /// Frames lost, counted from timestamp gaps against the negotiated
-    /// frame interval.
+    /// Frames lost, counted from timestamp gaps against the period of the
+    /// frames around them, two frames after the gap. A change of rate is not
+    /// a loss, and neither is a steady loss such as every other frame, which
+    /// shows in [`Camera::measured_frame_rate`] instead.
     pub dropped: u64,
     /// `next_frame` calls that timed out.
     pub timeouts: u64,
@@ -143,16 +145,13 @@ pub trait Camera: Send + std::fmt::Debug {
     fn stats(&self) -> CaptureStats;
 
     /// The frame rate the camera delivers, measured from capture
-    /// timestamps once enough frames have arrived since the last start;
-    /// `None` before then or where the backend does not measure it.
+    /// timestamps over its latest frames, so it follows the camera as
+    /// auto-exposure or a new rate changes it. `None` until enough frames have
+    /// arrived since the last start, or where the backend does not measure it.
     ///
     /// [`StreamConfig::frame_rate`](crate::StreamConfig::frame_rate) is the
-    /// rate the driver reports. Drops are counted against each frame's own
-    /// duration where the backend has it, such as libcamera, and against that
-    /// rate elsewhere, where a camera running slower than it reports shows
-    /// drops. The measured rate tells how fast it actually runs, and the
-    /// backend logs one warning when it contradicts the reported or requested
-    /// rate.
+    /// rate the camera reports. The backend logs a warning when a settled
+    /// measurement contradicts the reported or requested rate.
     fn measured_frame_rate(&self) -> Option<f64> {
         None
     }

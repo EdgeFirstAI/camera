@@ -211,7 +211,7 @@ struct V4l2Camera {
     clock: RealtimeClock,
     seq: u64,
     stats: CaptureStats,
-    /// Drops against the driver's rate, and the delivered rate.
+    /// Drops and the delivered rate.
     rate: RateMeter,
     logged_clock: bool,
     /// Injected faults (debug builds only; see `CameraBuilder::fault`).
@@ -680,7 +680,7 @@ impl V4l2Camera {
             }
         }
         let nanos = i64::try_from(d.timestamp.as_nanos()).unwrap_or(i64::MAX);
-        let tick = self.rate.frame(nanos, None);
+        let tick = self.rate.frame(nanos);
         self.stats.dropped += tick.dropped;
         if let Some(mismatch) = tick.mismatch {
             tracing::warn!("{}: {mismatch}", self.path());

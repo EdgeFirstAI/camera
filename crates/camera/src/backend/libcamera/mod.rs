@@ -265,7 +265,7 @@ struct LibcameraCamera {
     clock: RealtimeClock,
     seq: u64,
     stats: CaptureStats,
-    /// Drops against each frame's own duration, and the delivered rate.
+    /// Drops and the delivered rate.
     rate: RateMeter,
     // Declared last: released after the pool's frames are detached.
     handle: Handle,
@@ -637,11 +637,12 @@ impl LibcameraCamera {
         }
     }
 
-    /// Reports the rate libcamera's frame duration claims.
+    /// Reports the rate libcamera's frame duration gives for this frame.
     fn note_rate(&mut self, c: &sys::efcam_lc_completion) {
         if c.frame_duration_us > 0 {
-            self.config.frame_rate = Some(round_fps(1e6 / c.frame_duration_us as f64));
-            self.rate.claim(self.config.frame_rate);
+            let fps = round_fps(1e6 / c.frame_duration_us as f64);
+            self.config.frame_rate = Some(fps);
+            self.rate.reports(fps);
         }
     }
 
@@ -671,10 +672,8 @@ impl LibcameraCamera {
                 nanos: i64::try_from(c.buffer_timestamp_ns).unwrap_or(i64::MAX),
             }
         };
-        let tick = self.rate.frame(
-            timestamp.nanos,
-            Some(c.frame_duration_us.saturating_mul(1000)),
-        );
+        self.note_rate(&c);
+        let tick = self.rate.frame(timestamp.nanos);
         self.stats.dropped += tick.dropped;
         if let Some(mismatch) = tick.mismatch {
             tracing::warn!("{}: {mismatch}", self.id());
