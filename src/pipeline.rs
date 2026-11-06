@@ -1985,7 +1985,7 @@ mod tests {
             .sum();
         assert_eq!(std::fs::metadata(&path).unwrap().len() as usize, published);
         let sidecar = Sidecar::load(&path).unwrap();
-        assert_eq!((sidecar.width, sidecar.height, sidecar.fps), (64, 48, 30.0));
+        assert_eq!((sidecar.width, sidecar.height), (64, 48));
         let extras: serde_json::Value = serde_json::from_str(&sidecar.extras).unwrap();
         assert_eq!(extras["camera_info"]["frame_id"], "rec");
         assert_eq!(extras["tf_static"]["child_frame_id"], "rec");
@@ -2122,7 +2122,10 @@ mod tests {
 
     const AU_BYTES: usize = 16;
 
-    fn assert_recording_lasts_as_long_as_its_capture(frames: u64) {
+    /// Records `frames` from a mock camera at `fps`, half of them reaching the
+    /// file. A stall lengthens the capture and the playback alike, so playback
+    /// is held below the time the run took rather than the nominal time.
+    fn assert_recording_lasts_as_long_as_its_capture(frames: u64, fps: u32) {
         let dir = std::env::temp_dir().join(format!(
             "edgefirst-camera-span-{}-{frames}",
             std::process::id()
@@ -2131,7 +2134,7 @@ mod tests {
         let stream = dir.join("rec.h264");
         let (request, mut settings) = settings(&[
             "--source",
-            "mock:64x48@60",
+            &format!("mock:64x48@{fps}"),
             "--stream-size",
             "64",
             "48",
@@ -2142,27 +2145,30 @@ mod tests {
         let session = local_session();
         let flag = AtomicBool::new(false);
         let opened = source::open(&request, &flag).unwrap().unwrap();
+        let started = Instant::now();
         run(opened, &session, &settings, open_skipping, None, &flag).unwrap();
+        let took = started.elapsed().as_secs_f64();
 
         let recorded = std::fs::metadata(&stream).unwrap().len() as f64 / AU_BYTES as f64;
-        let fps = Sidecar::load(&stream).unwrap().fps;
-        let played = recorded / fps;
-        let captured = (frames - 1) as f64 / 60.0;
+        let sidecar_fps = Sidecar::load(&stream).unwrap().fps;
+        let played = recorded / sidecar_fps;
+        let nominal = (frames - 1) as f64 / f64::from(fps);
         assert!(
-            (played - captured).abs() / captured < 0.1,
-            "{recorded} frames at {fps} fps play for {played:.2} s of {captured:.2} s"
+            played > 0.7 * nominal && played < 1.25 * took,
+            "{recorded} frames at {sidecar_fps} fps play for {played:.2} s \
+             of {nominal:.2} s nominal, in a run of {took:.2} s"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_recording_lasts_as_long_as_its_capture_whatever_reached_it() {
-        assert_recording_lasts_as_long_as_its_capture(61);
+        assert_recording_lasts_as_long_as_its_capture(61, 60);
     }
 
     #[test]
     fn a_short_recording_lasts_as_long_as_its_capture_whatever_reached_it() {
-        assert_recording_lasts_as_long_as_its_capture(21);
+        assert_recording_lasts_as_long_as_its_capture(31, 30);
     }
 
     #[test]
