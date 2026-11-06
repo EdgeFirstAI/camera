@@ -25,8 +25,12 @@ use std::fmt;
 
 use crate::rates_differ;
 
-/// Frames whose timestamp intervals give each measurement of the rate.
+/// Frames whose timestamp intervals give the first measurement of the rate.
 pub(crate) const RATE_FRAMES: usize = 10;
+
+/// Frames that give each measurement after the first. Long enough that
+/// timestamps quantised to a USB frame stay within the tolerance of a rate.
+const FOLLOW_FRAMES: usize = 30;
 
 /// Intervals around the one being judged, which is in the middle.
 const DROP_WINDOW: usize = 5;
@@ -131,7 +135,12 @@ impl RateMeter {
         }
         tick.dropped = self.judge(interval);
         self.intervals.push(interval);
-        if self.intervals.len() == RATE_FRAMES {
+        let due = if self.measured.is_some() {
+            FOLLOW_FRAMES
+        } else {
+            RATE_FRAMES
+        };
+        if self.intervals.len() == due {
             tick.mismatch = self.measure();
         }
         tick
@@ -165,10 +174,7 @@ impl RateMeter {
     /// the frames during a change of rate, which take it to neither rate, are
     /// not reported as the camera's rate.
     fn measure(&mut self) -> Option<RateMismatch> {
-        // The lower median ignores intervals that span a lost frame, even
-        // when half of them do.
-        self.intervals.sort_unstable();
-        let fps = round_fps(1e9 / self.intervals[(RATE_FRAMES - 1) / 2] as f64);
+        let fps = round_fps(1e9 / mean_period(&mut self.intervals));
         self.intervals.clear();
         let settled = self.measured.is_some_and(|last| !rates_differ(fps, last));
         self.measured = Some(fps);
@@ -190,6 +196,21 @@ impl RateMeter {
     }
 }
 
+/// The mean of the `intervals` near their lower median, which leaves out those
+/// that span lost frames, even when half of them do, and those from before a
+/// change of rate. A median alone would not do: UVC timestamps alternate 32 and
+/// 36 ms at 30 fps.
+fn mean_period(intervals: &mut [i64]) -> f64 {
+    intervals.sort_unstable();
+    let median = intervals[(intervals.len() - 1) / 2] as f64;
+    let kept: Vec<f64> = intervals
+        .iter()
+        .map(|&i| i as f64)
+        .filter(|&i| i > median / 1.5 && i < median * 1.5)
+        .collect();
+    kept.iter().sum::<f64>() / kept.len() as f64
+}
+
 /// A rate rounded to hundredths, as reported.
 pub(crate) fn round_fps(fps: f64) -> f64 {
     (fps * 100.0).round() / 100.0
@@ -202,6 +223,8 @@ mod tests {
     const MS: i64 = 1_000_000;
     /// A window of steady frames either side of what a test is about.
     const STEADY: [i64; 6] = [33 * MS; 6];
+    /// Frames for a measurement to settle: the first and one that agrees.
+    const SETTLE: usize = RATE_FRAMES + FOLLOW_FRAMES;
 
     /// Feeds frames at `intervals` and returns their ticks.
     fn feed(meter: &mut RateMeter, intervals: &[i64]) -> Vec<Tick> {
@@ -305,13 +328,22 @@ mod tests {
     fn a_camera_steadily_slower_than_its_claim_drops_nothing_and_is_reported() {
         let mut m = RateMeter::default();
         m.claim(Some(60.0));
-        let ticks = feed(&mut m, &[33_333_333; RATE_FRAMES * 3]);
+        let ticks = feed(&mut m, &[33_333_333; SETTLE + FOLLOW_FRAMES]);
         assert_eq!(dropped(&ticks), 0);
         assert_eq!(m.measured(), Some(30.0));
         assert_eq!(
             reports(&ticks),
             ["the camera delivers 30 fps; it reports 60 fps"]
         );
+    }
+
+    #[test]
+    fn the_first_measurement_is_of_the_rate_the_camera_settled_at() {
+        let mut m = RateMeter::default();
+        let mut intervals = vec![33 * MS; 3];
+        intervals.extend([66_666_667; RATE_FRAMES - 3]);
+        feed(&mut m, &intervals);
+        assert_eq!(m.measured(), Some(15.0));
     }
 
     #[test]
@@ -328,17 +360,30 @@ mod tests {
         m.claim(Some(30.0));
         feed(&mut m, &[33_333_333; RATE_FRAMES]);
         assert_eq!(m.measured(), Some(30.0));
-        feed(&mut m, &[66_666_667; RATE_FRAMES]);
+        feed(&mut m, &[66_666_667; FOLLOW_FRAMES]);
         assert_eq!(m.measured(), Some(15.0));
-        feed(&mut m, &[100 * MS; RATE_FRAMES]);
+        feed(&mut m, &[100 * MS; FOLLOW_FRAMES]);
         assert_eq!(m.measured(), Some(10.0));
+    }
+
+    /// The Brio 101: timestamps quantised to the USB frame, at a true 30 fps.
+    #[test]
+    fn timestamp_jitter_does_not_bias_the_measurement() {
+        let mut m = RateMeter::default();
+        m.claim(Some(30.0));
+        let jitter = [32 * MS, 32 * MS, 36 * MS].repeat(SETTLE);
+        let ticks = feed(&mut m, &jitter);
+        assert_eq!(dropped(&ticks), 0);
+        assert_eq!(reports(&ticks), Vec::<String>::new());
+        let measured = m.measured().unwrap();
+        assert!((measured - 30.0).abs() < 0.5, "{measured}");
     }
 
     #[test]
     fn a_matching_claim_does_not_disagree() {
         let mut m = RateMeter::default();
         m.claim(Some(30.0));
-        let ticks = feed(&mut m, &[33_333_333; RATE_FRAMES * 3]);
+        let ticks = feed(&mut m, &[33_333_333; SETTLE + FOLLOW_FRAMES]);
         assert!(ticks.iter().all(|t| *t == Tick::default()));
         assert_eq!(m.measured(), Some(30.0));
     }
@@ -347,9 +392,9 @@ mod tests {
     fn a_claim_that_follows_the_camera_does_not_disagree() {
         let mut m = RateMeter::default();
         m.claim(Some(30.0));
-        let mut ticks = feed(&mut m, &[33_333_333; RATE_FRAMES * 2]);
+        let mut ticks = feed(&mut m, &[33_333_333; SETTLE]);
         m.reports(15.0);
-        ticks.extend(feed(&mut m, &[66_666_667; RATE_FRAMES * 2]));
+        ticks.extend(feed(&mut m, &[66_666_667; FOLLOW_FRAMES * 2]));
         assert_eq!(reports(&ticks), Vec::<String>::new());
         assert_eq!(m.measured(), Some(15.0));
     }
@@ -357,7 +402,7 @@ mod tests {
     #[test]
     fn no_claim_is_reported_and_still_measures() {
         let mut m = RateMeter::default();
-        let ticks = feed(&mut m, &[100 * MS; RATE_FRAMES * 2]);
+        let ticks = feed(&mut m, &[100 * MS; SETTLE]);
         assert_eq!(dropped(&ticks), 0);
         assert_eq!(
             reports(&ticks),
@@ -370,10 +415,10 @@ mod tests {
     fn a_contradiction_is_logged_once_per_rate_and_not_while_it_changes() {
         let mut m = RateMeter::default();
         m.claim(Some(30.0));
-        let mut intervals = vec![66_666_667; RATE_FRAMES * 3];
-        // Each rate only for the frames of one measurement: not settled.
-        intervals.extend([50 * MS; RATE_FRAMES]);
-        intervals.extend([100 * MS; RATE_FRAMES * 3]);
+        let mut intervals = vec![66_666_667; SETTLE];
+        // This rate only for the frames of one measurement: not settled.
+        intervals.extend([50 * MS; FOLLOW_FRAMES]);
+        intervals.extend([100 * MS; FOLLOW_FRAMES * 2]);
         assert_eq!(
             reports(&feed(&mut m, &intervals)),
             [
@@ -387,9 +432,9 @@ mod tests {
     fn a_contradiction_that_returns_is_logged_again() {
         let mut m = RateMeter::default();
         m.claim(Some(30.0));
-        let mut intervals = vec![66_666_667; RATE_FRAMES * 2];
-        intervals.extend([33_333_333; RATE_FRAMES * 2]);
-        intervals.extend([66_666_667; RATE_FRAMES * 2]);
+        let mut intervals = vec![66_666_667; SETTLE];
+        intervals.extend([33_333_333; FOLLOW_FRAMES * 2]);
+        intervals.extend([66_666_667; FOLLOW_FRAMES * 2]);
         assert_eq!(reports(&feed(&mut m, &intervals)).len(), 2);
     }
 
@@ -411,7 +456,7 @@ mod tests {
         let mut m = RateMeter::default();
         m.claim(Some(30.0));
         m.ask(60.0);
-        let ticks = feed(&mut m, &[33_333_333; RATE_FRAMES * 2]);
+        let ticks = feed(&mut m, &[33_333_333; SETTLE]);
         assert_eq!(
             reports(&ticks),
             ["the camera delivers 30 fps; it reports 30 fps, and 60 fps was requested"]
