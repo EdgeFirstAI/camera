@@ -4,7 +4,8 @@
 //! Platform validation of the SDK with the image and codec crates on a
 //! board's camera: a V4L2 camera on the i.MX 8M Plus (an ISI sensor or the
 //! vvcam ISP that Maivin and Raivin use), or a libcamera camera on the
-//! i.MX 95 neo ISP.
+//! i.MX 95 neo ISP or the Raspberry Pi 5. Codec tests skip on a board
+//! without an H.264 encoder or decoder (`no-encoder`, `no-decoder`).
 //!
 //! Every test is ignored; run them on a board with `--include-ignored`.
 //!
@@ -599,6 +600,9 @@ fn h264_encodes_within_the_latency_target() -> TestResult {
     let Some(t) = target() else {
         return Ok(());
     };
+    if !common::h264_encoder() {
+        return Ok(());
+    }
     let processor = ImageProcessor::new()?;
     let mut camera = start(|| pooled(&t, &processor, BUFFERS + 2))?;
     let mut encoder = VideoEncoder::new(EncoderConfig::h264(
@@ -658,6 +662,9 @@ fn decodes_a_2x_recording() -> TestResult {
         );
         return Ok(());
     };
+    if !common::h264_decoder() {
+        return Ok(());
+    }
     let sidecar = edgefirst_camera::Sidecar::load(Path::new(&path))?;
     let mut camera = CameraBuilder::source(&format!("file:{path}"))?
         .frame_rate(1000.0)

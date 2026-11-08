@@ -199,12 +199,12 @@ jobs:
     uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@c7876194b9fe9f7f72daf0efadaf32d7dff1b257
     with:
       lanes: ${{ needs.changes.outputs.full == 'true' && 'all' || 'hardware' }}
-      # An i.MX 8M Plus through V4L2, and the i.MX 95 through libcamera;
-      # board-setup.sh points the tests at each board's camera. The suites
-      # assume i.MX capture (a CMA heap, the ISI or ISP node), so other
-      # camera-v4l2 boards, such as the iq9075-evk's UVC camera, are not
-      # picked yet.
-      boards: camera-v4l2+imx8mp, camera-libcamera+imx95
+      # An i.MX 8M Plus through V4L2, and the i.MX 95 and Raspberry Pi 5
+      # through libcamera; board-setup.sh points the tests at each board's
+      # camera. The V4L2 suites assume i.MX capture (a CMA heap, the ISI or
+      # ISP node), so other camera-v4l2 boards, such as the iq9075-evk's UVC
+      # camera, are not picked yet.
+      boards: camera-v4l2+imx8mp, camera-libcamera+imx95, camera-libcamera+rpi5
       sonar: false
       scancode: true
       # macOS and Windows lanes live in camera-full.yml: these lanes would

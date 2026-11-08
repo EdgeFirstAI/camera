@@ -6,9 +6,9 @@
 //! Opening errors are tested everywhere. Playback needs a hardware H.264
 //! decoder and a recording: set `EDGEFIRST_CAMERA_RECORDING` to a camera
 //! 2.x `.h264` file (its `.json` sidecar beside it) on an M2M-capable
-//! target. Without it the playback tests pass with a note, unless
-//! `EDGEFIRST_CAMERA_REQUIRE_BOARD=1` (board lanes), which makes that a
-//! failure; a lane without a decoder lists `no-recording` in
+//! target. Without it, or without a decoder, the playback tests pass with a
+//! note, unless `EDGEFIRST_CAMERA_REQUIRE_BOARD=1` (board lanes) makes that
+//! a failure; a lane without a decoder lists `no-decoder` in
 //! `EDGEFIRST_CAMERA_ALLOW_SKIPS`.
 
 use std::path::{Path, PathBuf};
@@ -85,19 +85,32 @@ fn without_a_decoder_opening_is_not_found() {
     assert!(err.to_string().contains("decoder"), "{err}");
 }
 
+/// Reports that a playback test skips for `reason`, a name a lane may list
+/// in `EDGEFIRST_CAMERA_ALLOW_SKIPS`. Fails instead when the lane requires
+/// the board and does not list it.
+fn skip(reason: &str, why: impl std::fmt::Display) {
+    let allowed = std::env::var("EDGEFIRST_CAMERA_ALLOW_SKIPS").unwrap_or_default();
+    assert!(
+        std::env::var("EDGEFIRST_CAMERA_REQUIRE_BOARD").as_deref() != Ok("1")
+            || allowed.split([',', ' ']).any(|s| s == reason),
+        "EDGEFIRST_CAMERA_REQUIRE_BOARD=1 and the test would skip ({reason}): {why}"
+    );
+    eprintln!("SKIPPED ({reason}): {why}");
+}
+
 /// The recording named by `EDGEFIRST_CAMERA_RECORDING`, its picture count
 /// and sidecar rate.
 fn recording() -> Option<(String, usize, f64)> {
     let Ok(path) = std::env::var("EDGEFIRST_CAMERA_RECORDING") else {
-        let allowed = std::env::var("EDGEFIRST_CAMERA_ALLOW_SKIPS").unwrap_or_default();
-        assert!(
-            std::env::var("EDGEFIRST_CAMERA_REQUIRE_BOARD").as_deref() != Ok("1")
-                || allowed.split([',', ' ']).any(|s| s == "no-recording"),
-            "EDGEFIRST_CAMERA_REQUIRE_BOARD=1 but EDGEFIRST_CAMERA_RECORDING is not set"
-        );
-        eprintln!("SKIPPED (no-recording): EDGEFIRST_CAMERA_RECORDING is not set");
+        skip("no-recording", "EDGEFIRST_CAMERA_RECORDING is not set");
         return None;
     };
+    if let Err(edgefirst_codec::CodecError::NoDevice(why)) =
+        edgefirst_codec::video::VideoDecoder::new(edgefirst_codec::video::DecoderConfig::h264())
+    {
+        skip("no-decoder", why);
+        return None;
+    }
     let bytes = std::fs::read(&path).expect("read the recording");
     let sidecar: serde_json::Value = serde_json::from_slice(
         &std::fs::read(Path::new(&path).with_extension("json")).expect("read the sidecar"),

@@ -109,7 +109,7 @@ On the board fleet, run the `Camera benchmarks` workflow (`camera-bench.yml`) by
 | Variable | Effect |
 |---|---|
 | `EDGEFIRST_CAMERA_REQUIRE_BOARD=1` | Every test that would print `SKIPPED` fails instead, naming the reason |
-| `EDGEFIRST_CAMERA_ALLOW_SKIPS` | Comma-separated skip reasons this board may still take: `no-camera`, `no-mirror`, `uniform-scene`, `not-vvcam`, `not-monotonic`, `no-recording`, `not-v4l2`, `no-cma-heap`. The i.MX 95 lane allows `not-vvcam,no-mirror,not-v4l2` |
+| `EDGEFIRST_CAMERA_ALLOW_SKIPS` | Comma-separated skip reasons this board may still take: `no-camera`, `no-mirror`, `uniform-scene`, `not-vvcam`, `not-monotonic`, `no-recording`, `not-v4l2`, `no-cma-heap`, `no-encoder`, `no-decoder`. The i.MX 95 lane allows `not-vvcam,no-mirror,not-v4l2`, and the Raspberry Pi 5 lane, which has no H.264 encoder or decoder, `not-vvcam,not-v4l2,no-encoder,no-decoder` |
 | `EDGEFIRST_CAMERA_RECORDING` | A recording with its `.json` sidecar, for the decode and playback tests |
 | `EDGEFIRST_CAMERA_FPS` | The rate `on_target` requests, and expects at least 90% of on `camera/frame` and `camera/h264` (default 30). `camera/jpeg` is compressed in software, so it is only required to keep delivering, at no particular rate |
 | `EDGEFIRST_SOAK_SECS` | How long the soak runs (default 20; nightly runs 600) |
