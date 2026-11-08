@@ -11,7 +11,10 @@
 //!
 //! - `EDGEFIRST_CAMERA_SOURCE`: the camera, default `/dev/video3`; see
 //!   `common::source`. Without it the tests print `SKIPPED` and pass.
-//! - `EDGEFIRST_SOAK_SECS`: how long the 1080p30 soak runs, default 20;
+//! - `EDGEFIRST_CAMERA_SIZE` (`WIDTHxHEIGHT`, default 1920x1080) and
+//!   `EDGEFIRST_CAMERA_FPS` (default 30): what the tests request, for a
+//!   camera such as a USB webcam that offers only smaller modes.
+//! - `EDGEFIRST_SOAK_SECS`: how long the soak runs, default 20;
 //!   600 for the ten-minute platform run.
 //! - `EDGEFIRST_CAMERA_RECORDING`: a camera 2.x recording (`.h264` with its
 //!   `.json`) for the decode test, which skips without it.
@@ -32,8 +35,8 @@ use std::{
 };
 
 use edgefirst_camera::{
-    Backend, Camera, CameraBuilder, CaptureClock, ControlId, ControlValue, ErrorKind, Frame,
-    MemoryStrategy, Mirror, ResolvedMemory,
+    Backend, Camera, CameraBuilder, CaptureClock, Contiguity, ControlId, ControlValue, ErrorKind,
+    Frame, MemoryStrategy, Mirror, ResolvedMemory,
 };
 use edgefirst_codec::video::{EncoderConfig, FrameOptions, VideoEncoder};
 use edgefirst_image::{
@@ -48,10 +51,6 @@ use common::Skip;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
-const WIDTH: u32 = 1920;
-const HEIGHT: u32 = 1080;
-/// The rate requested; pipelines that ignore it report what they deliver.
-const FPS: f64 = 30.0;
 const BUFFERS: usize = 4;
 const TIMEOUT: Option<Duration> = Some(Duration::from_secs(3));
 /// The ISP service on i.MX 8M Plus BSPs.
@@ -62,6 +61,10 @@ const ENCODE_TARGET: Duration = Duration::from_millis(100);
 /// The camera under test and what its backend captures.
 struct Target {
     source: String,
+    width: u32,
+    height: u32,
+    /// The rate requested; pipelines that ignore it report what they deliver.
+    fps: f64,
     /// YUYV from V4L2, as the service captures; NV12 from libcamera, which
     /// the i.MX 95 ISP produces.
     format: PixelFormat,
@@ -72,15 +75,14 @@ struct Target {
 
 fn target() -> Option<Target> {
     let source = common::source()?;
-    let libcamera = source.starts_with("libcamera:");
+    let (width, height) = common::camera_size();
     Some(Target {
+        format: common::capture_format(&source),
+        import: !source.starts_with("libcamera:"),
         source,
-        format: if libcamera {
-            PixelFormat::Nv12
-        } else {
-            PixelFormat::Yuyv
-        },
-        import: !libcamera,
+        width,
+        height,
+        fps: common::camera_fps(),
     })
 }
 
@@ -190,34 +192,41 @@ fn monotonic_ns() -> i64 {
     ts.tv_sec * 1_000_000_000 + ts.tv_nsec
 }
 
-/// A contiguous pool from the image crate, as the service allocates.
+/// A DMA-BUF pool from the image crate, contiguous where the machine has a
+/// CMA heap.
 fn pool(
+    t: &Target,
     processor: &ImageProcessor,
-    format: PixelFormat,
     n: usize,
 ) -> Result<Vec<TensorDyn>, Box<dyn Error>> {
-    let desc = ImageDesc::new(WIDTH as usize, HEIGHT as usize, format, DType::U8)
+    let desc = ImageDesc::new(t.width as usize, t.height as usize, t.format, DType::U8)
         .with_access(CpuAccess::ReadWrite)
         .with_memory(Some(TensorMemory::DmaBuf))
-        .with_contiguous(true);
+        .with_contiguous(common::cma_heap());
     Ok((0..n)
         .map(|_| processor.create_image_desc(&desc))
         .collect::<Result<_, _>>()?)
 }
 
 fn builder(t: &Target) -> CameraBuilder {
-    CameraBuilder::source(&t.source)
+    let builder = CameraBuilder::source(&t.source)
         .expect("a camera source")
-        .size(WIDTH, HEIGHT)
+        .size(t.width, t.height)
         .format(t.format)
-        .frame_rate(FPS)
+        .frame_rate(t.fps);
+    // Without a CMA heap, the caller's pool cannot be contiguous.
+    if common::cma_heap() {
+        builder
+    } else {
+        builder.contiguity(Contiguity::Any)
+    }
 }
 
 /// [`builder`] with `n` tensors of the caller's pool when the backend
 /// imports one, else with the camera's own buffers.
 fn pooled(t: &Target, processor: &ImageProcessor, n: usize) -> CameraBuilder {
     if t.import {
-        builder(t).with_buffers(pool(processor, t.format, n).unwrap())
+        builder(t).with_buffers(pool(t, processor, n).unwrap())
     } else {
         builder(t)
     }
@@ -225,8 +234,8 @@ fn pooled(t: &Target, processor: &ImageProcessor, n: usize) -> CameraBuilder {
 
 /// The rate the camera reports, which a pipeline that ignores the request
 /// measures from what it delivers.
-fn rate(camera: &dyn Camera) -> f64 {
-    camera.config().frame_rate.unwrap_or(FPS)
+fn rate(camera: &dyn Camera, t: &Target) -> f64 {
+    camera.config().frame_rate.unwrap_or(t.fps)
 }
 
 /// Opens and starts `builder`, retrying while the ISP is not ready.
@@ -313,8 +322,8 @@ fn soak_1080p30_into_the_callers_pool_without_stalls() -> TestResult {
         camera.config().buffer_count
     };
     let mut rgba = processor.create_image(
-        WIDTH as usize,
-        HEIGHT as usize,
+        t.width as usize,
+        t.height as usize,
         PixelFormat::Rgba,
         DType::U8,
         None,
@@ -351,7 +360,7 @@ fn soak_1080p30_into_the_callers_pool_without_stalls() -> TestResult {
     let elapsed = begin.elapsed().as_secs_f64();
     let steady = cache_stats(&processor)?;
     let fps = frames as f64 / elapsed;
-    let reported = rate(camera.as_ref());
+    let reported = rate(camera.as_ref(), &t);
     let measured = camera
         .measured_frame_rate()
         .ok_or("no measured frame rate after the soak")?;
@@ -401,7 +410,8 @@ fn luma_grid(frame: &Frame, cols: usize, rows: usize) -> Result<Vec<f64>, Box<dy
         1
     };
     let bytes = frame.tensor().map_bytes(CpuAccess::Read)?;
-    let (w, h) = (WIDTH as usize, HEIGHT as usize);
+    let (w, h) = common::camera_size();
+    let (w, h) = (w as usize, h as usize);
     let mut grid = vec![0.0; cols * rows];
     for (cell, value) in grid.iter_mut().enumerate() {
         let (cx, cy) = (cell % cols, cell / cols);
@@ -601,16 +611,16 @@ fn h264_encodes_within_the_latency_target() -> TestResult {
     let Some(t) = target() else {
         return Ok(());
     };
-    if !common::h264_encoder() {
+    if !common::h264_encoder(t.format) {
         return Ok(());
     }
     let processor = ImageProcessor::new()?;
     let mut camera = start(|| pooled(&t, &processor, BUFFERS + 2))?;
     let mut encoder = VideoEncoder::new(EncoderConfig::h264(
-        WIDTH,
-        HEIGHT,
+        t.width,
+        t.height,
         t.format,
-        rate(camera.as_ref()),
+        rate(camera.as_ref(), &t),
     ))?;
     let mut latencies = Vec::new();
     for i in 0..300 {
@@ -711,7 +721,7 @@ fn auto_imports_contiguous_memory_where_there_is_a_cma_heap() -> TestResult {
         );
         return Ok(());
     }
-    if !Path::new("/dev/dma_heap/linux,cma").exists() {
+    if !common::cma_heap() {
         common::skip(Skip::NoCmaHeap, "no /dev/dma_heap/linux,cma");
         return Ok(());
     }
@@ -741,7 +751,7 @@ fn frames_held_across_close_stay_readable_and_the_device_reopens() -> TestResult
         let make = || {
             let b = builder(&t).memory(memory);
             if memory == MemoryStrategy::Import {
-                b.with_buffers(pool(&processor, t.format, BUFFERS).unwrap())
+                b.with_buffers(pool(&t, &processor, BUFFERS).unwrap())
             } else {
                 b
             }

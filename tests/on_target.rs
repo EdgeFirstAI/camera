@@ -41,7 +41,6 @@ const FIRST_SAMPLE: Duration = Duration::from_secs(20);
 const RATE_WINDOW: Duration = Duration::from_secs(10);
 /// The share of the expected rate a topic must keep.
 const MIN_RATE: f64 = 0.9;
-const DEFAULT_FPS: f64 = 30.0;
 
 const FRAME_TOPIC: &str = "camera/frame";
 const JPEG_TOPIC: &str = "camera/jpeg";
@@ -63,11 +62,7 @@ enum Expect {
 /// The rate requested from the camera and expected of [`Expect::Rate`]
 /// topics.
 fn expected_fps() -> f64 {
-    std::env::var("EDGEFIRST_CAMERA_FPS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|f: &f64| *f > 0.0)
-        .unwrap_or(DEFAULT_FPS)
+    common::camera_fps()
 }
 
 fn spawn<S: AsRef<OsStr>>(args: &[S]) -> std::io::Result<Child> {
@@ -288,16 +283,24 @@ impl Arrivals {
 fn capture(args: &[&str]) -> Option<Vec<String>> {
     let source = common::source()?;
     let fps = expected_fps().to_string();
+    let (width, height) = common::camera_size();
+    let (width, height) = (width.to_string(), height.to_string());
     let camera = [
         "--source",
         &source,
         "--camera-size",
-        "1920",
-        "1080",
+        &width,
+        &height,
         "--camera-fps",
         &fps,
     ];
     Some(camera.iter().chain(args).map(ToString::to_string).collect())
+}
+
+/// Whether the board's H.264 encoder takes what the camera captures.
+fn encoder_takes_the_camera() -> bool {
+    let source = std::env::var("EDGEFIRST_CAMERA_SOURCE").unwrap_or_else(|_| "/dev/video3".into());
+    common::h264_encoder(common::capture_format(&source))
 }
 
 fn sidecar(recording: &Path) -> PathBuf {
@@ -334,7 +337,7 @@ fn jpeg_capture() -> TestResult {
 #[serial]
 #[ignore = "requires a camera (run with --include-ignored on a board)"]
 fn h264_capture() -> TestResult {
-    if !common::h264_encoder() {
+    if !encoder_takes_the_camera() {
         return Ok(());
     }
     let Some(args) = capture(&["--h264"]) else {
@@ -350,7 +353,7 @@ fn h264_capture() -> TestResult {
 #[serial]
 #[ignore = "requires a camera (run with --include-ignored on a board)"]
 fn record_then_replay() -> TestResult {
-    if !common::h264_encoder() || !common::h264_decoder() {
+    if !encoder_takes_the_camera() || !common::h264_decoder() {
         return Ok(());
     }
     let dir = scratch_dir("record")?;
@@ -381,7 +384,7 @@ fn record_then_replay() -> TestResult {
 #[serial]
 #[ignore = "requires a camera (run with --include-ignored on a board)"]
 fn record_subcommand_writes_a_playable_recording() -> TestResult {
-    if !common::h264_encoder() || !common::h264_decoder() {
+    if !encoder_takes_the_camera() || !common::h264_decoder() {
         return Ok(());
     }
     let dir = scratch_dir("record-sub")?;
