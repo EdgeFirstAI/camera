@@ -111,8 +111,8 @@ wget https://github.com/EdgeFirstAI/camera/releases/latest/download/edgefirst-ca
 # Make executable
 chmod +x edgefirst-camera-linux-aarch64
 
-# Run with default settings
-./edgefirst-camera-linux-aarch64 --jpeg --h264
+# Run with H.264 (or --jpeg on a board without an H.264 encoder)
+./edgefirst-camera-linux-aarch64 --h264
 ```
 
 **Option 2: Build from Source**
@@ -126,7 +126,7 @@ cd camera
 cargo build --release
 
 # Run
-./target/release/edgefirst-camera --jpeg --h264
+./target/release/edgefirst-camera --h264
 ```
 
 **Option 3: Cross-Compile for ARM64**
@@ -147,15 +147,16 @@ cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.35
 
 ### Basic Usage
 
-**Single Camera with JPEG and H.264 Streams:**
+**Single Camera with an H.264 Stream:**
 
 ```bash
 edgefirst-camera \
   --camera /dev/video0 \
   --camera-mode 1080p30 \
-  --jpeg \
   --h264
 ```
+
+Use `--jpeg` instead of `--h264` on a board without an H.264 encoder; see [Choosing JPEG or H.264](#choosing-jpeg-or-h264).
 
 **4K Camera with Automatic Tiling:**
 
@@ -338,7 +339,7 @@ Every frame-tied topic (`camera/frame`, `camera/info`, `camera/jpeg`, `camera/h2
 
 ```bash
 # Start camera node
-edgefirst-camera --jpeg --h264 &
+edgefirst-camera --jpeg &
 
 # Start zenoh-bridge-dds for ROS2 compatibility
 zenoh-bridge-dds
@@ -402,7 +403,16 @@ A consumer:
 - Automatic tiling for live capture above 1080p
 - Tile-specific FPS control to reduce artifacts
 
-**JPEG:** software encoding with libjpeg-turbo (`turbojpeg`); the i.MX 8M Plus has no hardware JPEG encoder. See [Known Limitations](#known-limitations).
+**JPEG:** software encoding with libjpeg-turbo (`turbojpeg`) on every platform. The i.MX 8M Plus has no hardware JPEG encoder; the i.MX 95's (`mxc-jpeg`) is not used yet. See [Known Limitations](#known-limitations).
+
+### Choosing JPEG or H.264
+
+The two compressed outputs are alternatives: enable neither, or the one that suits the platform.
+
+- **JPEG** works on every platform. It is compressed on the CPU, so its rate depends on the stream size and the CPU, and it can fall below the camera's rate.
+- **H.264** needs a hardware encoder, which it uses at the camera's rate for little CPU. Without one, the service stops at start with status 69.
+
+The service runs both when asked to, without a warning, but they then share the frames and the CPU, and the board tests check each output on its own.
 
 ### 4K Tiling for High-Resolution Cameras
 

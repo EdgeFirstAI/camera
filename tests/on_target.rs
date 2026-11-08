@@ -314,6 +314,8 @@ fn help_exits_cleanly() -> TestResult {
     Ok(())
 }
 
+/// JPEG on its own, as on a board without an H.264 encoder: the two
+/// compressed outputs are alternatives.
 #[test]
 #[serial]
 #[ignore = "requires a camera (run with --include-ignored on a board)"]
@@ -327,6 +329,7 @@ fn jpeg_capture() -> TestResult {
     )
 }
 
+/// H.264 on its own, where the board has an encoder for the camera's format.
 #[test]
 #[serial]
 #[ignore = "requires a camera (run with --include-ignored on a board)"]

@@ -138,7 +138,9 @@ For live capture above 1080p (turned on automatically, except for `record`) or w
 
 ### JPEG
 
-The JPEG stage converts to RGBA at the stream size (mirroring there when needed) and compresses with turbojpeg at `JPEG_QUALITY`, 4:2:0. It always compresses the newest frame: a frame that arrives while another waits replaces it (see [Drops](#drops)). Compression is in software, about one core and a p95 of about 122 ms at 1080p on the i.MX 8M Plus, which has no hardware JPEG encoder.
+The JPEG stage converts to RGBA at the stream size (mirroring there when needed) and compresses with turbojpeg at `JPEG_QUALITY`, 4:2:0. It always compresses the newest frame: a frame that arrives while another waits replaces it (see [Drops](#drops)). Compression is in software, about one core and a p95 of about 122 ms at 1080p on the i.MX 8M Plus, which has no hardware JPEG encoder. The i.MX 95 has one (`mxc-jpeg`), which `edgefirst-codec` uses only to decode so far.
+
+JPEG and H.264 are alternative outputs: JPEG for any platform at whatever rate the CPU allows, H.264 where a hardware encoder exists. The service runs both if asked, but nothing tunes them to share the CPU and frames, and the board tests (`tests/on_target.rs`) run each one alone.
 
 ### Mirroring
 
