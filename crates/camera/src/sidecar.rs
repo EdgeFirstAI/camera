@@ -221,17 +221,45 @@ impl Sidecar {
 
     /// Writes the sidecar next to `stream` and returns its path.
     ///
+    /// The sidecar is replaced whole: it is written to a temporary file in
+    /// the same directory and renamed over the old one, so a failed or
+    /// interrupted write leaves the previous sidecar as it was.
+    ///
     /// # Errors
     ///
     /// The errors of [`to_json`](Self::to_json), and [`ErrorKind::Io`] when
     /// the file cannot be written.
     pub fn write(&self, stream: &Path) -> Result<PathBuf> {
         let path = paired_path(stream);
-        std::fs::write(&path, self.to_json()?).map_err(|e| {
+        let json = self.to_json()?;
+        let temporary = temporary_path(&path);
+        replace(&temporary, &path, json.as_bytes()).map_err(|e| {
+            let _ = std::fs::remove_file(&temporary);
             Error::new(ErrorKind::Io, format!("sidecar {}: {e}", path.display())).with_source(e)
         })?;
         Ok(path)
     }
+}
+
+/// Where a new sidecar is written before it replaces `path`: beside it, so
+/// the rename stays on one file system.
+fn temporary_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    path.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
+}
+
+/// Writes `bytes` to `temporary`, flushes them to storage and renames the
+/// file to `path`.
+fn replace(temporary: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut file = std::fs::File::create(temporary)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(temporary, path)
 }
 
 /// The colorimetry of a sidecar's `colorimetry` object; `None` when every
@@ -417,6 +445,31 @@ mod tests {
         let written = Sidecar::new(30.0, 640, 480).write(&stream).unwrap();
         assert_eq!(written, dir.join("run.json"));
         assert_eq!(Sidecar::load(&stream).unwrap().width, 640);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_previous_sidecar() {
+        let dir =
+            std::env::temp_dir().join(format!("edgefirst-sidecar-keep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stream = dir.join("run.h264");
+        Sidecar::new(30.0, 640, 480).write(&stream).unwrap();
+
+        // A directory where the replacement would be written makes the write fail.
+        let blocker = temporary_path(&paired_path(&stream));
+        std::fs::create_dir_all(&blocker).unwrap();
+        assert!(Sidecar::new(15.0, 640, 480).write(&stream).is_err());
+        assert_eq!(Sidecar::load(&stream).unwrap().fps, 30.0);
+
+        std::fs::remove_dir_all(&blocker).unwrap();
+        Sidecar::new(15.0, 640, 480).write(&stream).unwrap();
+        assert_eq!(Sidecar::load(&stream).unwrap().fps, 15.0);
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left.len(), 1, "only the sidecar remains: {left:?}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

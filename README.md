@@ -657,7 +657,7 @@ edgefirst-camera record capture.h264 --source /dev/video0 --duration 10
 Writes two files:
 
 - `capture.h264` — raw H.264 Annex-B bitstream, appended frame-by-frame. Flushed on every keyframe so a crash loses at most one GOP (~1 s).
-- `capture.json` — sidecar metadata. Written **once at startup**, holds colorimetry + the exact `sensor_msgs/CameraInfo` and `/tf_static` payloads that would have been published live. Stateless; no per-frame data.
+- `capture.json` — sidecar metadata. Written at startup and rewritten when the recorded rate is corrected, each time replacing the file whole, so an interrupted write leaves the previous one. Holds the rate, colorimetry + the exact `sensor_msgs/CameraInfo` and `/tf_static` payloads that would have been published live. Stateless; no per-frame data.
 
 The tap is inside the h264 encode thread and runs **before** the Zenoh publish, so the recorder captures every frame even if Zenoh drops a publish under congestion.
 
@@ -689,14 +689,13 @@ Replay a recording with the version that made it. Recordings are not supported a
 
 ### Playback outside the camera service
 
-The raw `.h264` file is directly playable by any standard tool:
+The raw `.h264` file is directly playable by any standard tool. Its timing comes from the sidecar's `fps`: the encoder writes the rate it was set up for into the stream, and players use that unless told otherwise, so a recording whose camera slowed down plays short.
 
 ```bash
-vlc capture.h264
-mpv --demuxer=h264 capture.h264
-ffplay -f h264 -framerate 30 capture.h264
-ffmpeg -i capture.h264 -c copy capture.mp4   # remux to MP4, no re-encode
-edgefirst-camera convert capture.h264 capture.mp4   # the same without ffmpeg, at the sidecar's rate
+edgefirst-camera convert capture.h264 capture.mp4   # remux to MP4 at the sidecar's rate, no re-encode
+ffmpeg -r 28.61 -i capture.h264 -c copy capture.mp4   # the same with ffmpeg: -r before -i, set to the sidecar's fps
+ffplay -f h264 -framerate 28.61 capture.h264
+vlc capture.h264   # plays at the stream's own rate
 ```
 
 See [ARCHITECTURE.md § Record and Replay](ARCHITECTURE.md#record-and-replay) for the sidecar JSON schema and internals.
