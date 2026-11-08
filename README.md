@@ -243,7 +243,7 @@ These are the Maivin's devices (camera `/dev/video3`, encoder `/dev/video0`), an
 | Change | Effect | Action |
 |---|---|---|
 | `camera/frame` NV12 frames carry two planes (Y, then interleaved UV) | A consumer that reads only plane 0 sees luma only | Read each plane from `planes`, or keep using plane 0 for luma |
-| `camera/frame` YUYV tensors have shape `[H, W, 2]` | 2.12 published `[H, W]`. This is under review | Read the shape from the message and do not hard-code it |
+| `camera/frame` YUYV tensors have shape `[H, W, 2]` | 2.12 published `[H, W]`. A packed format's shape ends in its elements per pixel | Read the shape from the message and do not hard-code it |
 | `camera/frame` `format` uses the HAL names (`YUYV`, `NV12`, `rgba8`, ...) | Strings that matched 2.12 names may differ | Compare against the names `edgefirst-tensor` defines |
 | `camera/frame` is not mirrored when the camera cannot mirror | The JPEG and H.264 outputs are mirrored in software instead, and the service logs a warning | Use a camera or pipeline that mirrors, or apply the flip in the consumer |
 | Consumers need `pidfd_getfd` permission | See [Reading Camera Frames](#reading-camera-frames) | Run as the camera service's user or grant `CAP_SYS_PTRACE`, and check `kernel.yama.ptrace_scope` |
@@ -634,7 +634,7 @@ On a board with fixed devices, set `CAMERA` and `EDGEFIRST_CODEC_V4L2_ENCODER` i
 ## Known Limitations
 
 - **JPEG is software-compressed, with no guaranteed rate.** The service compresses JPEG with libjpeg-turbo on every platform, so `camera/jpeg` runs at whatever rate the CPU allows and always carries the newest frame; frames it cannot keep up with are dropped. On the i.MX 8M Plus at 1080p that is about one core, 17 to 18 fps and a p95 of about 122 ms, the same as 2.12. Most of the cost is conversion and the DCT, so `JPEG_QUALITY` has little effect; reduce it with `STREAM_SIZE`, or use `camera/h264`, which the i.MX 8M Plus encodes in hardware at the full rate.
-- **YUYV tensor shape.** `camera/frame` describes YUYV tensors as `[H, W, 2]`, where 2.12 used `[H, W]`. This is under review.
+- **YUYV tensor shape.** `camera/frame` describes YUYV tensors as `[H, W, 2]`, where 2.12 used `[H, W]`. A packed format's shape is `[H, W, C]`, with `C` its elements per pixel; semi-planar formats such as NV12 keep `[H, W]` for the luma plane and list their planes in the plane table.
 - **i.MX 95 `nxp/neo` pipeline.** The camera cannot mirror and does not honour the requested frame rate. The service mirrors the encoded outputs in software and reports the rate the camera delivers.
 - **macOS and Windows.** There is no camera backend yet. The application runs on the `mock` source only.
 

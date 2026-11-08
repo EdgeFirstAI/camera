@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
-- `camera/frame` YUYV tensors are described as `[H, W, 2]`, where 2.12 used `[H, W]`. The shape is under review.
+- `camera/frame` YUYV tensors are described as `[H, W, 2]`, where 2.12 used `[H, W]`: a packed format's shape ends in its elements per pixel.
 - A named `CAMERA_MODE` (`1080p30`) is accepted only when the camera reports it; otherwise startup fails and lists the modes the camera offers. File and mock sources cannot report modes.
 - An explicit `CAMERA_SIZE` or `CAMERA_FPS` wins over `CAMERA_MODE`, with a warning. In 2.x the mode won.
 - The `edgefirst_camera_app` library target is removed.
@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - V4L2 capture backend for the SDK (`/dev/videoN`, feature `v4l2`, default on Linux) over `edgefirst-v4l2` (EDGEAI-1520).
   - Exclusive device lock, format and frame-rate negotiation reported in `config()`, enumeration of formats, sizes and rates for `enumerate()`, `probe()` and `modes()`.
   - Import into SDK-allocated contiguous (CMA) buffers or caller-provided tensors, Export over `EXPBUF` (including two-buffer `NV12M`), and `Auto`, which probes Import at `start()` and falls back to Export only for SDK buffers. Caller pools are never replaced: a refusal is `BuffersRejected`; contiguous memory that cannot be allocated is `ContiguousUnavailable`.
-  - Frames carry the capture clock and source from the buffer flags and their acquisition time; drops are counted from timestamp gaps. Frames held across `stop()` or close keep their memory, and the device reopens at once.
+  - Frames carry the capture clock and source from the buffer flags and their acquisition time. Frames held across `stop()` or close keep their memory, and the device reopens at once.
   - Mirror, exposure, gain, white balance, frame rate and any V4L2 control by ID; the i.MX 8M Plus ISP flip quirk.
   - The `probe` example reports what a camera negotiates and delivers on a platform.
   - Drivers that answer `VIDIOC_ENUM_FRAMESIZES` with an error (NXP's `mxc-isi_v1`) list the standard sizes `VIDIOC_TRY_FMT` takes unchanged, with unknown rates, instead of no formats.
@@ -47,7 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An encoder that fails ends the service: if an encoder thread exits or panics, or keeps failing, the service exits with status 70 so systemd restarts it, instead of streaming on without H.264 or JPEG.
 - The periodic drop line reports each output against the frames offered to it, for example `jpeg=127/300`.
 - H.264 tiles for `file:` sources, encoded from the decoded frames.
-- Development: a Rust 1.94.0 toolchain pin (EDGEAI-1518); the V4L2 ioctl ABI check on every pull request (`make abi-check`) (EDGEAI-1530); SDK capture benchmarks and the on-demand `Camera benchmarks` workflow (`make bench-capture`) (EDGEAI-1530); the platform validation suite `tests/board.rs` and the board lane on the i.MX 8M Plus (V4L2) and i.MX 95 (libcamera) (EDGEAI-1532, EDGEAI-1538); a shim build for libcamera 0.5, 0.6 and 0.7 on x86_64 and aarch64 with an imports check (EDGEAI-1540); and `scripts/parity.sh`, with the `parity` example, which compares the installed service with a new build on a Maivin (EDGEAI-1529).
+- Development: a Rust 1.94.0 toolchain pin (EDGEAI-1518); the V4L2 ioctl ABI check on every pull request (`make abi-check`) (EDGEAI-1530); SDK capture benchmarks and the on-demand `Camera benchmarks` workflow (`make bench-capture`) (EDGEAI-1530); the platform validation suite `tests/board.rs` and the board lane on the i.MX 8M Plus (V4L2) and i.MX 95 (libcamera) (EDGEAI-1532, EDGEAI-1538); a shim build for libcamera 0.5 to 0.8, and Raspberry Pi's 0.7, on x86_64 and aarch64 with an imports check (EDGEAI-1540); and `scripts/parity.sh`, with the `parity` example, which compares the installed service with a new build on a Maivin (EDGEAI-1529).
 - Caller-pool validation rejects memory the tensor crate reports as non-contiguous while contiguity is required (EDGEAI-1520).
 - `schemas` feature: `schema::FrameTensor` maps a `Frame` to an `edgefirst_msgs/CameraFrame` tensor (addressing-grid shape, byte strides at the real pitch, tensor-ABI storage kind and dtype, one plane per buffer plane, colorimetry), with `schema::stamp` and `schema::ntp64` giving the header stamp and the Zenoh sample timestamp of the same instant (EDGEAI-1521).
 - File source for the SDK (`file:<name>.h264` with its `<name>.json` sidecar, feature `file`): plays a recording through the platform's V4L2 H.264 decoder (EDGEAI-1524).
