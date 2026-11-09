@@ -199,12 +199,11 @@ jobs:
     uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@c7876194b9fe9f7f72daf0efadaf32d7dff1b257
     with:
       lanes: ${{ needs.changes.outputs.full == 'true' && 'all' || 'hardware' }}
-      # An i.MX 8M Plus and the IQ-9075 EVK's USB webcam through V4L2, and
-      # the i.MX 95 and Raspberry Pi 5 through libcamera; board-setup.sh
-      # points the tests at each board's camera. Each board is pinned by its
-      # own label, so a new camera-v4l2 board is not picked until it has a
-      # board-setup.sh branch.
-      boards: camera-v4l2+imx8mp, camera-v4l2+iq9075, camera-libcamera+imx95, camera-libcamera+rpi5
+      # An i.MX 8M Plus through V4L2, and the i.MX 95 and Raspberry Pi 5
+      # through libcamera; board-setup.sh points the tests at each board's
+      # camera. Each board is pinned by its own label. Niche configurations,
+      # such as the iq9075-evk's USB webcam, are tested by hand instead.
+      boards: camera-v4l2+imx8mp, camera-libcamera+imx95, camera-libcamera+rpi5
       sonar: false
       scancode: true
       # macOS and Windows lanes live in camera-full.yml: these lanes would
