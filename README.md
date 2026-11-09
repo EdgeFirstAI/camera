@@ -243,7 +243,7 @@ These are the Maivin's devices (camera `/dev/video3`, encoder `/dev/video0`), an
 | Change | Effect | Action |
 |---|---|---|
 | `camera/frame` NV12 frames carry two planes (Y, then interleaved UV) | A consumer that reads only plane 0 sees luma only | Read each plane from `planes`, or keep using plane 0 for luma |
-| `camera/frame` YUYV tensors have shape `[H, W, 2]` | 2.12 published `[H, W]`. This is under review | Read the shape from the message and do not hard-code it |
+| `camera/frame` YUYV tensors have shape `[H, W, 2]` | 2.12 published `[H, W]`. A packed format's shape ends in its elements per pixel | Read the shape from the message and do not hard-code it |
 | `camera/frame` `format` uses the HAL names (`YUYV`, `NV12`, `rgba8`, ...) | Strings that matched 2.12 names may differ | Compare against the names `edgefirst-tensor` defines |
 | `camera/frame` is not mirrored when the camera cannot mirror | The JPEG and H.264 outputs are mirrored in software instead, and the service logs a warning | Use a camera or pipeline that mirrors, or apply the flip in the consumer |
 | Consumers need `pidfd_getfd` permission | See [Reading Camera Frames](#reading-camera-frames) | Run as the camera service's user or grant `CAP_SYS_PTRACE`, and check `kernel.yama.ptrace_scope` |
@@ -634,7 +634,7 @@ On a board with fixed devices, set `CAMERA` and `EDGEFIRST_CODEC_V4L2_ENCODER` i
 ## Known Limitations
 
 - **JPEG is software-compressed, with no guaranteed rate.** The service compresses JPEG with libjpeg-turbo on every platform, so `camera/jpeg` runs at whatever rate the CPU allows and always carries the newest frame; frames it cannot keep up with are dropped. On the i.MX 8M Plus at 1080p that is about one core, 17 to 18 fps and a p95 of about 122 ms, the same as 2.12. Most of the cost is conversion and the DCT, so `JPEG_QUALITY` has little effect; reduce it with `STREAM_SIZE`, or use `camera/h264`, which the i.MX 8M Plus encodes in hardware at the full rate.
-- **YUYV tensor shape.** `camera/frame` describes YUYV tensors as `[H, W, 2]`, where 2.12 used `[H, W]`. This is under review.
+- **YUYV tensor shape.** `camera/frame` describes YUYV tensors as `[H, W, 2]`, where 2.12 used `[H, W]`. A packed format's shape is `[H, W, C]`, with `C` its elements per pixel; semi-planar formats such as NV12 keep `[H, W]` for the luma plane and list their planes in the plane table.
 - **i.MX 95 `nxp/neo` pipeline.** The camera cannot mirror and does not honour the requested frame rate. The service mirrors the encoded outputs in software and reports the rate the camera delivers.
 - **macOS and Windows.** There is no camera backend yet. The application runs on the `mock` source only.
 
@@ -657,7 +657,7 @@ edgefirst-camera record capture.h264 --source /dev/video0 --duration 10
 Writes two files:
 
 - `capture.h264` — raw H.264 Annex-B bitstream, appended frame-by-frame. Flushed on every keyframe so a crash loses at most one GOP (~1 s).
-- `capture.json` — sidecar metadata. Written **once at startup**, holds colorimetry + the exact `sensor_msgs/CameraInfo` and `/tf_static` payloads that would have been published live. Stateless; no per-frame data.
+- `capture.json` — sidecar metadata. Written at startup and rewritten when the recorded rate is corrected, each time replacing the file whole, so an interrupted write leaves the previous one. Holds the rate, colorimetry + the exact `sensor_msgs/CameraInfo` and `/tf_static` payloads that would have been published live. Stateless; no per-frame data.
 
 The tap is inside the h264 encode thread and runs **before** the Zenoh publish, so the recorder captures every frame even if Zenoh drops a publish under congestion.
 
@@ -689,14 +689,13 @@ Replay a recording with the version that made it. Recordings are not supported a
 
 ### Playback outside the camera service
 
-The raw `.h264` file is directly playable by any standard tool:
+The raw `.h264` file is directly playable by any standard tool. Its timing comes from the sidecar's `fps`: the encoder writes the rate it was set up for into the stream, and players use that unless told otherwise, so a recording whose camera slowed down plays short.
 
 ```bash
-vlc capture.h264
-mpv --demuxer=h264 capture.h264
-ffplay -f h264 -framerate 30 capture.h264
-ffmpeg -i capture.h264 -c copy capture.mp4   # remux to MP4, no re-encode
-edgefirst-camera convert capture.h264 capture.mp4   # the same without ffmpeg, at the sidecar's rate
+edgefirst-camera convert capture.h264 capture.mp4   # remux to MP4 at the sidecar's rate, no re-encode
+ffmpeg -r 28.61 -i capture.h264 -c copy capture.mp4   # the same with ffmpeg: -r before -i, set to the sidecar's fps
+ffplay -f h264 -framerate 28.61 capture.h264
+vlc capture.h264   # plays at the stream's own rate
 ```
 
 See [ARCHITECTURE.md § Record and Replay](ARCHITECTURE.md#record-and-replay) for the sidecar JSON schema and internals.
