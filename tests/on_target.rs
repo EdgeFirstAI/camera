@@ -35,13 +35,16 @@ type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
 
 /// How long a stopped binary may take to exit.
 const SHUTDOWN_BOUND: Duration = Duration::from_secs(3);
+/// The same with coverage on: the binary writes its profile as it exits,
+/// which on a board's SD card, behind other tests' profiles, can take
+/// seconds. Below [`common::SHUTDOWN_GRACE`].
+const SHUTDOWN_BOUND_WITH_COVERAGE: Duration = Duration::from_secs(8);
 /// From start-up to the first sample on every topic.
 const FIRST_SAMPLE: Duration = Duration::from_secs(20);
 /// How long each topic's rate is measured, from its first sample.
 const RATE_WINDOW: Duration = Duration::from_secs(10);
 /// The share of the expected rate a topic must keep.
 const MIN_RATE: f64 = 0.9;
-const DEFAULT_FPS: f64 = 30.0;
 
 const FRAME_TOPIC: &str = "camera/frame";
 const JPEG_TOPIC: &str = "camera/jpeg";
@@ -63,11 +66,7 @@ enum Expect {
 /// The rate requested from the camera and expected of [`Expect::Rate`]
 /// topics.
 fn expected_fps() -> f64 {
-    std::env::var("EDGEFIRST_CAMERA_FPS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|f: &f64| *f > 0.0)
-        .unwrap_or(DEFAULT_FPS)
+    common::camera_fps()
 }
 
 fn spawn<S: AsRef<OsStr>>(args: &[S]) -> std::io::Result<Child> {
@@ -77,12 +76,18 @@ fn spawn<S: AsRef<OsStr>>(args: &[S]) -> std::io::Result<Child> {
         .spawn()
 }
 
-/// Sends SIGTERM and requires a clean exit within [`SHUTDOWN_BOUND`].
+/// Sends SIGTERM and requires a clean exit within [`SHUTDOWN_BOUND`], or
+/// [`SHUTDOWN_BOUND_WITH_COVERAGE`] when coverage is collected.
 fn stop<S: AsRef<OsStr> + Debug>(child: Child, args: &[S]) -> TestResult {
+    let bound = if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
+        SHUTDOWN_BOUND_WITH_COVERAGE
+    } else {
+        SHUTDOWN_BOUND
+    };
     let took = common::stop(child).map_err(|e| format!("{args:?}: {e}"))?;
     eprintln!("stopped {took:?} after SIGTERM");
-    if took > SHUTDOWN_BOUND {
-        return Err(format!("{args:?} took {took:?} to stop, over {SHUTDOWN_BOUND:?}").into());
+    if took > bound {
+        return Err(format!("{args:?} took {took:?} to stop, over {bound:?}").into());
     }
     Ok(())
 }
@@ -281,23 +286,34 @@ impl Arrivals {
     }
 }
 
-/// `args` capturing from the board's camera at 1080p and the expected rate,
-/// or `None` without a camera. Unset, the app keeps the sensor's current
-/// size, which after a reboot can be smaller than the default 1080p stream
-/// (the OV5640 comes up at 640x480).
+/// `args` capturing from the board's camera at the lane's size and rate,
+/// and streaming at that size, or `None` without a camera. Unset, the app
+/// keeps the sensor's current size, which after a reboot can be smaller than
+/// the default 1080p stream (the OV5640 comes up at 640x480).
 fn capture(args: &[&str]) -> Option<Vec<String>> {
     let source = common::source()?;
     let fps = expected_fps().to_string();
+    let (width, height) = common::camera_size();
+    let (width, height) = (width.to_string(), height.to_string());
     let camera = [
         "--source",
         &source,
         "--camera-size",
-        "1920",
-        "1080",
+        &width,
+        &height,
         "--camera-fps",
         &fps,
+        "--stream-size",
+        &width,
+        &height,
     ];
     Some(camera.iter().chain(args).map(ToString::to_string).collect())
+}
+
+/// Whether the board's H.264 encoder takes what the camera captures.
+fn encoder_takes_the_camera() -> bool {
+    let source = std::env::var("EDGEFIRST_CAMERA_SOURCE").unwrap_or_else(|_| "/dev/video3".into());
+    common::h264_encoder(common::capture_format(&source))
 }
 
 fn sidecar(recording: &Path) -> PathBuf {
@@ -334,7 +350,7 @@ fn jpeg_capture() -> TestResult {
 #[serial]
 #[ignore = "requires a camera (run with --include-ignored on a board)"]
 fn h264_capture() -> TestResult {
-    if !common::h264_encoder() {
+    if !encoder_takes_the_camera() {
         return Ok(());
     }
     let Some(args) = capture(&["--h264"]) else {
@@ -350,7 +366,7 @@ fn h264_capture() -> TestResult {
 #[serial]
 #[ignore = "requires a camera (run with --include-ignored on a board)"]
 fn record_then_replay() -> TestResult {
-    if !common::h264_encoder() || !common::h264_decoder() {
+    if !encoder_takes_the_camera() || !common::h264_decoder() {
         return Ok(());
     }
     let dir = scratch_dir("record")?;
@@ -381,7 +397,7 @@ fn record_then_replay() -> TestResult {
 #[serial]
 #[ignore = "requires a camera (run with --include-ignored on a board)"]
 fn record_subcommand_writes_a_playable_recording() -> TestResult {
-    if !common::h264_encoder() || !common::h264_decoder() {
+    if !encoder_takes_the_camera() || !common::h264_decoder() {
         return Ok(());
     }
     let dir = scratch_dir("record-sub")?;
@@ -422,10 +438,18 @@ fn devices_reports_the_cameras_modes() -> TestResult {
     let Some(source) = common::source() else {
         return Ok(());
     };
+    // `devices` names V4L2 cameras by their /dev/videoN node, which a
+    // by-id link resolves to.
     let (backend, id) = match source.strip_prefix("libcamera:") {
-        Some(id) => ("libcamera", id),
-        None => ("v4l2", source.as_str()),
+        Some(id) => ("libcamera", id.to_owned()),
+        None => (
+            "v4l2",
+            std::fs::canonicalize(&source)?
+                .to_string_lossy()
+                .into_owned(),
+        ),
     };
+    let (width, height) = common::camera_size();
     let out = Command::new(camera_bin())
         .args(["devices", "--json"])
         .output()?;
@@ -443,16 +467,66 @@ fn devices_reports_the_cameras_modes() -> TestResult {
         .collect();
     // Rates differ by camera: neo offers 1080p only at the rate it holds to,
     // and imx8-isi and NXP's mxc-isi_v1 report none, which names no mode
-    // but still lists the size. Stepwise ranges list modes only.
+    // but still lists the size.
     let mode = formats
         .iter()
         .flat_map(|f| f["modes"].as_array().into_iter().flatten())
         .filter_map(|m| m.as_str())
-        .any(|m| m.starts_with("1080p"));
+        .any(|m| mode_is_size(m, width, height));
     let size = formats
         .iter()
-        .flat_map(|f| f["sizes"].as_array().into_iter().flatten())
-        .any(|s| s["width"] == 1920 && s["height"] == 1080);
-    assert!(mode || size, "{source} offers no 1080p: {devices}");
+        .any(|f| sizes_include(&f["sizes"], width, height));
+    assert!(
+        mode || size,
+        "{source} offers no {width}x{height}: {devices}"
+    );
     Ok(())
+}
+
+/// Whether a mode name (`1080p30`, `VGA30`, `752x416@5`) is of the given size.
+fn mode_is_size(mode: &str, width: u32, height: u32) -> bool {
+    match mode.split_once('@') {
+        Some((size, _)) => size == format!("{width}x{height}"),
+        None => {
+            let name = mode.trim_end_matches(|c: char| c.is_ascii_digit());
+            edgefirst_camera::named_size(name) == Some((width, height))
+        }
+    }
+}
+
+/// Whether a format's `sizes` from `devices --json` include `width` x
+/// `height`: a list of sizes, or a stepwise range given as `min`, `max` and
+/// `step`, each `[width, height]`.
+fn sizes_include(sizes: &serde_json::Value, width: u32, height: u32) -> bool {
+    if let Some(list) = sizes.as_array() {
+        return list
+            .iter()
+            .any(|s| s["width"] == width && s["height"] == height);
+    }
+    let axis = |i: usize, value: u32| {
+        let get = |key: &str| sizes[key][i].as_u64();
+        let (Some(min), Some(max), Some(step)) = (get("min"), get("max"), get("step")) else {
+            return false;
+        };
+        let value = u64::from(value);
+        (min..=max).contains(&value) && (value == min || (step > 0 && (value - min) % step == 0))
+    };
+    axis(0, width) && axis(1, height)
+}
+
+#[test]
+fn sizes_include_listed_and_stepwise_sizes() {
+    let listed = serde_json::json!([{"width": 640, "height": 480, "fps": [30.0]}]);
+    assert!(sizes_include(&listed, 640, 480));
+    assert!(!sizes_include(&listed, 752, 416));
+
+    let stepwise = serde_json::json!({"min": [16, 16], "max": [8192, 8192], "step": [2, 2]});
+    assert!(sizes_include(&stepwise, 752, 416));
+    assert!(sizes_include(&stepwise, 16, 16));
+    assert!(!sizes_include(&stepwise, 753, 416), "off the step");
+    assert!(!sizes_include(&stepwise, 8194, 416), "above the range");
+
+    let fixed = serde_json::json!({"min": [64, 48], "max": [64, 48], "step": [0, 0]});
+    assert!(sizes_include(&fixed, 64, 48));
+    assert!(!sizes_include(&fixed, 66, 48));
 }

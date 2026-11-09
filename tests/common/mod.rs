@@ -55,10 +55,12 @@ pub enum Skip {
     NoEncoder,
     /// The board has no H.264 decoder.
     NoDecoder,
+    /// The board's H.264 encoder does not take the camera's pixel format.
+    EncoderFormat,
 }
 
 impl Skip {
-    pub const ALL: [Skip; 10] = [
+    pub const ALL: [Skip; 11] = [
         Skip::NoCamera,
         Skip::NoMirror,
         Skip::UniformScene,
@@ -69,6 +71,7 @@ impl Skip {
         Skip::NoCmaHeap,
         Skip::NoEncoder,
         Skip::NoDecoder,
+        Skip::EncoderFormat,
     ];
 
     /// The name a lane lists in `EDGEFIRST_CAMERA_ALLOW_SKIPS`.
@@ -84,6 +87,7 @@ impl Skip {
             Skip::NoCmaHeap => "no-cma-heap",
             Skip::NoEncoder => "no-encoder",
             Skip::NoDecoder => "no-decoder",
+            Skip::EncoderFormat => "encoder-format",
         }
     }
 }
@@ -110,20 +114,28 @@ fn allowed_skips() -> Vec<Skip> {
         .collect()
 }
 
-/// Reports that the calling test skips for `reason`. Fails the test instead
-/// when the lane requires the board and does not allow `reason`.
 /// Reports a failure that is known on this hardware, instead of failing
 /// the test. Only for a fault confirmed on the device itself, never as a
 /// way around a test.
-///
-/// nextest hides the output of passing tests, so besides stderr and a
-/// GitHub `::warning::` line (an annotation when output is shown), this
-/// writes a warning block into the job summary, which always shows on the
-/// run's page.
 pub fn known_failure(hardware: &str, why: impl Display) {
+    warn(&format!("Known hardware failure on {hardware}"), why);
+}
+
+/// Reports a measurement that misses a performance goal. Goals are not
+/// pass/fail: a miss is investigated to find whether the cost is in our
+/// code or the vendor's, so the test warns and passes.
+pub fn goal_missed(why: impl Display) {
+    warn("Performance goal missed", why);
+}
+
+/// A warning that a passing test must still show. nextest hides the output
+/// of passing tests, so besides stderr and a GitHub `::warning::` line (an
+/// annotation when output is shown), this writes a warning block into the
+/// job summary, which always shows on the run's page.
+fn warn(title: &str, why: impl Display) {
     let banner = "!".repeat(72);
-    eprintln!("{banner}\nKNOWN HARDWARE FAILURE on {hardware}: {why}\n{banner}");
-    println!("::warning title=Known hardware failure on {hardware}::{why}");
+    eprintln!("{banner}\n{}: {why}\n{banner}", title.to_uppercase());
+    println!("::warning title={title}::{why}");
     if let Some(summary) = std::env::var_os("GITHUB_STEP_SUMMARY") {
         use std::io::Write as _;
         if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -131,14 +143,13 @@ pub fn known_failure(hardware: &str, why: impl Display) {
             .append(true)
             .open(summary)
         {
-            let _ = writeln!(
-                f,
-                "\n> [!WARNING]\n> **Known hardware failure on {hardware}:** {why}\n"
-            );
+            let _ = writeln!(f, "\n> [!WARNING]\n> **{title}:** {why}\n");
         }
     }
 }
 
+/// Reports that the calling test skips for `reason`. Fails the test instead
+/// when the lane requires the board and does not allow `reason`.
 pub fn skip(reason: Skip, why: impl Display) {
     let allowed = allowed_skips();
     if board_required() && !allowed.contains(&reason) {
@@ -152,18 +163,63 @@ pub fn skip(reason: Skip, why: impl Display) {
     eprintln!("SKIPPED ({}): {why}", reason.name());
 }
 
-/// Whether the board has an H.264 encoder; reports [`Skip::NoEncoder`]
-/// when it has none. Only a missing device counts: a device that refuses
-/// this probe's settings is left for the test to report.
-pub fn h264_encoder() -> bool {
+/// The capture size the board tests request: `EDGEFIRST_CAMERA_SIZE` as
+/// `WIDTHxHEIGHT`, default 1920x1080.
+pub fn camera_size() -> (u32, u32) {
+    let Ok(spec) = std::env::var("EDGEFIRST_CAMERA_SIZE") else {
+        return (1920, 1080);
+    };
+    spec.split_once('x')
+        .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+        .filter(|&(w, h)| w > 0 && h > 0)
+        .unwrap_or_else(|| panic!("EDGEFIRST_CAMERA_SIZE={spec:?} is not WIDTHxHEIGHT"))
+}
+
+/// The rate the board tests request: `EDGEFIRST_CAMERA_FPS`, default 30.
+pub fn camera_fps() -> f64 {
+    std::env::var("EDGEFIRST_CAMERA_FPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|f: &f64| *f > 0.0)
+        .unwrap_or(30.0)
+}
+
+/// Whether the machine has a CMA heap. Without one, pools the tests
+/// allocate are not physically contiguous.
+pub fn cma_heap() -> bool {
+    std::path::Path::new("/dev/dma_heap/linux,cma").exists()
+}
+
+/// The pixel format a source captures in: NV12 from libcamera, YUYV from
+/// V4L2, as the service captures.
+pub fn capture_format(source: &str) -> edgefirst_tensor::PixelFormat {
+    if source.starts_with("libcamera") {
+        edgefirst_tensor::PixelFormat::Nv12
+    } else {
+        edgefirst_tensor::PixelFormat::Yuyv
+    }
+}
+
+/// Whether the board has an H.264 encoder that takes `format` at
+/// [`camera_size`]; reports [`Skip::NoEncoder`] when it has none and
+/// [`Skip::EncoderFormat`] when it refuses the format. Any other refusal
+/// is left for the test to report.
+pub fn h264_encoder(format: edgefirst_tensor::PixelFormat) -> bool {
     use edgefirst_codec::{
         video::{EncoderConfig, VideoEncoder},
         CodecError,
     };
-    let config = EncoderConfig::h264(640, 480, edgefirst_tensor::PixelFormat::Nv12, 30.0);
-    match VideoEncoder::new(config) {
+    let (width, height) = camera_size();
+    match VideoEncoder::new(EncoderConfig::h264(width, height, format, camera_fps())) {
         Err(CodecError::NoDevice(why)) => {
             skip(Skip::NoEncoder, why);
+            false
+        }
+        Err(CodecError::UnsupportedFormat(format)) => {
+            skip(
+                Skip::EncoderFormat,
+                format!("the H.264 encoder does not take {format:?}"),
+            );
             false
         }
         _ => true,
