@@ -195,9 +195,9 @@ A recording is a pair of files with a shared basename:
 | File | Contents |
 |---|---|
 | `<name>.h264` | Raw H.264 Annex B, access units back to back, no container or index |
-| `<name>.json` | Sidecar metadata, written once at record start |
+| `<name>.json` | Sidecar metadata, written at record start and replaced whole whenever its rate is corrected |
 
-The `.h264` file is written as the encoder produces it and flushed at every key frame, so any prefix decodes. VLC, mpv and ffplay play it directly; `ffmpeg -i in.h264 -c copy out.mp4` muxes it into MP4 without re-encoding.
+The `.h264` file is written as the encoder produces it and flushed at every key frame, so any prefix decodes. VLC, mpv and ffplay play it directly, at the rate the encoder was set up for, which the stream's VUI carries. The recorded rate is the sidecar's `fps`, so `edgefirst-camera convert` muxes into MP4 at that rate, as does ffmpeg with the rate given before the input (`ffmpeg -r <fps> -i in.h264 -c copy out.mp4`). Without it, ffmpeg takes the VUI rate, and a recording whose camera slowed down comes out short.
 
 ### Sidecar v1
 

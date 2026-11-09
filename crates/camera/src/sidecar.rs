@@ -23,7 +23,10 @@
 //! labels are the tensor crate's (an empty string is unspecified). Every
 //! other field is the application's, and is kept verbatim as `extras`.
 
+use std::fs::{File, OpenOptions};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use edgefirst_tensor::{ColorEncoding, ColorRange, ColorSpace, ColorTransfer, Colorimetry};
 use serde_json::{Map, Value};
@@ -221,17 +224,77 @@ impl Sidecar {
 
     /// Writes the sidecar next to `stream` and returns its path.
     ///
+    /// The sidecar is replaced whole: it is written to a temporary file in
+    /// the same directory and renamed over the old one, so a failed or
+    /// interrupted write leaves the previous sidecar as it was.
+    ///
     /// # Errors
     ///
     /// The errors of [`to_json`](Self::to_json), and [`ErrorKind::Io`] when
     /// the file cannot be written.
     pub fn write(&self, stream: &Path) -> Result<PathBuf> {
         let path = paired_path(stream);
-        std::fs::write(&path, self.to_json()?).map_err(|e| {
-            Error::new(ErrorKind::Io, format!("sidecar {}: {e}", path.display())).with_source(e)
-        })?;
+        let json = self.to_json()?;
+        create_temporary(&path)
+            .and_then(|(temporary, file)| publish(file, &temporary, &path, json.as_bytes()))
+            .map_err(|e| {
+                Error::new(ErrorKind::Io, format!("sidecar {}: {e}", path.display())).with_source(e)
+            })?;
         Ok(path)
     }
+}
+
+/// How many temporary names a write tries before giving up.
+const TEMPORARY_ATTEMPTS: usize = 16;
+
+/// A name for a new sidecar to be written under before it replaces `path`:
+/// beside it, so the rename stays on one file system, and unique to this
+/// call within the process.
+fn temporary_path(path: &Path) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!(".{name}.{}.{n}.tmp", std::process::id()))
+}
+
+/// Creates the file `temporary`, failing if anything, a symlink included,
+/// already exists there.
+fn create_exclusive(temporary: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temporary)
+}
+
+/// Creates a new temporary file for `path`'s replacement, skipping names
+/// that are already taken.
+fn create_temporary(path: &Path) -> std::io::Result<(PathBuf, File)> {
+    let mut taken = None;
+    for _ in 0..TEMPORARY_ATTEMPTS {
+        let temporary = temporary_path(path);
+        match create_exclusive(&temporary) {
+            Ok(file) => return Ok((temporary, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => taken = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(taken.unwrap_or_else(|| std::io::ErrorKind::AlreadyExists.into()))
+}
+
+/// Writes `bytes` to `file`, created at `temporary`, flushes them to
+/// storage and renames the file to `path`. On failure the temporary file is
+/// removed and `path` is left as it was.
+fn publish(mut file: File, temporary: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    let result = written.and_then(|()| std::fs::rename(temporary, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result
 }
 
 /// The colorimetry of a sidecar's `colorimetry` object; `None` when every
@@ -417,6 +480,61 @@ mod tests {
         let written = Sidecar::new(30.0, 640, 480).write(&stream).unwrap();
         assert_eq!(written, dir.join("run.json"));
         assert_eq!(Sidecar::load(&stream).unwrap().width, 640);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_previous_sidecar() {
+        let dir =
+            std::env::temp_dir().join(format!("edgefirst-sidecar-keep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stream = dir.join("run.h264");
+        Sidecar::new(30.0, 640, 480).write(&stream).unwrap();
+
+        // A handle that cannot be written makes the replacement fail before
+        // its rename.
+        let path = paired_path(&stream);
+        let (temporary, file) = create_temporary(&path).unwrap();
+        drop(file);
+        let read_only = File::open(&temporary).unwrap();
+        assert!(publish(read_only, &temporary, &path, b"{}").is_err());
+        assert!(!temporary.exists(), "the failed write removed its file");
+        assert_eq!(Sidecar::load(&stream).unwrap().fps, 30.0);
+
+        Sidecar::new(15.0, 640, 480).write(&stream).unwrap();
+        assert_eq!(Sidecar::load(&stream).unwrap().fps, 15.0);
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left.len(), 1, "only the sidecar remains: {left:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn every_write_gets_its_own_temporary_name() {
+        let path = Path::new("/recordings/run.json");
+        assert_ne!(temporary_path(path), temporary_path(path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_entry_at_the_temporary_name_is_neither_followed_nor_removed() {
+        let dir =
+            std::env::temp_dir().join(format!("edgefirst-sidecar-link-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim");
+        std::fs::write(&victim, "kept").unwrap();
+        let temporary = temporary_path(&dir.join("run.json"));
+        std::os::unix::fs::symlink(&victim, &temporary).unwrap();
+
+        let e = create_exclusive(&temporary).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "kept");
+        assert!(
+            temporary.symlink_metadata().is_ok(),
+            "the link is left alone"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

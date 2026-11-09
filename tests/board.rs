@@ -286,12 +286,13 @@ fn isp_active() -> bool {
 
 /// 1080p at 30 fps (or the rate a pipeline holds to) into the caller's
 /// image-crate pool where the backend imports one, each frame converted to
-/// RGBA by the GL backend: no unexpected drops, every frame in the pool, and
+/// RGBA by the GL backend: no stall longer than three frame periods, the
+/// delivered rate agreeing with the measured one, every frame in the pool, and
 /// after warm-up every import a cache hit.
 #[test]
 #[serial]
 #[ignore = "requires a camera (run with --include-ignored on a board)"]
-fn soak_1080p30_into_the_callers_pool_without_drops() -> TestResult {
+fn soak_1080p30_into_the_callers_pool_without_stalls() -> TestResult {
     let Some(t) = target() else {
         return Ok(());
     };
