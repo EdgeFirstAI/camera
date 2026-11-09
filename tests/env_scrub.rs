@@ -171,7 +171,7 @@ fn empty_env_is_treated_as_unset() {
     }
     let args = Args::try_parse_from(ARGV).expect("defaults must apply after scrubbing");
     assert_eq!(args.jpeg_quality, 85);
-    assert!(args.h264);
+    assert!(!args.h264);
     assert_eq!(args.capture.mirror, MirrorSetting::Both);
     assert_eq!(args.replay_fps, None);
     assert_eq!(args.capture.camera_mode, None);
@@ -238,7 +238,9 @@ fn default_files_start_the_service() {
         unsafe { scrub_empty_env::<Args>(KEEP) };
         let args = Args::try_parse_from(ARGV).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(args.source_spec(), "/dev/video3", "{name}");
-        assert!(args.h264, "{name}");
+        // 2.12 shipped H.264 on; the current file leaves both outputs off for
+        // the platform's BSP to choose.
+        assert_eq!(args.h264, name == "2.12", "{name}");
         assert!(!args.jpeg, "{name}");
         assert_eq!(args.capture.mirror, MirrorSetting::Both, "{name}");
         assert_eq!(args.capture.camera_buffers, 4, "{name}");

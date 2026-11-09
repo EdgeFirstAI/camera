@@ -51,10 +51,14 @@ pub enum Skip {
     NotV4l2,
     /// The machine has no `/dev/dma_heap/linux,cma`.
     NoCmaHeap,
+    /// The board has no H.264 encoder.
+    NoEncoder,
+    /// The board has no H.264 decoder.
+    NoDecoder,
 }
 
 impl Skip {
-    pub const ALL: [Skip; 8] = [
+    pub const ALL: [Skip; 10] = [
         Skip::NoCamera,
         Skip::NoMirror,
         Skip::UniformScene,
@@ -63,6 +67,8 @@ impl Skip {
         Skip::NoRecording,
         Skip::NotV4l2,
         Skip::NoCmaHeap,
+        Skip::NoEncoder,
+        Skip::NoDecoder,
     ];
 
     /// The name a lane lists in `EDGEFIRST_CAMERA_ALLOW_SKIPS`.
@@ -76,6 +82,8 @@ impl Skip {
             Skip::NoRecording => "no-recording",
             Skip::NotV4l2 => "not-v4l2",
             Skip::NoCmaHeap => "no-cma-heap",
+            Skip::NoEncoder => "no-encoder",
+            Skip::NoDecoder => "no-decoder",
         }
     }
 }
@@ -142,6 +150,40 @@ pub fn skip(reason: Skip, why: impl Display) {
         );
     }
     eprintln!("SKIPPED ({}): {why}", reason.name());
+}
+
+/// Whether the board has an H.264 encoder; reports [`Skip::NoEncoder`]
+/// when it has none. Only a missing device counts: a device that refuses
+/// this probe's settings is left for the test to report.
+pub fn h264_encoder() -> bool {
+    use edgefirst_codec::{
+        video::{EncoderConfig, VideoEncoder},
+        CodecError,
+    };
+    let config = EncoderConfig::h264(640, 480, edgefirst_tensor::PixelFormat::Nv12, 30.0);
+    match VideoEncoder::new(config) {
+        Err(CodecError::NoDevice(why)) => {
+            skip(Skip::NoEncoder, why);
+            false
+        }
+        _ => true,
+    }
+}
+
+/// Whether the board has an H.264 decoder; reports [`Skip::NoDecoder`]
+/// when it has none.
+pub fn h264_decoder() -> bool {
+    use edgefirst_codec::{
+        video::{DecoderConfig, VideoDecoder},
+        CodecError,
+    };
+    match VideoDecoder::new(DecoderConfig::h264()) {
+        Err(CodecError::NoDevice(why)) => {
+            skip(Skip::NoDecoder, why);
+            false
+        }
+        _ => true,
+    }
 }
 
 /// The source spec from `EDGEFIRST_CAMERA_SOURCE`: a V4L2 node (default

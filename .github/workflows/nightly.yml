@@ -41,9 +41,10 @@ jobs:
     with:
       lanes: all
       nightly: true
-      # As in ci.yml: an i.MX 8M Plus through V4L2, and the i.MX 95 through
-      # libcamera; board-setup.sh points the tests at each board's camera.
-      boards: camera-v4l2+imx8mp, camera-libcamera+imx95
+      # As in ci.yml: an i.MX 8M Plus through V4L2, and the i.MX 95 and
+      # Raspberry Pi 5 through libcamera; board-setup.sh points the tests at
+      # each board's camera.
+      boards: camera-v4l2+imx8mp, camera-libcamera+imx95, camera-libcamera+rpi5
       # The ten-minute platform soak (tests/board.rs).
       env: |
         EDGEFIRST_SOAK_SECS=600
