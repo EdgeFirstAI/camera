@@ -467,7 +467,7 @@ fn devices_reports_the_cameras_modes() -> TestResult {
         .collect();
     // Rates differ by camera: neo offers 1080p only at the rate it holds to,
     // and imx8-isi and NXP's mxc-isi_v1 report none, which names no mode
-    // but still lists the size. Stepwise ranges list modes only.
+    // but still lists the size.
     let mode = formats
         .iter()
         .flat_map(|f| f["modes"].as_array().into_iter().flatten())
@@ -475,8 +475,7 @@ fn devices_reports_the_cameras_modes() -> TestResult {
         .any(|m| mode_is_size(m, width, height));
     let size = formats
         .iter()
-        .flat_map(|f| f["sizes"].as_array().into_iter().flatten())
-        .any(|s| s["width"] == width && s["height"] == height);
+        .any(|f| sizes_include(&f["sizes"], width, height));
     assert!(
         mode || size,
         "{source} offers no {width}x{height}: {devices}"
@@ -493,4 +492,41 @@ fn mode_is_size(mode: &str, width: u32, height: u32) -> bool {
             edgefirst_camera::named_size(name) == Some((width, height))
         }
     }
+}
+
+/// Whether a format's `sizes` from `devices --json` include `width` x
+/// `height`: a list of sizes, or a stepwise range given as `min`, `max` and
+/// `step`, each `[width, height]`.
+fn sizes_include(sizes: &serde_json::Value, width: u32, height: u32) -> bool {
+    if let Some(list) = sizes.as_array() {
+        return list
+            .iter()
+            .any(|s| s["width"] == width && s["height"] == height);
+    }
+    let axis = |i: usize, value: u32| {
+        let get = |key: &str| sizes[key][i].as_u64();
+        let (Some(min), Some(max), Some(step)) = (get("min"), get("max"), get("step")) else {
+            return false;
+        };
+        let value = u64::from(value);
+        (min..=max).contains(&value) && (value == min || (step > 0 && (value - min) % step == 0))
+    };
+    axis(0, width) && axis(1, height)
+}
+
+#[test]
+fn sizes_include_listed_and_stepwise_sizes() {
+    let listed = serde_json::json!([{"width": 640, "height": 480, "fps": [30.0]}]);
+    assert!(sizes_include(&listed, 640, 480));
+    assert!(!sizes_include(&listed, 752, 416));
+
+    let stepwise = serde_json::json!({"min": [16, 16], "max": [8192, 8192], "step": [2, 2]});
+    assert!(sizes_include(&stepwise, 752, 416));
+    assert!(sizes_include(&stepwise, 16, 16));
+    assert!(!sizes_include(&stepwise, 753, 416), "off the step");
+    assert!(!sizes_include(&stepwise, 8194, 416), "above the range");
+
+    let fixed = serde_json::json!({"min": [64, 48], "max": [64, 48], "step": [0, 0]});
+    assert!(sizes_include(&fixed, 64, 48));
+    assert!(!sizes_include(&fixed, 66, 48));
 }
