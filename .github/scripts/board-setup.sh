@@ -105,9 +105,9 @@ case "$compatible" in
       echo "EDGEFIRST_CAMERA_SIZE=640x480"
       echo "EDGEFIRST_CAMERA_FPS=30"
     } >>"$GITHUB_ENV"
-    # No vvcam ISP and no CMA heap; the H.264 encoder takes NV12 only and
-    # the webcam delivers YUYV.
-    allow+=(not-vvcam no-cma-heap encoder-format)
+    # No vvcam ISP and no CMA heap, and the webcam cannot mirror; the H.264
+    # encoder takes NV12 only and the webcam delivers YUYV.
+    allow+=(not-vvcam no-mirror no-cma-heap encoder-format)
     echo "board-setup: USB camera $camera"
     ;;
   *)

@@ -276,10 +276,10 @@ impl Arrivals {
     }
 }
 
-/// `args` capturing from the board's camera at 1080p and the expected rate,
-/// or `None` without a camera. Unset, the app keeps the sensor's current
-/// size, which after a reboot can be smaller than the default 1080p stream
-/// (the OV5640 comes up at 640x480).
+/// `args` capturing from the board's camera at the lane's size and rate,
+/// and streaming at that size, or `None` without a camera. Unset, the app
+/// keeps the sensor's current size, which after a reboot can be smaller than
+/// the default 1080p stream (the OV5640 comes up at 640x480).
 fn capture(args: &[&str]) -> Option<Vec<String>> {
     let source = common::source()?;
     let fps = expected_fps().to_string();
@@ -293,6 +293,9 @@ fn capture(args: &[&str]) -> Option<Vec<String>> {
         &height,
         "--camera-fps",
         &fps,
+        "--stream-size",
+        &width,
+        &height,
     ];
     Some(camera.iter().chain(args).map(ToString::to_string).collect())
 }
@@ -425,10 +428,18 @@ fn devices_reports_the_cameras_modes() -> TestResult {
     let Some(source) = common::source() else {
         return Ok(());
     };
+    // `devices` names V4L2 cameras by their /dev/videoN node, which a
+    // by-id link resolves to.
     let (backend, id) = match source.strip_prefix("libcamera:") {
-        Some(id) => ("libcamera", id),
-        None => ("v4l2", source.as_str()),
+        Some(id) => ("libcamera", id.to_owned()),
+        None => (
+            "v4l2",
+            std::fs::canonicalize(&source)?
+                .to_string_lossy()
+                .into_owned(),
+        ),
     };
+    let (width, height) = common::camera_size();
     let out = Command::new(camera_bin())
         .args(["devices", "--json"])
         .output()?;
@@ -451,11 +462,25 @@ fn devices_reports_the_cameras_modes() -> TestResult {
         .iter()
         .flat_map(|f| f["modes"].as_array().into_iter().flatten())
         .filter_map(|m| m.as_str())
-        .any(|m| m.starts_with("1080p"));
+        .any(|m| mode_is_size(m, width, height));
     let size = formats
         .iter()
         .flat_map(|f| f["sizes"].as_array().into_iter().flatten())
-        .any(|s| s["width"] == 1920 && s["height"] == 1080);
-    assert!(mode || size, "{source} offers no 1080p: {devices}");
+        .any(|s| s["width"] == width && s["height"] == height);
+    assert!(
+        mode || size,
+        "{source} offers no {width}x{height}: {devices}"
+    );
     Ok(())
+}
+
+/// Whether a mode name (`1080p30`, `VGA30`, `752x416@5`) is of the given size.
+fn mode_is_size(mode: &str, width: u32, height: u32) -> bool {
+    match mode.split_once('@') {
+        Some((size, _)) => size == format!("{width}x{height}"),
+        None => {
+            let name = mode.trim_end_matches(|c: char| c.is_ascii_digit());
+            edgefirst_camera::named_size(name) == Some((width, height))
+        }
+    }
 }

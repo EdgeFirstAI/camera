@@ -109,7 +109,9 @@ On the board fleet, run the `Camera benchmarks` workflow (`camera-bench.yml`) by
 | Variable | Effect |
 |---|---|
 | `EDGEFIRST_CAMERA_REQUIRE_BOARD=1` | Every test that would print `SKIPPED` fails instead, naming the reason |
-| `EDGEFIRST_CAMERA_ALLOW_SKIPS` | Comma-separated skip reasons this board may still take: `no-camera`, `no-mirror`, `uniform-scene`, `not-vvcam`, `not-monotonic`, `no-recording`, `not-v4l2`, `no-cma-heap`, `no-encoder`, `no-decoder`. The i.MX 95 lane allows `not-vvcam,no-mirror,not-v4l2`, and the Raspberry Pi 5 lane, which has no H.264 encoder or decoder, `not-vvcam,not-v4l2,no-encoder,no-decoder` |
+| `EDGEFIRST_CAMERA_ALLOW_SKIPS` | Comma-separated skip reasons this board may still take: `no-camera`, `no-mirror`, `uniform-scene`, `not-vvcam`, `not-monotonic`, `no-recording`, `not-v4l2`, `no-cma-heap`, `no-encoder`, `no-decoder`, `encoder-format`. The i.MX 95 lane allows `not-vvcam,no-mirror,not-v4l2`; the Raspberry Pi 5 lane, which has no H.264 encoder or decoder, `not-vvcam,not-v4l2,no-encoder,no-decoder`; and the IQ-9075 lane, whose USB webcam cannot mirror and delivers YUYV to an encoder that takes NV12 only, on a board with no CMA heap, `not-vvcam,no-mirror,no-cma-heap,encoder-format` |
+| `EDGEFIRST_CAMERA_SOURCE` | The camera: a V4L2 node or link (default `/dev/video3`), `libcamera:<id>`, or `libcamera` for the first camera libcamera lists |
+| `EDGEFIRST_CAMERA_SIZE` | The capture size the tests request, and `on_target`'s stream size, as `WIDTHxHEIGHT` (default `1920x1080`) |
 | `EDGEFIRST_CAMERA_RECORDING` | A recording with its `.json` sidecar, for the decode and playback tests |
-| `EDGEFIRST_CAMERA_FPS` | The rate `on_target` requests, and expects at least 90% of on `camera/frame` and `camera/h264` (default 30). `camera/jpeg` is compressed in software, so it is only required to keep delivering, at no particular rate |
+| `EDGEFIRST_CAMERA_FPS` | The rate the tests request, and expects at least 90% of on `camera/frame` and `camera/h264` (default 30). `camera/jpeg` is compressed in software, so it is only required to keep delivering, at no particular rate |
 | `EDGEFIRST_SOAK_SECS` | How long the soak runs (default 20; nightly runs 600) |
