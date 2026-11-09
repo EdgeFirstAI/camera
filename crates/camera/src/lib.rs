@@ -55,6 +55,10 @@
 //!   (`libcamera:<id>`), loaded at run time through the
 //!   `edgefirst-libcamera-sys` shim, so binaries run without libcamera.
 //! - `mock`: the synthetic frame source (`mock[:WxH@fps]`).
+//!
+//! `mediafoundation:<id>` (Windows) and `avfoundation:<id>` (macOS and
+//! iOS) name the desktop backends. They parse on every platform and fail at
+//! `open()` with [`ErrorKind::NotFound`] in a build without the backend.
 //! - `file`: recorded H.264 playback (`file:<name>.h264` with its
 //!   `<name>.json` sidecar), decoded by the platform's V4L2 decoder.
 //! - `schemas`: the `schema` module, the `Frame` →

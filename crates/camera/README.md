@@ -40,6 +40,8 @@ println!(
 | `/dev/videoN` | V4L2 capture (feature `v4l2`, Linux) | available |
 | `file:<path>` | Recorded Annex-B H.264 with JSON sidecar (feature `file`; decoding needs a V4L2 decoder, so Linux) | available |
 | `libcamera:<id>` | libcamera 0.5 and newer through a runtime-loaded shim (feature `libcamera`, Linux; Export only) | available |
+| `mediafoundation:<id>` | Media Foundation (Windows) | planned; `open()` returns `NotFound` |
+| `avfoundation:<id>` | AVFoundation (macOS, iOS) | planned; `open()` returns `NotFound` |
 
 ## Features
 

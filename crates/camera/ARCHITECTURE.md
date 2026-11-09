@@ -16,7 +16,7 @@ This file describes the crate's modules, the rules every backend follows, how sl
 | `timestamp.rs` | `Timestamp`, `CaptureClock`, `TimestampSource`, `RealtimeClock` |
 | `enumerate.rs` | `CameraDescriptor`, `FormatInfo`, `Sizes`, `Rates`, `Mode`, `modes()` |
 | `error.rs` | `Error`, `ErrorKind`, `Rejection` |
-| `backend/` | Backend dispatch; `mock.rs`, `v4l2/` and `libcamera/` on Linux, and `file/` |
+| `backend/` | Backend dispatch; `mock.rs`, `v4l2/` and `libcamera/` on Linux, `file/`, and `rate.rs`, the measured-rate meter every capture backend shares |
 
 ## Rules every backend follows
 
@@ -42,6 +42,16 @@ Each slot in a `SlotTable` is in one of three states:
 - **Import `stop()`:** keeps its table. The same buffers re-attach, and frames held across the restart requeue when they drop.
 
 Caller-provided pools are checked by one shared function, `pool::validate`, at `start()`. It checks count, native memory kind, format, size, pitch (when the backend knows the driver's pitch) and contiguity (when the memory is known to be non-contiguous), and returns the first `Rejection` with its slot.
+
+## Desktop platforms
+
+The core carries what the macOS and Windows backends share, so each backend adds only its own capture code.
+
+- **Sources.** `mediafoundation:<id>` (Windows) and `avfoundation:<id>` (macOS and iOS) parse on every platform, like `libcamera:<id>`. In a build without the backend, `open()` fails with `NotFound` ("the Media Foundation backend is not available in this build"), as a Linux backend that is not built does.
+- **Capture clock.** `CaptureClock::Qpc` is the Windows performance counter in nanoseconds. Media Foundation stamps capture samples with it in 100 ns units: on a USB webcam, sample times and `MFSampleExtension_DeviceTimestamp` both equal `QueryPerformanceCounter` read 0.1 to 1.3 ms before `ReadSample` returns. `RealtimeClock` converts it on Windows and returns `Backend` elsewhere. The mock and file sources stamp in `Qpc` on Windows too, so their frames go through the same conversion. The Apple host clock stays `Unknown` until the AVFoundation backend measures it.
+- **Rate meter.** `backend/rate.rs` builds on every target, so every backend that measures reports `measured_frame_rate()` with the same meter.
+- **Wait handle.** `WaitHandle` is a Unix descriptor. Windows has no form of it yet, and Windows backends return `None` from `wait_handle()`.
+- **Camera permission.** macOS and Windows refuse capture until the user allows camera access. A backend reports that as `ErrorKind::PermissionDenied`, and the message says where to allow it: Settings > Privacy & security > Camera, with "Let desktop apps access your camera" on, on Windows; System Settings > Privacy & Security > Camera, for the application or terminal running the program, on macOS. The application exits with 77 (`NOPERM`). On Linux, `EACCES` keeps its `Io` kind.
 
 ## The mock backend
 

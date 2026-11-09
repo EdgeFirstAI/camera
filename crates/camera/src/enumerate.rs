@@ -15,6 +15,10 @@ pub enum Backend {
     V4l2,
     /// libcamera through the runtime-loaded shim.
     Libcamera,
+    /// Media Foundation video capture sources (Windows).
+    MediaFoundation,
+    /// AVFoundation capture devices (macOS and iOS).
+    AvFoundation,
     /// A recorded Annex-B H.264 file with its JSON sidecar.
     File,
     /// Synthetic frames.
@@ -27,8 +31,8 @@ pub enum Backend {
 pub struct CameraDescriptor {
     /// Backend that serves this camera.
     pub backend: Backend,
-    /// Backend-specific identifier: a device path, a libcamera id, a file
-    /// path, or `mock`.
+    /// Backend-specific identifier: a device path, a libcamera,
+    /// Media Foundation or AVFoundation id, a file path, or `mock`.
     pub id: String,
     /// Human-readable name.
     pub name: String,

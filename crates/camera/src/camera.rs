@@ -29,6 +29,9 @@ pub struct CaptureStats {
 }
 
 /// A pollable handle for event-loop integration.
+///
+/// A Unix file descriptor. Windows has no form of it yet, so backends there
+/// return `None` from [`Camera::wait_handle`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WaitHandle {
     #[cfg(unix)]
@@ -155,7 +158,8 @@ pub trait Camera: Send + std::fmt::Debug {
     /// reading for a while, so the time it was away is not taken for the rate.
     fn restart_frame_rate_measurement(&mut self) {}
 
-    /// A pollable handle, where the backend has one.
+    /// A pollable handle, where the backend has one. Always `None` on
+    /// Windows.
     fn wait_handle(&self) -> Option<WaitHandle>;
 
     /// Source metadata the SDK carries but does not interpret, as a JSON

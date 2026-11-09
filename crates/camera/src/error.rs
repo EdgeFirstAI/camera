@@ -17,6 +17,11 @@ pub enum ErrorKind {
     NotFound,
     /// Another user holds the device.
     Busy,
+    /// The operating system refused access to the camera, as macOS and
+    /// Windows do until the user allows camera access in their privacy
+    /// settings. The message says how to grant it. Not retryable until the
+    /// user acts.
+    PermissionDenied,
     /// The device exists but cannot deliver frames yet, for example while
     /// an ISP daemon restarts. The retry policy belongs to the caller.
     NotReady,
@@ -50,6 +55,7 @@ impl ErrorKind {
         match self {
             Self::NotFound => "not_found",
             Self::Busy => "busy",
+            Self::PermissionDenied => "permission_denied",
             Self::NotReady => "not_ready",
             Self::Interrupted => "interrupted",
             Self::Timeout => "timeout",
@@ -253,6 +259,13 @@ mod tests {
         }
         let eio: Error = std::io::Error::from_raw_os_error(libc::EIO).into();
         assert_eq!(eio.kind(), ErrorKind::Io);
+    }
+
+    #[test]
+    fn permission_denied_has_a_stable_name() {
+        assert_eq!(ErrorKind::PermissionDenied.as_str(), "permission_denied");
+        let err = Error::new(ErrorKind::PermissionDenied, "camera access is off");
+        assert_eq!(err.kind(), ErrorKind::PermissionDenied);
     }
 
     #[test]

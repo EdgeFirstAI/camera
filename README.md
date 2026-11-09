@@ -635,6 +635,7 @@ Every failure of the service or a subcommand exits with a status that systemd na
 | 69 (`UNAVAILABLE`) | No H.264 encoder or decoder |
 | 70 (`SOFTWARE`) | An encoder stopped while the camera ran; a restart opens it again |
 | 75 (`TEMPFAIL`) | The camera delivered no frames in time |
+| 77 (`NOPERM`) | The operating system refused camera access (the macOS and Windows camera privacy settings) |
 
 ### Device pinning
 

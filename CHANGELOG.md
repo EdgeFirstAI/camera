@@ -73,6 +73,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - V4L2 backend on vvcam releases that reject `S_PARM` (Maivin): the requested frame rate is set through the ISP's `s.fps` JSON command once streaming, so 1080p30 is captured at 30 fps instead of the mode's 60, and `EAGAIN` from `S_FMT` while `isp_media_server` restarts is `NotReady`, so callers retry instead of failing (EDGEAI-1532).
 - Exit statuses that systemd names for their meaning in the journal: 2 `INVALIDARGUMENT`, 66 `NOINPUT` (camera not found), 69 `UNAVAILABLE` (no encoder or decoder), 68 `NOHOST` (Zenoh session), 75 `TEMPFAIL` (camera timeout), 1 otherwise (EDGEAI-1527).
 - A camera that stops delivering after it started (an ISP daemon restart on vvcam, a USB reset) is opened again in the running service, with the startup retry, while the encoders keep running and `seq` continues; the service exits for systemd only when the reopened camera delivers a different stream or nothing at all (EDGEAI-1532).
+- `mediafoundation:<id>` and `avfoundation:<id>` sources, with `Backend::MediaFoundation` and `Backend::AvFoundation`, for the Windows and macOS backends to come. Until a build has the backend, `open()` fails with `NotFound` (EDGEAI-2679).
+- `CaptureClock::Qpc`: the Windows performance counter, in which Media Foundation stamps samples. `RealtimeClock` converts it, and the mock and file sources stamp frames in it on Windows (EDGEAI-2679).
+- `ErrorKind::PermissionDenied` for a camera the operating system refuses access to, as the macOS and Windows privacy settings do; the message says where to allow it, and the application exits with 77 (`NOPERM`) (EDGEAI-2679).
 
 ### Changed
 
