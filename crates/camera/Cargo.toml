@@ -46,7 +46,7 @@ edgefirst-libcamera-sys = { version = "3.0.0-dev", path = "../libcamera-sys", fe
 [dev-dependencies]
 criterion = "0.8.2"
 proptest = "1.11.0"
-uhlc = "0.8.2"
+uhlc = "0.9.0"
 
 [[test]]
 name = "mock"
