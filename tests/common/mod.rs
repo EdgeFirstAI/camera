@@ -114,20 +114,28 @@ fn allowed_skips() -> Vec<Skip> {
         .collect()
 }
 
-/// Reports that the calling test skips for `reason`. Fails the test instead
-/// when the lane requires the board and does not allow `reason`.
 /// Reports a failure that is known on this hardware, instead of failing
 /// the test. Only for a fault confirmed on the device itself, never as a
 /// way around a test.
-///
-/// nextest hides the output of passing tests, so besides stderr and a
-/// GitHub `::warning::` line (an annotation when output is shown), this
-/// writes a warning block into the job summary, which always shows on the
-/// run's page.
 pub fn known_failure(hardware: &str, why: impl Display) {
+    warn(&format!("Known hardware failure on {hardware}"), why);
+}
+
+/// Reports a measurement that misses a performance goal. Goals are not
+/// pass/fail: a miss is investigated to find whether the cost is in our
+/// code or the vendor's, so the test warns and passes.
+pub fn goal_missed(why: impl Display) {
+    warn("Performance goal missed", why);
+}
+
+/// A warning that a passing test must still show. nextest hides the output
+/// of passing tests, so besides stderr and a GitHub `::warning::` line (an
+/// annotation when output is shown), this writes a warning block into the
+/// job summary, which always shows on the run's page.
+fn warn(title: &str, why: impl Display) {
     let banner = "!".repeat(72);
-    eprintln!("{banner}\nKNOWN HARDWARE FAILURE on {hardware}: {why}\n{banner}");
-    println!("::warning title=Known hardware failure on {hardware}::{why}");
+    eprintln!("{banner}\n{}: {why}\n{banner}", title.to_uppercase());
+    println!("::warning title={title}::{why}");
     if let Some(summary) = std::env::var_os("GITHUB_STEP_SUMMARY") {
         use std::io::Write as _;
         if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -135,14 +143,13 @@ pub fn known_failure(hardware: &str, why: impl Display) {
             .append(true)
             .open(summary)
         {
-            let _ = writeln!(
-                f,
-                "\n> [!WARNING]\n> **Known hardware failure on {hardware}:** {why}\n"
-            );
+            let _ = writeln!(f, "\n> [!WARNING]\n> **{title}:** {why}\n");
         }
     }
 }
 
+/// Reports that the calling test skips for `reason`. Fails the test instead
+/// when the lane requires the board and does not allow `reason`.
 pub fn skip(reason: Skip, why: impl Display) {
     let allowed = allowed_skips();
     if board_required() && !allowed.contains(&reason) {

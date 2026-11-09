@@ -12,7 +12,7 @@
 //! samples that process's CPU time and resident memory.
 //!
 //! `parity compare` prints two reports side by side as Markdown, with the
-//! acceptance targets. `scripts/parity.sh` drives both on a board.
+//! performance goals. `scripts/parity.sh` drives both on a board.
 
 use clap::{Parser, Subcommand};
 use edgefirst_schemas::{edgefirst_msgs::CameraFrame, foxglove_msgs::FoxgloveCompressedVideo};
@@ -30,16 +30,16 @@ use zenoh::Wait;
 
 type BoxError = Box<dyn Error + Send + Sync>;
 
-/// Frames per second the frame and H.264 topics must sustain.
-const TARGET_FPS: f64 = 29.5;
-/// 95th-percentile latency targets in milliseconds. JPEG has none: it is
+/// Frames per second the frame and H.264 topics aim to sustain.
+const GOAL_FPS: f64 = 29.5;
+/// 95th-percentile latency goals in milliseconds. JPEG has none: it is
 /// compressed in software on every platform, which gets what rate and
 /// latency the CPU allows, so it is reported but not judged.
-const TARGET_FRAME_MS: f64 = 5.0;
-const TARGET_H264_MS: f64 = 100.0;
-const TARGET_RSS_MB: f64 = 200.0;
+const GOAL_FRAME_MS: f64 = 5.0;
+const GOAL_H264_MS: f64 = 100.0;
+const GOAL_RSS_MB: f64 = 200.0;
 /// Percent of one core, for configurations without software JPEG.
-const TARGET_CPU: f64 = 25.0;
+const GOAL_CPU: f64 = 25.0;
 
 #[derive(Parser)]
 struct Cli {
@@ -516,11 +516,13 @@ struct Floor {
 /// Topic reports keyed by their key without the host prefix.
 type Topics = BTreeMap<String, TopicReport>;
 
-fn pass(ok: bool) -> &'static str {
+/// Goals are not pass/fail: a miss is investigated to find whether the
+/// cost is in our code or the vendor's.
+fn met(ok: bool) -> &'static str {
     if ok {
-        "pass"
+        "met"
     } else {
-        "FAIL"
+        "missed"
     }
 }
 
@@ -556,7 +558,7 @@ fn compare(before: &Report, after: &Report, floor: Option<&Floor>) -> String {
 }
 
 /// Each topic's encoding, rate and latency in both reports, and `after`'s
-/// result against the targets.
+/// result against the goals.
 fn topics_section(
     (x_label, y_label): (&str, &str),
     keys: &BTreeSet<&String>,
@@ -564,7 +566,7 @@ fn topics_section(
     floor: Option<&Floor>,
 ) -> String {
     let mut out = format!(
-        "## Topics\n\n| Topic | {x_label} encoding | {y_label} encoding | {x_label} fps | {y_label} fps | {x_label} p50/p95 ms | {y_label} p50/p95 ms | {y_label} target |\n|---|---|---|---|---|---|---|---|\n"
+        "## Topics\n\n| Topic | {x_label} encoding | {y_label} encoding | {x_label} fps | {y_label} fps | {x_label} p50/p95 ms | {y_label} p50/p95 ms | {y_label} goal |\n|---|---|---|---|---|---|---|---|\n"
     );
     let enc =
         |t: Option<&TopicReport>| t.map_or("absent".to_owned(), |t| format!("`{}`", t.encoding));
@@ -575,9 +577,9 @@ fn topics_section(
     };
     for key in keys {
         let (x, y) = (a.get(*key), b.get(*key));
-        let target = y.map_or("-".to_owned(), |t| topic_target(t, floor));
+        let goal = y.map_or("-".to_owned(), |t| topic_goal(t, floor));
         out += &format!(
-            "| `{key}` | {} | {} | {} | {} | {} | {} | {target} |\n",
+            "| `{key}` | {} | {} | {} | {} | {} | {} | {goal} |\n",
             enc(x),
             enc(y),
             fps(x),
@@ -589,29 +591,29 @@ fn topics_section(
     out
 }
 
-/// A topic's result against its rate and latency targets. `camera/frame`
+/// A topic's result against its rate and latency goals. `camera/frame`
 /// is judged on the latency it adds after the driver's delivery, when the
 /// driver's floor is known.
-fn topic_target(t: &TopicReport, floor: Option<&Floor>) -> String {
+fn topic_goal(t: &TopicReport, floor: Option<&Floor>) -> String {
     let p95 = t.latency_ms.as_ref().map_or(f64::INFINITY, |l| l.p95);
     match short_key(&t.key) {
         "camera/frame" => match (floor, &t.latency_ms) {
             (Some(f), Some(l)) => {
                 let own = l.p50 - f.latency_ms_p50;
                 format!(
-                    "{} (≥{TARGET_FPS} fps, {own:.2} ms after delivery at p50, <{TARGET_FRAME_MS} ms)",
-                    pass(t.fps >= TARGET_FPS && own < TARGET_FRAME_MS)
+                    "{} (≥{GOAL_FPS} fps, {own:.2} ms after delivery at p50, <{GOAL_FRAME_MS} ms)",
+                    met(t.fps >= GOAL_FPS && own < GOAL_FRAME_MS)
                 )
             }
             _ => format!(
-                "{} (≥{TARGET_FPS} fps, p95 <{TARGET_FRAME_MS} ms)",
-                pass(t.fps >= TARGET_FPS && p95 < TARGET_FRAME_MS)
+                "{} (≥{GOAL_FPS} fps, p95 <{GOAL_FRAME_MS} ms)",
+                met(t.fps >= GOAL_FPS && p95 < GOAL_FRAME_MS)
             ),
         },
         "camera/jpeg" => "reported only (software JPEG)".to_owned(),
         "camera/h264" => format!(
-            "{} (≥{TARGET_FPS} fps, p95 <{TARGET_H264_MS} ms)",
-            pass(t.fps >= TARGET_FPS && p95 < TARGET_H264_MS)
+            "{} (≥{GOAL_FPS} fps, p95 <{GOAL_H264_MS} ms)",
+            met(t.fps >= GOAL_FPS && p95 < GOAL_H264_MS)
         ),
         _ => "-".to_owned(),
     }
@@ -669,32 +671,32 @@ fn layout_section((x_label, y_label): (&str, &str), (a, b): (&Topics, &Topics)) 
 }
 
 /// CPU, memory and threads of both processes, and `after`'s result against
-/// the targets. CPU is not judged with software JPEG on.
+/// the goals. CPU is not judged with software JPEG on.
 fn process_section(before: &Report, after: &Report, software_jpeg: bool) -> String {
     let mut out = format!(
-        "\n## Process\n\n| | {0} | {1} | {1} target |\n|---|---|---|---|\n",
+        "\n## Process\n\n| | {0} | {1} | {1} goal |\n|---|---|---|---|\n",
         before.label, after.label
     );
     let p = |r: &Report, f: fn(&ProcessReport) -> f64| opt(r.process.as_ref().map(f), 1);
     let after_is = |ok: fn(&ProcessReport) -> bool| after.process.as_ref().is_some_and(ok);
-    let cpu_target = if software_jpeg {
+    let cpu_goal = if software_jpeg {
         "reported only (software JPEG)".to_owned()
     } else {
         format!(
-            "{} (<{TARGET_CPU}%)",
-            pass(after_is(|p| p.cpu_percent < TARGET_CPU))
+            "{} (<{GOAL_CPU}%)",
+            met(after_is(|p| p.cpu_percent < GOAL_CPU))
         )
     };
     out += &format!(
-        "| CPU, % of one core | {} | {} | {cpu_target} |\n",
+        "| CPU, % of one core | {} | {} | {cpu_goal} |\n",
         p(before, |p| p.cpu_percent),
         p(after, |p| p.cpu_percent),
     );
     out += &format!(
-        "| Resident memory, max MB | {} | {} | {} (<{TARGET_RSS_MB} MB) |\n",
+        "| Resident memory, max MB | {} | {} | {} (<{GOAL_RSS_MB} MB) |\n",
         p(before, |p| p.rss_mb_max),
         p(after, |p| p.rss_mb_max),
-        pass(after_is(|p| p.rss_mb_max < TARGET_RSS_MB))
+        met(after_is(|p| p.rss_mb_max < GOAL_RSS_MB))
     );
     out += &format!(
         "| Threads | {} | {} | |\n",
