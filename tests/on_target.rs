@@ -35,6 +35,10 @@ type TestResult = Result<(), Box<dyn Error + Send + Sync>>;
 
 /// How long a stopped binary may take to exit.
 const SHUTDOWN_BOUND: Duration = Duration::from_secs(3);
+/// The same with coverage on: the binary writes its profile as it exits,
+/// which on a board's SD card, behind other tests' profiles, can take
+/// seconds. Below [`common::SHUTDOWN_GRACE`].
+const SHUTDOWN_BOUND_WITH_COVERAGE: Duration = Duration::from_secs(8);
 /// From start-up to the first sample on every topic.
 const FIRST_SAMPLE: Duration = Duration::from_secs(20);
 /// How long each topic's rate is measured, from its first sample.
@@ -72,12 +76,18 @@ fn spawn<S: AsRef<OsStr>>(args: &[S]) -> std::io::Result<Child> {
         .spawn()
 }
 
-/// Sends SIGTERM and requires a clean exit within [`SHUTDOWN_BOUND`].
+/// Sends SIGTERM and requires a clean exit within [`SHUTDOWN_BOUND`], or
+/// [`SHUTDOWN_BOUND_WITH_COVERAGE`] when coverage is collected.
 fn stop<S: AsRef<OsStr> + Debug>(child: Child, args: &[S]) -> TestResult {
+    let bound = if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
+        SHUTDOWN_BOUND_WITH_COVERAGE
+    } else {
+        SHUTDOWN_BOUND
+    };
     let took = common::stop(child).map_err(|e| format!("{args:?}: {e}"))?;
     eprintln!("stopped {took:?} after SIGTERM");
-    if took > SHUTDOWN_BOUND {
-        return Err(format!("{args:?} took {took:?} to stop, over {SHUTDOWN_BOUND:?}").into());
+    if took > bound {
+        return Err(format!("{args:?} took {took:?} to stop, over {bound:?}").into());
     }
     Ok(())
 }
