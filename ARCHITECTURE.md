@@ -25,7 +25,7 @@ This document describes how the EdgeFirst Camera Node is built: its threads, how
 
 ## System Overview
 
-The service captures frames through the `edgefirst-camera` SDK and publishes them on Zenoh: every frame by reference as an `edgefirst_msgs/CameraFrame`, and compressed as JPEG and H.264. The SDK owns the camera: device negotiation, buffer pools, controls, and the acquisition time of each frame. The HAL does the pixel work: `edgefirst-image` converts and scales (OpenGL, G2D or CPU, chosen per conversion; the capture pool creates no GL context, so in the default direct H.264 configuration GL is never initialised), and `edgefirst-codec` encodes H.264 on the platform's V4L2 memory-to-memory encoder. JPEG compression is turbojpeg.
+The service captures frames through the `edgefirst-camera` SDK and publishes them on Zenoh: every frame by reference as an `edgefirst_msgs/CameraFrame`, and, when turned on, compressed as JPEG or H.264. The SDK owns the camera: device negotiation, buffer pools, controls, and the acquisition time of each frame. The HAL does the pixel work: `edgefirst-image` converts and scales (OpenGL, G2D or CPU, chosen per conversion; the capture pool creates no GL context, so when H.264 encodes the capture buffers directly GL is never initialised), and `edgefirst-codec` encodes H.264 on the platform's V4L2 memory-to-memory encoder. JPEG compression is turbojpeg.
 
 ```mermaid
 graph LR
@@ -134,7 +134,7 @@ The encoder may return an access unit for an earlier frame, so each stage keeps 
 
 ### Tiles
 
-For live capture above 1080p (turned on automatically, except for `record`) or with `--h264-tiles`, four more stages encode the quadrants of the frame at their own size, up to 1920x1080, on `camera/h264/{tl,tr,bl,br}` with `frame_id` suffixes `topleft`, `topright`, `bottomleft` and `bottomright`. A tile is encoded from the capture through the encoder's crop where the device can express it, which on a 4K capture is three of the four: the device reads `stride x rows` from the plane offset, which for the bottom-right quadrant runs past the end of a tightly sized buffer, so that tile converts instead. A tile pacer limits tiles to `H264_TILES_FPS`, advancing its deadline by whole intervals so the rate stays phase locked.
+For live capture above 1080p with H.264 on (turned on automatically, except for `record`) or with `--h264-tiles`, four more stages encode the quadrants of the frame at their own size, up to 1920x1080, on `camera/h264/{tl,tr,bl,br}` with `frame_id` suffixes `topleft`, `topright`, `bottomleft` and `bottomright`. A tile is encoded from the capture through the encoder's crop where the device can express it, which on a 4K capture is three of the four: the device reads `stride x rows` from the plane offset, which for the bottom-right quadrant runs past the end of a tightly sized buffer, so that tile converts instead. A tile pacer limits tiles to `H264_TILES_FPS`, advancing its deadline by whole intervals so the rate stays phase locked.
 
 ### JPEG
 

@@ -96,8 +96,8 @@ fn a_subscriber_receives_camera_frames() -> Result<(), BoxError> {
     Ok(())
 }
 
-/// No H.264 encoder off Linux: the default `--h264` stops the service at
-/// startup and says how to run without it.
+/// No H.264 encoder off Linux: `--h264` stops the service at startup and
+/// says how to run without it.
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn h264_without_an_encoder_fails_at_startup() -> Result<(), BoxError> {
@@ -110,6 +110,7 @@ fn h264_without_an_encoder_fails_at_startup() -> Result<(), BoxError> {
             "--stream-size",
             "64",
             "48",
+            "--h264",
             "--listen",
             &free_endpoint()?,
             "--no-multicast-scouting",
@@ -130,7 +131,7 @@ fn h264_without_an_encoder_fails_at_startup() -> Result<(), BoxError> {
         .ok_or("stderr not captured")?
         .read_to_string(&mut stderr)?;
     assert!(!status.success(), "started without an encoder: {stderr}");
-    assert!(stderr.contains("--h264 false"), "{stderr}");
+    assert!(stderr.contains("use --jpeg"), "{stderr}");
     Ok(())
 }
 

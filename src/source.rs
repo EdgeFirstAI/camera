@@ -693,11 +693,16 @@ mod tests {
 
     #[test]
     fn the_pool_adds_the_encoders_buffers() {
-        assert_eq!(request(&[]).unwrap().buffers, 6, "H.264 is on by default");
-        assert_eq!(request(&["--h264", "false"]).unwrap().buffers, 4);
-        let jpeg = request(&["--h264", "false", "--jpeg", "--camera-buffers", "3"]).unwrap();
+        assert_eq!(request(&[]).unwrap().buffers, 4, "no encoder by default");
+        assert_eq!(request(&["--h264"]).unwrap().buffers, 6);
+        let jpeg = request(&["--jpeg", "--camera-buffers", "3"]).unwrap();
         assert_eq!(jpeg.buffers, 5);
-        assert_eq!(request(&["--camera-buffers", "32"]).unwrap().buffers, 32);
+        assert_eq!(
+            request(&["--h264", "--camera-buffers", "32"])
+                .unwrap()
+                .buffers,
+            32
+        );
     }
 
     #[test]

@@ -102,7 +102,7 @@ cd src && cargo build  # Where are we now?
 - **Target platforms**:
   - Primary: Linux aarch64 (NXP i.MX8M Plus, ARM Cortex-A53/A72)
   - Secondary: Linux x86_64 (development and testing)
-  - Development: macOS and Windows, on the `mock` source with `--h264 false`
+  - Development: macOS and Windows, on the `mock` source
   - **Not supported**: RISC-V
 - **Cross-platform**: Camera capture and H.264 need Linux (V4L2 or libcamera capture, a V4L2 H.264 encoder); image conversion uses whatever the HAL finds (OpenGL, G2D or CPU). On macOS and Windows the application runs on the `mock` source; keep journald behind `cfg(target_os = "linux")` and Unix signal code behind `cfg(unix)`
 

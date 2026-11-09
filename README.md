@@ -161,8 +161,8 @@ Use `--jpeg` instead of `--h264` on a board without an H.264 encoder; see [Choos
 **4K Camera with Automatic Tiling:**
 
 ```bash
-# Splits 4K into 4x 1080p H.264 tiles. Tiles also turn on by themselves
-# for live capture above 1080p.
+# Splits 4K into 4x 1080p H.264 tiles. With --h264, tiles also turn on by
+# themselves for live capture above 1080p.
 edgefirst-camera \
   --camera /dev/video0 \
   --camera-size 3840 2160 \
@@ -283,6 +283,7 @@ New subcommands: `devices`, `info`, `record` and `convert`. Without a subcommand
 
 ### Behaviour changes
 
+- **Compressed outputs are off by default.** `H264` now defaults to off, as `JPEG` already did, and the shipped `camera.default` leaves both off. 2.12 turned H.264 on unless told otherwise. A unit whose `/etc/default/camera` sets `H264="true"`, as 2.12's file did, is unaffected; one that relied on the built-in default publishes no `camera/h264` until `H264="true"` is set.
 - **Memory.** The capture pool is allocated in contiguous (CMA) memory, and the service adds two buffers of its own while `H264`, `H264_TILES` or `JPEG` is on. With the default `CAMERA_BUFFERS=4` a unit uses six capture buffers. `CAMERA_BUFFERS` keeps its meaning for subscribers: they have about `CAMERA_BUFFERS - 1` frame periods to read a frame. If CMA runs out, startup fails with a message that suggests a smaller `CAMERA_BUFFERS`. The capture pool no longer creates a GL context, and in the default H.264-direct configuration GL is never initialised.
 - **Camera restart.** A camera that stops after it started, for example when `isp_media_server` restarts, is reopened inside the running service. `seq` continues. The service exits for systemd only when the reopened camera delivers a different stream or nothing.
 - **Encoder failure.** If an encoder thread exits or panics, or keeps failing, the service exits with status 70 (see [Exit statuses](#exit-statuses)) so systemd restarts it. It no longer streams on silently without H.264 or JPEG.
@@ -400,14 +401,14 @@ A consumer:
 
 - V4L2 memory-to-memory encoder (vsi_v4l2 on i.MX 8M Plus), up to 1920×1080 per stream
 - Configurable bitrate (5/25/50/100 Mbps); `auto` is about 10 Mbps at 1080p30, High profile
-- Automatic tiling for live capture above 1080p
+- Automatic tiling for live capture above 1080p with H.264 on
 - Tile-specific FPS control to reduce artifacts
 
 **JPEG:** software encoding with libjpeg-turbo (`turbojpeg`) on every platform. The i.MX 8M Plus has no hardware JPEG encoder; the i.MX 95's (`mxc-jpeg`) is not used yet. See [Known Limitations](#known-limitations).
 
 ### Choosing JPEG or H.264
 
-The two compressed outputs are alternatives: enable neither, or the one that suits the platform.
+The two compressed outputs are alternatives, and both are off by default: enable neither, or the one that suits the platform. A board's BSP usually turns one on in `/etc/default/camera`.
 
 - **JPEG** works on every platform. It is compressed on the CPU, so its rate depends on the stream size and the CPU, and it can fall below the camera's rate.
 - **H.264** needs a hardware encoder, which it uses at the camera's rate for little CPU. Without one, the service stops at start with status 69.
@@ -416,7 +417,7 @@ The service runs both when asked to, without a warning, but they then share the 
 
 ### 4K Tiling for High-Resolution Cameras
 
-For live capture above 1080p, the camera node automatically splits frames into 1920×1080 tiles for hardware encoding:
+For live capture above 1080p with H.264 on, the camera node automatically splits frames into 1920×1080 tiles for hardware encoding:
 
 ```mermaid
 graph TB
@@ -438,7 +439,7 @@ graph TB
     BR --> Encode4["H.264 Encoder 4"]
 ```
 
-Tiles turn on automatically for live capture above 1080p, and off for the `record` subcommand. `--h264-tiles` turns them on for any size.
+With H.264 on, tiles turn on automatically for live capture above 1080p, and off for the `record` subcommand. `--h264-tiles` turns them on for any size.
 
 **Why Tiling?**
 
@@ -479,10 +480,10 @@ Unset controls keep the camera's setting. A camera that does not offer a control
 | `-s, --stream-size <W> <H>` | `STREAM_SIZE` | `1920 1080` | Output resolution for JPEG and H.264 |
 | `--jpeg` | `JPEG` | off | Enable JPEG streaming |
 | `--jpeg-quality <1-100>` | `JPEG_QUALITY` | `85` | JPEG quality. A weak lever on cost; see [Known Limitations](#known-limitations) |
-| `--h264 [true\|false]` | `H264` | `true` | H.264 streaming. Pass `--h264 false` to turn it off |
+| `--h264 [true\|false]` | `H264` | off | Enable H.264 streaming. Needs a hardware H.264 encoder |
 | `--h264-bitrate <auto\|mbps5\|mbps25\|mbps50\|mbps100>` | `H264_BITRATE` | `auto` | Bitrate preset. `auto` is 0.16 bits per pixel, about 10 Mbps at 1080p30 |
 | `--h264-fps <auto\|measure\|N>` | `H264_FPS` | `auto` | Rate the encoder is set up for. `auto` takes the preset (15, 30 or 60 fps) nearest the rate the camera reports, `measure` watches the camera for up to 3 s and takes the rate it delivers, and a number sets the rate |
-| `--h264-tiles` | `H264_TILES` | off | Encode four 1080p tiles. Turned on automatically for live capture above 1080p; see [4K Tiling](#4k-tiling-for-high-resolution-cameras) |
+| `--h264-tiles` | `H264_TILES` | off | Encode four 1080p tiles. Turned on automatically for live capture above 1080p with `--h264`; see [4K Tiling](#4k-tiling-for-high-resolution-cameras) |
 | `--h264-tiles-fps <FPS>` | `H264_TILES_FPS` | `15` | Rate limit for tiles. `0` means no limit |
 
 **Topics**
@@ -738,10 +739,10 @@ edgefirst-camera --tracy --camera /dev/video0 --jpeg --h264
 | Maivin + Raivin | ARM64 (i.MX8M Plus) | V4L2 | ✅ Fully Supported | Primary target, all features |
 | NXP i.MX8M Plus EVK | ARM64 | V4L2 | ✅ Supported | Hardware acceleration available |
 | NXP i.MX 95 EVK | ARM64 | libcamera (`nxp/neo`) | ✅ Supported | Set `LIBCAMERA_PIPELINES_MATCH_LIST=nxp/neo`. The camera cannot mirror and does not honour the requested frame rate |
-| Raspberry Pi 5 | ARM64 | libcamera (`pisp`) | ⚠️ Supported, no CI lane yet | Set `MIRROR=none` for an upright sensor |
+| Raspberry Pi 5 | ARM64 | libcamera (`pisp`) | ✅ Supported | No H.264 encoder or decoder: use `--jpeg`, and replay is unavailable. Set `MIRROR=none` for an upright sensor |
 | Generic ARM64 Linux | ARM64 | V4L2 | ⚠️ Partial | Conversion falls back to OpenGL or CPU; H.264 and replay need a V4L2 hardware encoder and decoder |
-| x86_64 Linux | x86_64 | V4L2, `mock` | ⚠️ Development Only | Usually no V4L2 H.264 encoder; use `--h264 false` or the `mock` source |
-| macOS, Windows | x86_64, ARM64 | `mock` | ⚠️ Development Only | No camera backend yet; runs on the `mock` source only, with `--h264 false` |
+| x86_64 Linux | x86_64 | V4L2, `mock` | ⚠️ Development Only | Usually no V4L2 H.264 encoder; use `--jpeg` for compressed output |
+| macOS, Windows | x86_64, ARM64 | `mock` | ⚠️ Development Only | No camera backend or H.264 encoder yet; runs on the `mock` source only |
 
 ### Camera Compatibility
 
@@ -844,8 +845,8 @@ sudo edgefirst-camera
 # Check CPU usage
 htop
 
-# Reduce output formats to decrease load
-edgefirst-camera --h264 false --jpeg  # Only JPEG, no H264
+# Turn on only the output you need: JPEG or H.264, not both
+edgefirst-camera --jpeg
 
 # Lower the stream size, or turn JPEG off (software-compressed)
 edgefirst-camera --stream-size 1280 720

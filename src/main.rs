@@ -162,8 +162,8 @@ fn serve(args: Args) -> Result<(), Box<dyn Error>> {
     run(&args, &session, |_| {}).map_err(|e| {
         exit::hint_codec(
             e,
-            "without an encoder, run with --h264 false (H264=false) and without \
-             --h264-tiles; a file: source needs a decoder",
+            "without an encoder, leave --h264 and --h264-tiles off (H264, H264_TILES) \
+             and use --jpeg for compressed output; a file: source needs a decoder",
         )
     })
 }
@@ -422,14 +422,21 @@ mod tests {
 
     #[test]
     fn record_requires_h264() {
-        let err = validate(&args(&["--record", "a.h264", "--h264", "false"])).unwrap_err();
+        let err = validate(&args(&["--record", "a.h264"])).unwrap_err();
         assert!(err.to_string().contains("--h264"), "{err}");
-        validate(&args(&["--record", "a.h264"])).unwrap();
+        validate(&args(&["--record", "a.h264", "--h264"])).unwrap();
     }
 
     #[test]
     fn record_needs_a_camera() {
-        let err = validate(&args(&["--source", "file:b.h264", "--record", "a.h264"])).unwrap_err();
+        let err = validate(&args(&[
+            "--source",
+            "file:b.h264",
+            "--h264",
+            "--record",
+            "a.h264",
+        ]))
+        .unwrap_err();
         assert!(err.to_string().contains("recording already"), "{err}");
     }
 

@@ -377,7 +377,11 @@ pub(crate) fn run(
     if !file {
         check_stream_size(settings, stream, &config)?;
     }
-    let tiles = tiles_enabled(settings.tiles, settings.auto_tiles, &config);
+    let tiles = tiles_enabled(
+        settings.tiles,
+        settings.auto_tiles && settings.h264,
+        (config.width, config.height),
+    );
 
     let mut sidecar = None;
     let recorder = match &settings.record {
@@ -706,9 +710,9 @@ fn discard_waiting(camera: &mut dyn Camera) {
 }
 
 /// Tiles are on when requested, and with `auto` above 1080p, where the
-/// main stream is scaled down.
-fn tiles_enabled(requested: bool, auto: bool, config: &StreamConfig) -> bool {
-    let (w, h) = (config.width, config.height);
+/// main stream is scaled down. The caller allows `auto` only while H.264 is
+/// on, so a camera above 1080p starts no encoder the user did not ask for.
+fn tiles_enabled(requested: bool, auto: bool, (w, h): (u32, u32)) -> bool {
     if auto && h > 1080 && !requested {
         info!("Camera resolution {w}x{h} exceeds 1080p, automatically enabling H264 tiling");
         true
@@ -1738,6 +1742,7 @@ mod tests {
                 "320",
                 "240",
                 "--jpeg",
+                "--h264",
                 "--h264-tiles",
                 "--h264-tiles-fps",
                 "0",
@@ -1888,7 +1893,14 @@ mod tests {
     /// restarts the service, rather than streaming on without its output.
     #[test]
     fn an_encoder_that_keeps_failing_ends_the_run() {
-        let (_, settings) = settings(&["--source", "mock:64x48@120", "--stream-size", "64", "48"]);
+        let (_, settings) = settings(&[
+            "--source",
+            "mock:64x48@120",
+            "--stream-size",
+            "64",
+            "48",
+            "--h264",
+        ]);
         let session = local_session();
         let shutdown = AtomicBool::new(false);
         let err = run(
@@ -1967,6 +1979,7 @@ mod tests {
                 "--stream-size",
                 "64",
                 "48",
+                "--h264",
                 "--record",
                 p,
                 "--camera-frame-id",
@@ -2138,6 +2151,7 @@ mod tests {
             "--stream-size",
             "64",
             "48",
+            "--h264",
             "--record",
             stream.to_str().unwrap(),
         ]);
@@ -2172,8 +2186,16 @@ mod tests {
     }
 
     #[test]
+    fn tiles_turn_on_by_themselves_only_above_1080p_with_h264() {
+        assert!(tiles_enabled(false, true, (3840, 2160)));
+        assert!(!tiles_enabled(false, true, (1920, 1080)));
+        assert!(!tiles_enabled(false, false, (3840, 2160)), "H.264 off");
+        assert!(tiles_enabled(true, false, (1920, 1080)), "requested");
+    }
+
+    #[test]
     fn a_stream_larger_than_the_capture_is_refused() {
-        let (request, settings) = settings(&["--source", "mock:64x48@30"]);
+        let (request, settings) = settings(&["--source", "mock:64x48@30", "--h264"]);
         let session = local_session();
         let flag = AtomicBool::new(false);
         let opened = source::open(&request, &flag).unwrap().unwrap();

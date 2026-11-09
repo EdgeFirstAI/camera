@@ -434,14 +434,14 @@ pub struct Args {
     )]
     pub jpeg_quality: u8,
 
-    /// Enable H.264 video streaming output (default on)
+    /// Enable H.264 video streaming output (default off)
     ///
-    /// Takes an optional value: `--h264 false` (`H264=false`) turns it
-    /// off.
+    /// Needs a hardware H.264 encoder. Takes an optional value: `--h264`
+    /// turns it on and `--h264 false` (`H264=false`) off.
     #[arg(
         long,
         env = "H264",
-        default_value_t = true,
+        default_value_t = false,
         action = ArgAction::Set,
         num_args = 0..=1,
         default_missing_value = "true"
@@ -778,7 +778,7 @@ pub(crate) const FLAG_ENV: &[(&str, &str, &str)] = &[
     ("jpeg", "JPEG", "true"),
     ("jpeg-topic", "JPEG_TOPIC", "cam/jpeg"),
     ("jpeg-quality", "JPEG_QUALITY", "70"),
-    ("h264", "H264", "false"),
+    ("h264", "H264", "true"),
     ("h264-topic", "H264_TOPIC", "cam/h264"),
     ("h264-bitrate", "H264_BITRATE", "mbps5"),
     ("h264-fps", "H264_FPS", "25"),
@@ -927,13 +927,16 @@ mod tests {
     }
 
     #[test]
-    fn h264_is_enabled_by_default() {
-        // A bare manual run publishes video, as the service does.
-        assert!(Args::parse_from(["edgefirst-camera"]).h264);
+    fn compressed_outputs_are_off_by_default() {
+        // JPEG and H.264 are alternatives the user turns on.
+        let args = Args::parse_from(["edgefirst-camera"]);
+        assert!(!args.h264);
+        assert!(!args.jpeg);
     }
 
     #[test]
-    fn h264_can_still_be_turned_off() {
+    fn h264_takes_an_optional_value() {
+        assert!(Args::parse_from(["edgefirst-camera", "--h264"]).h264);
         let args = Args::try_parse_from(["edgefirst-camera", "--h264", "false"])
             .expect("--h264 must accept an explicit value so it can be disabled");
         assert!(!args.h264);

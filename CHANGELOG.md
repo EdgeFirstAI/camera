@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `camera/frame` YUYV tensors are described as `[H, W, 2]`, where 2.12 used `[H, W]`. The shape is under review.
 - A named `CAMERA_MODE` (`1080p30`) is accepted only when the camera reports it; otherwise startup fails and lists the modes the camera offers. File and mock sources cannot report modes.
 - An explicit `CAMERA_SIZE` or `CAMERA_FPS` wins over `CAMERA_MODE`, with a warning. In 2.x the mode won.
+- H.264 is off by default, as JPEG already was: enable it with `--h264` or `H264=true`. `camera.default` leaves both outputs off for the platform's BSP to turn on the one that suits it, and the 4K tiles turn on by themselves only while H.264 is on. 2.12 turned H.264 on by default (EDGEAI-1526).
 - The `edgefirst_camera_app` library target is removed.
 - The package is renamed `edgefirst-camera-app`; the binary is still `edgefirst-camera`.
 - The capture pool is `CAMERA_BUFFERS` plus two while any encoder runs, so a unit with the default of 4 uses six capture buffers of contiguous memory.
@@ -63,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `--memory` / `MEMORY` (`auto`, `import`, `export`) selects how capture buffers are allocated.
   - `--exposure`, `--gain` and `--white-balance` (`EXPOSURE`, `GAIN`, `WHITE_BALANCE`) set camera controls to `auto` or a value; a camera without the control logs a warning.
 - JPEG output for `file:` sources, compressed from the decoded frames (EDGEAI-1525).
-- The application builds and runs on macOS and Windows against the `mock` source, publishing `camera/frame` with its planes inline. There is no camera backend or H.264 encoder there yet: `--h264` (on by default) stops it at startup with a message to run with `--h264 false`. Ctrl+C and Ctrl+Break stop it on Windows, and journald logging is Linux-only (EDGEAI-1528).
+- The application builds and runs on macOS and Windows against the `mock` source, publishing `camera/frame` with its planes inline. There is no camera backend or H.264 encoder there yet: `--h264` stops it at startup with a message to leave it off. Ctrl+C and Ctrl+Break stop it on Windows, and journald logging is Linux-only (EDGEAI-1528).
 - Subcommands (EDGEAI-1527); without one the program runs the service as before:
   - `devices [--json]` lists cameras with their formats, sizes, rates and named modes.
   - `info [--json]` lists the cameras and whether an H.264 encoder (with its inputs) and decoder are available.

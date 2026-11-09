@@ -320,7 +320,7 @@ fn help_exits_cleanly() -> TestResult {
 #[serial]
 #[ignore = "requires a camera (run with --include-ignored on a board)"]
 fn jpeg_capture() -> TestResult {
-    let Some(args) = capture(&["--jpeg", "--h264", "false"]) else {
+    let Some(args) = capture(&["--jpeg"]) else {
         return Ok(());
     };
     stream(

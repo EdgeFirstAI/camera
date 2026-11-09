@@ -129,10 +129,11 @@ MIRROR="both"
 # ---------------------------------------------------------------------------
 # H.264 Streaming
 # ---------------------------------------------------------------------------
-# Enable H.264 video output on the Zenoh topic camera/h264.
-# The stream uses hardware encoding when available. This is also the
-# built-in default, so a manually launched camera publishes video too.
-H264="true"
+# Enable H.264 video output on the Zenoh topic camera/h264. It needs a
+# hardware H.264 encoder; without one the service stops at startup. JPEG and
+# H.264 are alternatives, both off by default: a platform's BSP turns on the
+# one that suits it.
+H264="false"
 
 # H.264 encoding bitrate preset. Higher bitrates improve quality but
 # increase bandwidth and storage requirements.
@@ -157,8 +158,9 @@ H264_FPS="auto"
 # and encodes each independently. The four tile streams are published on
 # separate Zenoh topics (camera/h264/tl, camera/h264/tr, camera/h264/bl,
 # camera/h264/br).
-# Only useful when capture is 3840x2160 or larger. Tiles turn on automatically
-# for live capture above 1080p, so this is only needed to force them on.
+# Only useful when capture is 3840x2160 or larger. With H264 on, tiles turn on
+# automatically for live capture above 1080p, so this is only needed to force
+# them on.
 H264_TILES="false"
 
 # FPS limit applied to tile streams. A lower value than the camera FPS
