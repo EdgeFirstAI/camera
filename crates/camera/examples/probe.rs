@@ -133,22 +133,34 @@ fn builder(a: &Args) -> Result<CameraBuilder> {
     Ok(b)
 }
 
-/// `CLOCK_MONOTONIC` now, in nanoseconds; `None` where there is no such
-/// clock.
-#[cfg(unix)]
-fn monotonic_nanos() -> Option<i64> {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: a valid timespec for the call.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-    Some(ts.tv_sec * 1_000_000_000 + ts.tv_nsec)
-}
-
-#[cfg(not(unix))]
-fn monotonic_nanos() -> Option<i64> {
-    None
+/// `clock` now, in nanoseconds; `None` where this host cannot read it.
+fn now_nanos(clock: CaptureClock) -> Option<i64> {
+    match clock {
+        #[cfg(unix)]
+        CaptureClock::Monotonic => {
+            let mut ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: a valid timespec for the call.
+            unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+            Some(ts.tv_sec * 1_000_000_000 + ts.tv_nsec)
+        }
+        #[cfg(windows)]
+        CaptureClock::Qpc => {
+            use windows::Win32::System::Performance::{
+                QueryPerformanceCounter, QueryPerformanceFrequency,
+            };
+            let (mut count, mut frequency) = (0i64, 0i64);
+            // SAFETY: valid, writable i64s for the calls.
+            unsafe {
+                QueryPerformanceCounter(&mut count).ok()?;
+                QueryPerformanceFrequency(&mut frequency).ok()?;
+            }
+            Some((count as i128 * 1_000_000_000 / frequency as i128) as i64)
+        }
+        _ => None,
+    }
 }
 
 fn os_release() -> String {
@@ -257,7 +269,7 @@ fn main() -> Result<()> {
         let f = camera.next_frame(Some(Duration::from_secs(5)))?;
         let ts = f.timestamp();
         (clock, source) = (ts.clock, ts.source);
-        if let (CaptureClock::Monotonic, Some(now)) = (ts.clock, monotonic_nanos()) {
+        if let Some(now) = now_nanos(ts.clock) {
             latencies.push((now - ts.nanos) as f64 / 1e6);
         }
         first.get_or_insert((ts.nanos, Instant::now()));

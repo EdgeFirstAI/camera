@@ -9,7 +9,10 @@ mod file;
 pub(crate) mod libcamera;
 #[cfg(feature = "mock")]
 pub(crate) mod mock;
-#[cfg(all(target_os = "linux", any(feature = "v4l2", feature = "libcamera")))]
+#[cfg_attr(
+    not(all(target_os = "linux", any(feature = "v4l2", feature = "libcamera"))),
+    allow(dead_code, reason = "no capture backend that measures is built")
+)]
 mod rate;
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 pub(crate) mod v4l2;
@@ -38,6 +41,8 @@ pub(crate) fn open(builder: CameraBuilder) -> Result<Box<dyn Camera>> {
         Source::Libcamera(_) => libcamera::open(builder),
         #[cfg(not(all(target_os = "linux", feature = "libcamera")))]
         Source::Libcamera(_) => Err(not_compiled("libcamera")),
+        Source::MediaFoundation(_) => Err(not_compiled("Media Foundation")),
+        Source::AvFoundation(_) => Err(not_compiled("AVFoundation")),
         #[cfg(feature = "file")]
         Source::File(_) => file::open(builder),
         #[cfg(not(feature = "file"))]

@@ -44,6 +44,9 @@ pub enum CaptureClock {
     Boottime,
     /// Wall-clock time, already in the acquisition-time domain.
     Realtime,
+    /// Windows `QueryPerformanceCounter`, in nanoseconds. Media Foundation
+    /// stamps capture samples in this clock, in 100 ns units.
+    Qpc,
     /// The backend did not say; no conversion is possible.
     Unknown,
 }
@@ -96,6 +99,29 @@ fn clock_ns(clock: libc::clockid_t) -> std::io::Result<i128> {
     Ok(ts.tv_sec as i128 * NSEC_PER_SEC + ts.tv_nsec as i128)
 }
 
+/// The performance counter in nanoseconds.
+#[cfg(windows)]
+fn qpc_ns() -> std::io::Result<i128> {
+    use std::sync::OnceLock;
+    use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+
+    // The frequency is fixed at boot.
+    static FREQUENCY: OnceLock<i64> = OnceLock::new();
+    let frequency = match FREQUENCY.get() {
+        Some(&f) => f,
+        None => {
+            let mut f = 0i64;
+            // SAFETY: `f` is a valid, writable i64 for the duration of the call.
+            unsafe { QueryPerformanceFrequency(&mut f) }.map_err(std::io::Error::other)?;
+            *FREQUENCY.get_or_init(|| f)
+        }
+    };
+    let mut count = 0i64;
+    // SAFETY: `count` is a valid, writable i64 for the duration of the call.
+    unsafe { QueryPerformanceCounter(&mut count) }.map_err(std::io::Error::other)?;
+    Ok(count as i128 * NSEC_PER_SEC / frequency as i128)
+}
+
 impl ClockReader for SystemClocks {
     fn realtime_ns(&mut self) -> std::io::Result<i128> {
         let now = SystemTime::now();
@@ -112,6 +138,8 @@ impl ClockReader for SystemClocks {
             #[cfg(any(target_os = "linux", target_os = "android"))]
             CaptureClock::Boottime => clock_ns(libc::CLOCK_BOOTTIME),
             CaptureClock::Realtime => self.realtime_ns(),
+            #[cfg(windows)]
+            CaptureClock::Qpc => qpc_ns(),
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 format!("capture clock {clock:?} is not available on this platform"),
@@ -132,6 +160,8 @@ pub(crate) fn now(clock: CaptureClock) -> std::io::Result<i64> {
 pub(crate) fn synthetic_now() -> std::io::Result<Timestamp> {
     let clock = if cfg!(unix) {
         CaptureClock::Monotonic
+    } else if cfg!(windows) {
+        CaptureClock::Qpc
     } else {
         CaptureClock::Realtime
     };
@@ -219,14 +249,15 @@ pub(crate) fn system_time_from_ns(ns: i128) -> Result<SystemTime> {
 #[derive(Debug)]
 pub(crate) struct Converter<R> {
     reader: R,
-    last_offset_ns: [Option<i128>; 2],
+    /// The latest offset of each convertible clock, to report steps.
+    last_offset_ns: [Option<i128>; 3],
 }
 
 impl<R: ClockReader> Converter<R> {
     pub(crate) fn new(reader: R) -> Self {
         Self {
             reader,
-            last_offset_ns: [None; 2],
+            last_offset_ns: [None; 3],
         }
     }
 
@@ -236,6 +267,7 @@ impl<R: ClockReader> Converter<R> {
             CaptureClock::Realtime => return Ok(ts.nanos as i128),
             CaptureClock::Monotonic => 0,
             CaptureClock::Boottime => 1,
+            CaptureClock::Qpc => 2,
             CaptureClock::Unknown => {
                 return Err(Error::new(
                     ErrorKind::InvalidConfig,
@@ -415,18 +447,32 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    /// The clock capture backends stamp frames in on this host.
+    #[cfg(any(unix, windows))]
+    const HOST_CAPTURE_CLOCK: CaptureClock = if cfg!(windows) {
+        CaptureClock::Qpc
+    } else {
+        CaptureClock::Monotonic
+    };
+
+    #[cfg(any(unix, windows))]
     #[test]
     fn system_clocks_convert_to_now() {
         let mut clock = RealtimeClock::new();
         let mut src = SystemClocks;
         let real_before = src.realtime_ns().unwrap();
-        let mono_now = src.capture_ns(CaptureClock::Monotonic).unwrap();
+        let capture_now = src.capture_ns(HOST_CAPTURE_CLOCK).unwrap();
         let real_after = src.realtime_ns().unwrap();
-        let converted = clock.to_realtime(mono(0, mono_now as i64)).unwrap();
+        let ts = Timestamp {
+            clock: HOST_CAPTURE_CLOCK,
+            source: TimestampSource::EndOfFrame,
+            nanos: capture_now as i64,
+        };
+        let converted = clock.to_realtime(ts).unwrap();
         let converted_ns = converted.duration_since(UNIX_EPOCH).unwrap().as_nanos() as i128;
-        // The monotonic read happened between the two realtime reads, so its
-        // conversion must land in that window regardless of scheduling delay.
+        // The capture-clock read happened between the two realtime reads, so
+        // its conversion must land in that window regardless of scheduling
+        // delay.
         let slack = 1_000_000;
         assert!(
             converted_ns >= real_before - slack,
@@ -436,5 +482,49 @@ mod tests {
             converted_ns <= real_after + slack,
             "{converted_ns} > {real_after}"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn qpc_advances_with_the_host() {
+        let mut src = SystemClocks;
+        let a = src.capture_ns(CaptureClock::Qpc).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let b = src.capture_ns(CaptureClock::Qpc).unwrap();
+        let elapsed = b - a;
+        assert!(
+            (15_000_000..1_000_000_000).contains(&elapsed),
+            "{elapsed} ns"
+        );
+    }
+
+    #[test]
+    fn qpc_has_its_own_offset() {
+        // A Monotonic and a Qpc conversion in turn: each keeps its own
+        // offset, so neither reads as a wall-clock step of the other.
+        let mut c = Converter::new(Script::new(&[
+            (1000 * S, 10 * S, 1000 * S),
+            (1000 * S, 500 * S, 1000 * S),
+        ]));
+        let qpc = Timestamp {
+            clock: CaptureClock::Qpc,
+            ..mono(500, 0)
+        };
+        assert_eq!(c.realtime_ns(mono(10, 0)).unwrap(), 1000 * S);
+        assert_eq!(c.realtime_ns(qpc).unwrap(), 1000 * S);
+        assert_eq!(c.last_offset_ns, [Some(990 * S), None, Some(500 * S)]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn qpc_is_unsupported_off_windows() {
+        let e = RealtimeClock::new()
+            .to_realtime(Timestamp {
+                clock: CaptureClock::Qpc,
+                source: TimestampSource::Unknown,
+                nanos: 0,
+            })
+            .unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::Backend);
     }
 }

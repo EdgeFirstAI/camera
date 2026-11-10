@@ -19,6 +19,10 @@ pub(crate) enum Source {
     Device(PathBuf),
     /// A libcamera camera id.
     Libcamera(String),
+    /// A Media Foundation video capture source id.
+    MediaFoundation(String),
+    /// An AVFoundation capture device id.
+    AvFoundation(String),
     /// A recorded file.
     File(PathBuf),
     /// Synthetic frames with a default size and rate.
@@ -29,11 +33,18 @@ impl Source {
     pub(crate) fn parse(spec: &str) -> Result<Self> {
         let invalid =
             |why: &str| Error::new(ErrorKind::InvalidConfig, format!("source '{spec}': {why}"));
-        if let Some(id) = spec.strip_prefix("libcamera:") {
-            if id.is_empty() {
-                return Err(invalid("missing camera id"));
+        let schemes = [
+            ("libcamera:", Self::Libcamera as fn(String) -> Self),
+            ("mediafoundation:", Self::MediaFoundation),
+            ("avfoundation:", Self::AvFoundation),
+        ];
+        for (scheme, source) in schemes {
+            if let Some(id) = spec.strip_prefix(scheme) {
+                if id.is_empty() {
+                    return Err(invalid("missing camera id"));
+                }
+                return Ok(source(id.to_owned()));
             }
-            return Ok(Self::Libcamera(id.to_owned()));
         }
         if let Some(path) = spec.strip_prefix("file:") {
             if path.is_empty() {
@@ -71,7 +82,8 @@ impl Source {
             return Ok(Self::Device(PathBuf::from(spec)));
         }
         Err(invalid(
-            "expected a device path, libcamera:<id>, file:<path> or mock[:WxH@fps]",
+            "expected a device path, libcamera:<id>, mediafoundation:<id>, \
+             avfoundation:<id>, file:<path> or mock[:WxH@fps]",
         ))
     }
 }
@@ -110,8 +122,13 @@ pub struct CameraBuilder {
 }
 
 impl CameraBuilder {
-    /// Starts from a source string: a device path (`/dev/video3`),
-    /// `libcamera:<id>`, `file:<path>` or `mock[:WxH@fps]`.
+    /// Starts from a source string: a V4L2 device path (`/dev/video3`),
+    /// `libcamera:<id>`, `mediafoundation:<id>` (Windows),
+    /// `avfoundation:<id>` (macOS and iOS), `file:<path>` or
+    /// `mock[:WxH@fps]`.
+    ///
+    /// Every form parses on every platform; a source whose backend is not
+    /// in this build fails at [`open`](Self::open).
     ///
     /// # Errors
     ///
@@ -124,6 +141,8 @@ impl CameraBuilder {
     pub fn from_descriptor(d: &CameraDescriptor) -> Self {
         let source = match d.backend {
             Backend::Libcamera => Source::Libcamera(d.id.clone()),
+            Backend::MediaFoundation => Source::MediaFoundation(d.id.clone()),
+            Backend::AvFoundation => Source::AvFoundation(d.id.clone()),
             Backend::File => Source::File(PathBuf::from(&d.id)),
             Backend::Mock => Source::parse(&d.id).unwrap_or(Source::Mock {
                 width: 1280,
@@ -258,6 +277,19 @@ mod tests {
             Source::Libcamera("/base/soc/os08a20@36".into())
         );
         assert_eq!(
+            Source::parse(r"mediafoundation:\\?\usb#vid_046d&pid_0991&mi_00#6&2d74ea79&0&0000")
+                .unwrap(),
+            Source::MediaFoundation(r"\\?\usb#vid_046d&pid_0991&mi_00#6&2d74ea79&0&0000".into())
+        );
+        assert_eq!(
+            Source::parse("mediafoundation:0").unwrap(),
+            Source::MediaFoundation("0".into())
+        );
+        assert_eq!(
+            Source::parse("avfoundation:0x1420000046d0825").unwrap(),
+            Source::AvFoundation("0x1420000046d0825".into())
+        );
+        assert_eq!(
             Source::parse("file:capture.h264").unwrap(),
             Source::File(PathBuf::from("capture.h264"))
         );
@@ -284,6 +316,9 @@ mod tests {
         for bad in [
             "video3",
             "libcamera:",
+            "mediafoundation:",
+            "avfoundation:",
+            "MediaFoundation:0",
             "file:",
             "mock:640",
             "mock:axb@30",
@@ -293,6 +328,39 @@ mod tests {
                 Source::parse(bad).unwrap_err().kind(),
                 ErrorKind::InvalidConfig,
                 "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn descriptors_open_through_their_own_scheme() {
+        for (backend, source) in [
+            (
+                Backend::MediaFoundation,
+                Source::MediaFoundation("cam".into()),
+            ),
+            (Backend::AvFoundation, Source::AvFoundation("cam".into())),
+            (Backend::Libcamera, Source::Libcamera("cam".into())),
+        ] {
+            let d = CameraDescriptor::new(backend, "cam", "", "");
+            assert_eq!(CameraBuilder::from_descriptor(&d).source, source);
+        }
+    }
+
+    /// A desktop scheme in a build without its backend fails as a Linux
+    /// backend that is not built does.
+    #[test]
+    fn a_backend_not_built_is_not_found() {
+        let mut specs = vec!["mediafoundation:0", "avfoundation:0"];
+        if !cfg!(all(target_os = "linux", feature = "libcamera")) {
+            specs.push("libcamera:cam");
+        }
+        for spec in specs {
+            let e = CameraBuilder::source(spec).unwrap().open().unwrap_err();
+            assert_eq!(e.kind(), ErrorKind::NotFound, "{spec}");
+            assert!(
+                e.to_string().contains("not available in this build"),
+                "{spec}: {e}"
             );
         }
     }

@@ -271,14 +271,25 @@ pub(crate) fn probe_ready(
     })
 }
 
-/// Probes the modes of a camera spec: a V4L2 device path or
-/// `libcamera:<id>`.
+/// Probes the modes of a camera spec: a V4L2 device path,
+/// `libcamera:<id>`, `mediafoundation:<id>` or `avfoundation:<id>`.
 pub(crate) fn probe_camera(spec: &str) -> edgefirst_camera::Result<Vec<FormatInfo>> {
-    let d = match spec.strip_prefix("libcamera:") {
-        Some(id) => CameraDescriptor::new(Backend::Libcamera, id, "", ""),
-        None => CameraDescriptor::new(Backend::V4l2, spec, "", ""),
-    };
-    edgefirst_camera::probe(&d)
+    edgefirst_camera::probe(&camera_descriptor(spec))
+}
+
+/// The descriptor of a camera spec, with no formats.
+fn camera_descriptor(spec: &str) -> CameraDescriptor {
+    let schemes = [
+        ("libcamera:", Backend::Libcamera),
+        ("mediafoundation:", Backend::MediaFoundation),
+        ("avfoundation:", Backend::AvFoundation),
+    ];
+    for (scheme, backend) in schemes {
+        if let Some(id) = spec.strip_prefix(scheme) {
+            return CameraDescriptor::new(backend, id, "", "");
+        }
+    }
+    CameraDescriptor::new(Backend::V4l2, spec, "", "")
 }
 
 /// Accepts `mode` when some format offers its size at its rate; otherwise
@@ -727,6 +738,23 @@ mod tests {
         assert_eq!(SourceKind::of("file:a.h264"), SourceKind::File);
         assert_eq!(SourceKind::of("mock"), SourceKind::Synthetic);
         assert_eq!(SourceKind::of("mock:64x64@5"), SourceKind::Synthetic);
+    }
+
+    #[test]
+    fn camera_specs_name_their_backend() {
+        for (spec, backend, id) in [
+            ("/dev/video3", Backend::V4l2, "/dev/video3"),
+            (
+                "libcamera:/base/imx708@1a",
+                Backend::Libcamera,
+                "/base/imx708@1a",
+            ),
+            ("mediafoundation:0", Backend::MediaFoundation, "0"),
+            ("avfoundation:0", Backend::AvFoundation, "0"),
+        ] {
+            let d = camera_descriptor(spec);
+            assert_eq!((d.backend, d.id.as_str()), (backend, id), "{spec}");
+        }
     }
 
     /// Opening a mock source runs the whole path: the image-crate pool is

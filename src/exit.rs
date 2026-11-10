@@ -36,6 +36,9 @@ pub(crate) enum Status {
     /// The camera delivered no frames in time; trying again later may
     /// work (`EX_TEMPFAIL`, `TEMPFAIL`).
     Timeout = 75,
+    /// The operating system refused camera access, such as a privacy
+    /// setting on macOS or Windows (`EX_NOPERM`, `NOPERM`).
+    NoPermission = 77,
 }
 
 impl From<Status> for ExitCode {
@@ -109,6 +112,7 @@ fn camera_status(kind: ErrorKind) -> Status {
         ErrorKind::NotFound | ErrorKind::Busy | ErrorKind::Disconnected => Status::CameraNotFound,
         ErrorKind::NotReady | ErrorKind::Timeout => Status::Timeout,
         ErrorKind::InvalidConfig => Status::InvalidArgs,
+        ErrorKind::PermissionDenied => Status::NoPermission,
         _ => Status::General,
     }
 }
@@ -130,6 +134,7 @@ mod tests {
             (Status::CodecUnavailable, 69),
             (Status::Socket, 68),
             (Status::Timeout, 75),
+            (Status::NoPermission, 77),
         ];
         for (status, code) in codes {
             assert_eq!(status as u8, code);
@@ -149,6 +154,10 @@ mod tests {
         assert_eq!(
             status(&*camera(ErrorKind::InvalidConfig)),
             Status::InvalidArgs
+        );
+        assert_eq!(
+            status(&*camera(ErrorKind::PermissionDenied)),
+            Status::NoPermission
         );
         assert_eq!(status(&*camera(ErrorKind::Io)), Status::General);
         let codec = boxed(CodecError::NoDevice("none".into()));

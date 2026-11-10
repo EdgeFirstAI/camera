@@ -173,6 +173,8 @@ fn backend_name(backend: Backend) -> &'static str {
     match backend {
         Backend::V4l2 => "v4l2",
         Backend::Libcamera => "libcamera",
+        Backend::MediaFoundation => "mediafoundation",
+        Backend::AvFoundation => "avfoundation",
         Backend::File => "file",
         Backend::Mock => "mock",
         _ => "other",
