@@ -46,6 +46,19 @@ impl Packing {
         }
     }
 
+    /// The row pitch of a sample whose media type states no default stride,
+    /// as Media Foundation lays out system memory: uncompressed RGB is
+    /// bottom-up with rows padded to 4 bytes, YUV is top-down.
+    pub(super) fn default_pitch(self, width: usize) -> isize {
+        let rgb = |bytes: usize| -((bytes * width).next_multiple_of(4) as isize);
+        match self {
+            Self::Rgb24 => rgb(3),
+            Self::Rgb32 | Self::Argb32 => rgb(4),
+            Self::Yuy2 | Self::Uyvy => (2 * width.next_multiple_of(2)) as isize,
+            Self::Nv12 | Self::I420 | Self::Yv12 => width as isize,
+        }
+    }
+
     /// Whether frames are delivered as the camera lays them out.
     pub(super) fn is_identity(self) -> bool {
         matches!(self, Self::Nv12 | Self::Yuy2 | Self::Argb32)
@@ -355,6 +368,14 @@ mod tests {
         assert_eq!(yuyv, [(1920, 1080), (640, 480)]);
         assert_eq!(sizes[0].rates, Rates::Discrete(vec![5.0]));
         assert!(formats(&[t(0, MJPG, 640, 480, 30)]).is_empty());
+    }
+
+    #[test]
+    fn rgb_without_a_stated_stride_is_bottom_up_and_padded() {
+        assert_eq!(Packing::Rgb24.default_pitch(5), -16);
+        assert_eq!(Packing::Argb32.default_pitch(5), -20);
+        assert_eq!(Packing::Yuy2.default_pitch(5), 12);
+        assert_eq!(Packing::I420.default_pitch(640), 640);
     }
 
     #[test]

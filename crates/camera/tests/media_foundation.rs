@@ -34,7 +34,10 @@ fn source() -> Option<String> {
     let spec = std::env::var("EDGEFIRST_CAMERA_SOURCE").unwrap_or_default();
     let found = if spec == "mediafoundation" {
         enumerate()
-            .ok()?
+            .unwrap_or_else(|e| {
+                eprintln!("enumerate() failed: {e}");
+                Vec::new()
+            })
             .into_iter()
             .find(|c| c.backend == Backend::MediaFoundation)
             .map(|c| format!("mediafoundation:{}", c.id))

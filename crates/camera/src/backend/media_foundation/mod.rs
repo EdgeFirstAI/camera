@@ -77,6 +77,9 @@ const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 /// Poll slice while every buffer is held, so a slot released on another
 /// thread is taken promptly.
 const STARVED_POLL: Duration = Duration::from_millis(20);
+/// Samples in a row that fail to copy before `next_frame` reports the
+/// failure instead of skipping them.
+const MAX_FAILED_COPIES: u32 = 30;
 /// Memory frames are copied into: D3D11 textures, or host memory.
 const NATIVE: &[TensorMemory] = &[TensorMemory::DmaBuf, TensorMemory::Mem];
 
@@ -178,7 +181,15 @@ impl Shared {
             tracing::debug!("mediafoundation: a gap in the stream at {time}");
         }
         if flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 != 0 {
-            tracing::warn!("mediafoundation: the camera changed its media type");
+            // Only native types are set, so the device changed it; the pool
+            // and the copy layout no longer describe the samples.
+            self.update(|q| {
+                q.failed = Some(Error::new(
+                    ErrorKind::Backend,
+                    "the camera changed its format while streaming; reopen it",
+                ))
+            });
+            return;
         }
         if let Some(sample) = sample {
             // SAFETY: a live sample.
@@ -327,6 +338,8 @@ struct MediaFoundationCamera {
     clock: RealtimeClock,
     seq: u64,
     stats: CaptureStats,
+    /// Samples in a row that failed to copy.
+    failed_copies: u32,
     rate: RateMeter,
     reader: Agile<IMFSourceReader>,
     source: Agile<IMFMediaSource>,
@@ -402,6 +415,7 @@ pub(crate) fn open(builder: CameraBuilder) -> Result<Box<dyn Camera>> {
         clock: RealtimeClock::new(),
         seq: 0,
         stats: CaptureStats::default(),
+        failed_copies: 0,
         rate: RateMeter::default(),
         reader: Agile(reader),
         source: Agile(source),
@@ -473,15 +487,11 @@ impl MediaFoundationCamera {
             ));
         };
         let format = packing.delivers();
-        let natural = match packing {
-            Packing::Yuy2 | Packing::Uyvy => 2,
-            Packing::Rgb24 => 3,
-            Packing::Rgb32 | Packing::Argb32 => 4,
-            Packing::Nv12 | Packing::I420 | Packing::Yv12 => 1,
-        } * got.width as isize;
         // SAFETY: a live media type; the stride is a signed value.
         self.pitch = unsafe { current.GetUINT32(&MF_MT_DEFAULT_STRIDE) }
-            .map_or(natural, |s| s as i32 as isize);
+            .map_or(packing.default_pitch(got.width as usize), |s| {
+                s as i32 as isize
+            });
         if let Some((w, h)) = self.request.size.filter(|&s| s != got.size()) {
             tracing::info!(
                 "{}: {w}x{h} is not offered; capturing {}x{}",
@@ -851,6 +861,7 @@ impl Camera for MediaFoundationCamera {
                 "next_frame while stopped",
             ));
         }
+        com();
         let shared = self.shared.clone();
         let deadline = timeout.map(|t| Instant::now() + t);
         let mut slot = None;
@@ -872,6 +883,7 @@ impl Camera for MediaFoundationCamera {
                     match copied {
                         Ok(()) => {
                             slot = None;
+                            self.failed_copies = 0;
                             match self.frame(s, time) {
                                 Some(frame) => break Ok(frame),
                                 None => {
@@ -881,7 +893,18 @@ impl Camera for MediaFoundationCamera {
                         }
                         Err(e) => {
                             self.stats.errors += 1;
+                            self.failed_copies += 1;
+                            if self.failed_copies >= MAX_FAILED_COPIES {
+                                break Err(e);
+                            }
                             tracing::warn!("{}: {e}", self.name());
+                            if deadline.is_some_and(|d| Instant::now() >= d) {
+                                self.stats.timeouts += 1;
+                                break Err(Error::new(
+                                    ErrorKind::Timeout,
+                                    format!("no frame within {timeout:?}"),
+                                ));
+                            }
                             continue;
                         }
                     }
