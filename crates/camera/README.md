@@ -40,7 +40,7 @@ println!(
 | `/dev/videoN` | V4L2 capture (feature `v4l2`, Linux) | available |
 | `file:<path>` | Recorded Annex-B H.264 with JSON sidecar (feature `file`; decoding needs a V4L2 decoder, so Linux) | available |
 | `libcamera:<id>` | libcamera 0.5 and newer through a runtime-loaded shim (feature `libcamera`, Linux; Export only) | available |
-| `mediafoundation:<id>` | Media Foundation (Windows) | planned; `open()` returns `NotFound` |
+| `mediafoundation:<id>` | Media Foundation (feature `media-foundation`, Windows): `<id>` is the camera's symbolic link or its index in `enumerate()`; frames are copied into D3D11 tensors | available |
 | `avfoundation:<id>` | AVFoundation (macOS, iOS) | planned; `open()` returns `NotFound` |
 
 ## Features
@@ -49,6 +49,7 @@ println!(
 |---|---|---|
 | `v4l2` | yes | the V4L2 capture backend (Linux) |
 | `libcamera` | yes | the libcamera backend (Linux), loaded at run time through `edgefirst-libcamera-sys` |
+| `media-foundation` | yes | the Media Foundation backend (Windows) |
 | `mock` | no | the synthetic frame source |
 | `schemas` | no | `schema`: the `Frame` → `edgefirst_msgs/CameraFrame` mapping |
 | `file` | no | the file source: recorded H.264 played through `edgefirst-codec`'s decoder |
@@ -83,7 +84,7 @@ tensor.with_fields(|fields| {
 
 ## Platforms
 
-Linux (x86_64, aarch64), macOS and Windows build and run against `mock`. Native backends are Linux-first.
+Linux (x86_64, aarch64), macOS and Windows build and run against `mock`. Linux captures through V4L2 and libcamera, Windows through Media Foundation; the AVFoundation backend for macOS is planned.
 
 `cargo run -p edgefirst-camera --example probe -- --source /dev/video3 --frames 300 --close-test --json` reports what a camera negotiates and delivers on a platform: driver and BSP identity, format and pitch, the memory strategy `Auto` resolved to, contiguity, frame rate, drops, latency, the timestamp clock, and whether a frame held across close stays intact.
 

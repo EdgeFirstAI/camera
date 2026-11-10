@@ -76,6 +76,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `mediafoundation:<id>` and `avfoundation:<id>` sources, with `Backend::MediaFoundation` and `Backend::AvFoundation`, for the Windows and macOS backends to come. Until a build has the backend, `open()` fails with `NotFound` (EDGEAI-2679).
 - `CaptureClock::Qpc`: the Windows performance counter, in which Media Foundation stamps samples. `RealtimeClock` converts it, and the mock and file sources stamp frames in it on Windows (EDGEAI-2679).
 - `ErrorKind::PermissionDenied` for a camera the operating system refuses access to, as the macOS and Windows privacy settings do; the message says where to allow it, and the application exits with 77 (`NOPERM`) (EDGEAI-2679).
+- `media-foundation` backend for Windows, on by default: captures `mediafoundation:<id>` cameras (symbolic link or index) into D3D11 tensors in NV12, YUYV or BGRA, repacking I420, YV12, UYVY and RGB formats without colour conversion, with `Qpc` timestamps, the measured frame rate, exposure, gain, white balance and frame-rate controls, enumeration and probe (EDGEAI-1546).
+- The application captures from Windows cameras (`--source mediafoundation:<id>`) in NV12, or in the camera's current format when it has no NV12, and `devices` lists them (EDGEAI-1546).
 
 ### Changed
 

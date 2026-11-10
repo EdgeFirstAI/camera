@@ -351,7 +351,10 @@ mod tests {
     /// backend that is not built does.
     #[test]
     fn a_backend_not_built_is_not_found() {
-        let mut specs = vec!["mediafoundation:0", "avfoundation:0"];
+        let mut specs = vec!["avfoundation:0"];
+        if !cfg!(all(windows, feature = "media-foundation")) {
+            specs.push("mediafoundation:0");
+        }
         if !cfg!(all(target_os = "linux", feature = "libcamera")) {
             specs.push("libcamera:cam");
         }

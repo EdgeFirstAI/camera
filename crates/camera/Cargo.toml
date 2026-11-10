@@ -12,7 +12,7 @@ categories = ["multimedia::video", "hardware-support"]
 include = ["src/**", "tests/**", "benches/**", "README.md", "ARCHITECTURE.md", "TESTING.md"]
 
 [features]
-default = ["v4l2", "libcamera"]
+default = ["v4l2", "libcamera", "media-foundation"]
 # Synthetic frame source for tests, CI and as the worked example for backends.
 mock = []
 # V4L2 capture backend (Linux).
@@ -20,6 +20,14 @@ v4l2 = ["dep:edgefirst-v4l2"]
 # libcamera capture backend (Linux). Loads libcamera at run time through
 # the edgefirst-libcamera-sys shim; nothing is linked at build time.
 libcamera = ["dep:edgefirst-libcamera-sys"]
+# Media Foundation capture backend (Windows). Frames are copied into the
+# SDK's own D3D11 tensors.
+media-foundation = [
+    "windows/Win32_Media_MediaFoundation",
+    "windows/Win32_Media_DirectShow",
+    "windows/Win32_System_Com",
+    "dep:windows-core",
+]
 # `Frame` → `edgefirst_msgs/CameraFrame` mapping.
 schemas = ["dep:edgefirst-schemas"]
 # Recorded H.264 playback (`file:<path>.h264` with its JSON sidecar). Decodes
@@ -38,6 +46,7 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = ["Win32_System_Performance"] }
+windows-core = { version = "0.62.2", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 edgefirst-v4l2 = { version = "0.2.2", optional = true }

@@ -29,6 +29,17 @@ These run in every CI lane:
 | Controls | `tests/mock.rs`: applied, clamped and unsupported outcomes |
 | File source (`file`) | `backend/file/`, with the decoder mocked: the sidecar (a 2.x sidecar, extras, colorimetry labels, version, codec and field errors); the Annex B reader (units across read boundaries, a start code split by a read, leading garbage, a long stretch without start codes, rewind); pacing (spacing, re-anchoring after a stall, requested rate); every picture then `EndOfStream`; `seq` across loops; `encoded()` reproducing the file byte for byte with a reordering decoder; a rejected unit skipped; a damaged picture counted; held pictures blocking until one drops; caller pools refused and handed back. `tests/file.rs`: missing recording and sidecar, an unsupported codec, no decoder off Linux |
 | `CameraFrame` mapping (`schemas`) | `schema.rs`: byte-for-byte against the schemas `CameraFrame_split_fd` golden (NV12M), field by field against `CameraFrame` (single-buffer NV12), unspecified colorimetry, unformatted tensors, epoch clamp and Y2038 saturation, the Zenoh NTP64 timestamp within 2 ns of the header stamp. `tests/schema.rs`: every mock format at nine sizes passes `TensorFields::validate` and decodes to the frame's bytes. `tests/v4l2_vivid.rs`: real DMA-BUF frames map to planes by reference |
+| Media Foundation (`media-foundation`, Windows) | `backend/media_foundation/`: the native type for a request (format, nearest size, nearest rate, compressed types never chosen, formats the camera does not deliver refused), the formats reported, subtype packings, repacking I420, YV12, UYVY, RGB24 and RGB32, bottom-up samples and refusing rows outside either buffer, control ranges and exposure units, HRESULT kinds and the permission message. `tests/media_foundation.rs` on a camera (below) |
+
+## Media Foundation on a camera
+
+`tests/media_foundation.rs` runs the Media Foundation backend on a real camera. Hosted runners have none, so every test is ignored and runs by hand on a Windows machine with a camera; without `EDGEFIRST_CAMERA_SOURCE` they print `SKIPPED`, and fail instead when `EDGEFIRST_CAMERA_REQUIRE_BOARD=1`. They check the requested mode into D3D11 tensors with `Qpc` timestamps and a measured rate within 10% of the reported one, every format the camera delivers, frames held across close and an immediate reopen, stop and start with a held frame, a caller's D3D11 pool, the controls offered, and a timeout while every buffer is held.
+
+```bash
+EDGEFIRST_CAMERA_SOURCE=mediafoundation EDGEFIRST_CAMERA_SIZE=640x480 cargo test -p edgefirst-camera --test media_foundation -- --include-ignored --test-threads 1
+```
+
+`EDGEFIRST_CAMERA_SOURCE` is `mediafoundation` for the first camera or `mediafoundation:<id or index>`. `EDGEFIRST_CAMERA_SIZE` and `EDGEFIRST_CAMERA_FPS` are the mode requested (default 1920x1080 at 30); a camera without it delivers its nearest. The application's `tests/desktop.rs` runs the binary on the same camera and checks `camera/frame` and `camera/jpeg` over Zenoh.
 
 ## V4L2 backend on vivid
 
@@ -110,7 +121,7 @@ On the board fleet, run the `Camera benchmarks` workflow (`camera-bench.yml`) by
 |---|---|
 | `EDGEFIRST_CAMERA_REQUIRE_BOARD=1` | Every test that would print `SKIPPED` fails instead, naming the reason |
 | `EDGEFIRST_CAMERA_ALLOW_SKIPS` | Comma-separated skip reasons this board may still take: `no-camera`, `no-mirror`, `uniform-scene`, `not-vvcam`, `not-monotonic`, `no-recording`, `not-v4l2`, `no-cma-heap`, `no-encoder`, `no-decoder`, `encoder-format`. The i.MX 95 lane allows `not-vvcam,no-mirror,not-v4l2`; the Raspberry Pi 5 lane, which has no H.264 encoder or decoder, `not-vvcam,not-v4l2,no-encoder,no-decoder`. Boards tested by hand set the same variables: the IQ-9075 EVK with its USB webcam, for example, uses `EDGEFIRST_CAMERA_SIZE=640x480` and allows `not-vvcam,no-mirror,no-cma-heap,encoder-format` |
-| `EDGEFIRST_CAMERA_SOURCE` | The camera: a V4L2 node or link (default `/dev/video3`), `libcamera:<id>`, or `libcamera` for the first camera libcamera lists |
+| `EDGEFIRST_CAMERA_SOURCE` | The camera: a V4L2 node or link (default `/dev/video3`), `libcamera:<id>` or `mediafoundation:<id>`, or `libcamera` or `mediafoundation` for the first camera that backend lists |
 | `EDGEFIRST_CAMERA_SIZE` | The capture size the tests request, and `on_target`'s stream size, as `WIDTHxHEIGHT` (default `1920x1080`) |
 | `EDGEFIRST_CAMERA_RECORDING` | A recording with its `.json` sidecar, for the decode and playback tests |
 | `EDGEFIRST_CAMERA_FPS` | The rate the tests request, and expects at least 90% of on `camera/frame` and `camera/h264` (default 30). `camera/jpeg` is compressed in software, so it is only required to keep delivering, at no particular rate |

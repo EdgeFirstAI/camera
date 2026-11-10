@@ -254,6 +254,8 @@ pub enum H264Bitrate {
 pub struct CaptureArgs {
     /// Frame source: a V4L2 device path (`/dev/video3`), `libcamera:<id>`
     /// for a libcamera camera (ids are listed by `devices`),
+    /// `mediafoundation:<id>` for a Windows camera (ids are listed by
+    /// `devices`),
     /// `file:<name>.h264` for a recording with its `<name>.json` sidecar, or
     /// `mock[:WxH@fps]` for synthetic frames. Unset uses `--camera`.
     #[arg(long, env = "SOURCE")]

@@ -16,7 +16,7 @@ This file describes the crate's modules, the rules every backend follows, how sl
 | `timestamp.rs` | `Timestamp`, `CaptureClock`, `TimestampSource`, `RealtimeClock` |
 | `enumerate.rs` | `CameraDescriptor`, `FormatInfo`, `Sizes`, `Rates`, `Mode`, `modes()` |
 | `error.rs` | `Error`, `ErrorKind`, `Rejection` |
-| `backend/` | Backend dispatch; `mock.rs`, `v4l2/` and `libcamera/` on Linux, `file/`, and `rate.rs`, the measured-rate meter every capture backend shares |
+| `backend/` | Backend dispatch; `mock.rs`, `v4l2/` and `libcamera/` on Linux, `media_foundation/` on Windows, `file/`, and `rate.rs`, the measured-rate meter every capture backend shares |
 
 ## Rules every backend follows
 
@@ -47,7 +47,7 @@ Caller-provided pools are checked by one shared function, `pool::validate`, at `
 
 The core carries what the macOS and Windows backends share, so each backend adds only its own capture code.
 
-- **Sources.** `mediafoundation:<id>` (Windows) and `avfoundation:<id>` (macOS and iOS) parse on every platform, like `libcamera:<id>`. In a build without the backend, `open()` fails with `NotFound` ("the Media Foundation backend is not available in this build"), as a Linux backend that is not built does.
+- **Sources.** `mediafoundation:<id>` (Windows, the Media Foundation backend below) and `avfoundation:<id>` (macOS and iOS) parse on every platform, like `libcamera:<id>`. In a build without the backend, `open()` fails with `NotFound` ("the Media Foundation backend is not available in this build"), as a Linux backend that is not built does.
 - **Capture clock.** `CaptureClock::Qpc` is the Windows performance counter in nanoseconds. Media Foundation stamps capture samples with it in 100 ns units: on a USB webcam, sample times and `MFSampleExtension_DeviceTimestamp` both equal `QueryPerformanceCounter` read 0.1 to 1.3 ms before `ReadSample` returns. `RealtimeClock` converts it on Windows and returns `Backend` elsewhere. The mock and file sources stamp in `Qpc` on Windows too, so their frames go through the same conversion. The Apple host clock stays `Unknown` until the AVFoundation backend measures it.
 - **Rate meter.** `backend/rate.rs` builds on every target, so every backend that measures reports `measured_frame_rate()` with the same meter.
 - **Wait handle.** `WaitHandle` is a Unix descriptor. Windows has no form of it yet, and Windows backends return `None` from `wait_handle()`.
@@ -125,6 +125,35 @@ It behaves like an Import backend:
 **Stop and close.** `stop()` stops the camera, drains the cancelled completions and frees the buffers; the table detaches and held frames keep their duplicated fds, so nothing writes into them and the camera restarts at once. Dropping the camera does the same and releases it.
 
 **Pipelines.** On the i.MX 95, the raw-only `imx8-isi` pipeline claims the camera unless `LIBCAMERA_PIPELINES_MATCH_LIST=nxp/neo` is set; enumeration warns when a camera offers only raw formats. `set_libcamera_pipelines` sets the list for library users before the `CameraManager` starts; the SDK never switches pipelines on its own.
+
+## The Media Foundation backend
+
+`backend/media_foundation/` (feature `media-foundation`, Windows) captures with an `IMFSourceReader` over the `windows` crate. The feature is on by default and builds only on Windows, as `v4l2` and `libcamera` build only on Linux. The `windows` crate links `mfplat.dll`, `mf.dll` and `mfreadwrite.dll` when the program loads, so on a Windows N edition a build with the feature needs the Media Feature Pack to start.
+
+| File | Contents |
+|---|---|
+| `com.rs` | COM's multithreaded apartment joined once per calling thread, the Media Foundation start-up hold, HRESULT → `ErrorKind`, attribute strings |
+| `describe.rs` | Devices from `MFEnumDeviceSources`, native media types, subtype ↔ `PixelFormat`, colorimetry from the media type |
+| `select.rs` | How each native subtype is packed and the format it delivers, the native type for a request, and the formats `enumerate()` and `probe()` report |
+| `copy.rs` | Copying a locked sample, top-down or bottom-up, into a tensor's rows, repacked as the delivered format |
+| `controls.rs` | Exposure, gain and white balance through `IAMCameraControl` and `IAMVideoProcAmp` |
+| `mod.rs` | The camera: the reader's callback and its sample queue, the pool, `start()`, `next_frame`, `stop()` and close |
+
+**Sources.** `mediafoundation:<id>` names a camera by its symbolic link (the descriptor's `id`), compared without case, or by its index in `enumerate()`. Each `enumerate()` activates every camera once to read its media types.
+
+**Modes.** A camera lists one native media type per subtype, size and rate, and the backend only ever sets one of them: Media Foundation never converts, scales or resamples the stream. Each uncompressed subtype delivers one format, repacked without colour conversion: NV12, I420 and YV12 as NV12 (the chroma planes interleaved), YUY2 and UYVY as YUYV, ARGB32, RGB32 and RGB24 as BGRA (RGB24 and RGB32 with an opaque alpha). Compressed types (MJPEG, H.264) are never chosen. A request picks a format, else the current type's; then an exact size, else the nearest by area; then the nearest rate at that size (the highest without a request, or the current one at the current size); and among types left, the one delivered as it is. A format the camera does not deliver is `UnsupportedFormat`. Each format is reported at the sizes and rates of the types that deliver it. The QuickCam Pro for Notebooks offers only RGB24 and I420, so it delivers BGRA and NV12.
+
+The video processor (`MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING`) is not used because it re-stamps samples: through it, I420 to NV12 sample times scattered from 15 ms ahead of `QueryPerformanceCounter` to 38 ms behind it, where the camera's own samples trail it by 0.15 to 1 ms.
+
+**Buffers.** The SDK's or the caller's (Import), copied into from each sample. Media Foundation's own textures cannot be wrapped as tensors. Given an `IMFDXGIDeviceManager` on the tensor crate's device, the reader delivers single textures (not arrays), but in `DXGI_FORMAT_NV12` and `DXGI_FORMAT_YUY2`, which D3D11 tensors do not describe (they hold NV12 as an `R8` texture 1.5 times the height). Even its ARGB32 textures, whose format matches, lack the `D3D11_RESOURCE_MISC_SHARED_NTHANDLE` sharing that `from_d3d11_texture` requires. Its sample pool also holds only two or three samples: a third held sample stops capture with `MF_E_SAMPLEALLOCATOR_EMPTY`. So the reader runs without a device manager and delivers system memory, and each sample is copied into a slot. For a USB camera that is the upload Media Foundation would make itself. The SDK pool is D3D11 tensors (`TensorMemory::DmaBuf` on Windows) on the tensor crate's device, or host memory when no D3D11 device is available. A caller pool may be D3D11 or host tensors of the configured size and format. `MemoryStrategy::Export` is `InvalidConfig` at open.
+
+**Capture.** The reader runs in asynchronous mode. Its callback, on a Media Foundation work-queue thread, only queues the sample and requests the next; it holds up to the pool depth of samples and drops a sample that arrives when the queue is full, as a driver drops a frame with no free buffer. `next_frame` waits on the queue with the caller's timeout, takes a free slot (or one whose frame has dropped, polling every 20 ms while every slot is held), and copies the oldest sample in through `IMF2DBuffer2::Lock2DSize`, on the caller's thread. Uploading from the callback instead, while another thread read D3D11 frames back as the application does to publish them inline, held Media Foundation's callbacks back for 5 s every few minutes, with the camera still capturing; with host-memory buffers, or with the upload on the caller's thread, it never did. Stream ticks and discontinuities are logged at debug level, not counted. A stream error or end of stream fails the next `next_frame`.
+
+**Timestamps.** The sample time, `CaptureClock::Qpc`, `TimestampSource::EndOfFrame`: the counter as the frame arrived (see Desktop platforms).
+
+**Controls.** `FrameRate` is the native types' rates at the current size. `set_control(FrameRate)` picks the nearest native type while stopped, and is `InvalidConfig` while streaming, because Media Foundation sets the rate with the format. Exposure is in log2 seconds in `IAMCameraControl` and reported in microseconds; gain is in the driver's units and white balance in kelvin. A property the driver reports no range for is not offered. Mirroring is `Unsupported(Backend)`.
+
+**`start()`, stop and close.** `start()` waits up to 5 s for the first frame, so a refused camera permission or a dead device fails there, and keeps that frame for the next `next_frame`. `stop()` flushes the reader and waits for its `OnFlush`; the pool is kept, so frames held across a restart requeue when they drop. Closing flushes, detaches the pool and shuts the media source down: held frames keep their memory and nothing writes into them again, and the camera reopens at once.
 
 ## The file backend
 

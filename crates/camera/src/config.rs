@@ -11,7 +11,8 @@ use edgefirst_tensor::{Colorimetry, PixelFormat, TensorDyn};
     feature = "v4l2",
     feature = "libcamera",
     feature = "mock",
-    feature = "file"
+    feature = "file",
+    all(windows, feature = "media-foundation")
 ))]
 use crate::{Error, ErrorKind, Result};
 
@@ -23,7 +24,8 @@ pub const POOL_DEPTH: RangeInclusive<usize> = 2..=32;
     feature = "v4l2",
     feature = "libcamera",
     feature = "mock",
-    feature = "file"
+    feature = "file",
+    all(windows, feature = "media-foundation")
 ))]
 pub(crate) fn check_pool_depth(buffers: usize) -> Result<()> {
     if POOL_DEPTH.contains(&buffers) {

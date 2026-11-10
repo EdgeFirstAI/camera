@@ -263,11 +263,21 @@ impl fmt::Debug for SlotTable {
     }
 }
 
-#[cfg(any(feature = "mock", feature = "v4l2", test))]
+#[cfg(any(
+    feature = "mock",
+    feature = "v4l2",
+    all(windows, feature = "media-foundation"),
+    test
+))]
 pub(crate) use validation::{validate, BufferInfo, PoolRequirements};
 
 /// Caller-pool validation shared by backends.
-#[cfg(any(feature = "mock", feature = "v4l2", test))]
+#[cfg(any(
+    feature = "mock",
+    feature = "v4l2",
+    all(windows, feature = "media-foundation"),
+    test
+))]
 mod validation {
     use edgefirst_tensor::{Contiguity as Heap, PixelFormat, TensorDyn, TensorMemory};
 
