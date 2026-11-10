@@ -605,7 +605,7 @@ impl MediaFoundationCamera {
         self.shared.streaming.store(false, Ordering::Release);
         self.rate.restart();
         // SAFETY: a live reader; the flush completes in the callback.
-        let flushed = unsafe { self.reader.Flush(STREAM) }
+        unsafe { self.reader.Flush(STREAM) }
             .map_err(|e| error(e, "stop the camera"))
             .and_then(|()| {
                 let q = lock(&self.shared.queue);
@@ -625,8 +625,33 @@ impl MediaFoundationCamera {
                     ));
                 }
                 Ok(())
-            });
-        flushed
+            })
+    }
+
+    /// Copies `sample` into `slot` and hands it out as a frame.
+    fn deliver(&mut self, slot: usize, sample: &IMFSample, time: i64) -> Result<Frame> {
+        let no_buffers = || Error::new(ErrorKind::InvalidConfig, "no buffers");
+        let copied = match &self.table {
+            Some(table) => copy_sample(sample, table.tensor(slot), self.layout()),
+            None => Err(no_buffers()),
+        };
+        if let Err(e) = copied {
+            self.stats.errors += 1;
+            self.failed_copies += 1;
+            return Err(e);
+        }
+        self.failed_copies = 0;
+        self.frame(slot, time).ok_or_else(no_buffers)
+    }
+
+    /// The timeout error, counted, once `deadline` has passed.
+    fn expired(&mut self, deadline: Option<Instant>, timeout: Option<Duration>) -> Option<Error> {
+        deadline.filter(|d| Instant::now() >= *d)?;
+        self.stats.timeouts += 1;
+        Some(Error::new(
+            ErrorKind::Timeout,
+            format!("no frame within {timeout:?}"),
+        ))
     }
 
     /// A slot no frame holds, if there is one.
@@ -687,6 +712,26 @@ impl MediaFoundationCamera {
             Applied::Clamped(ControlValue::Float(got))
         })
     }
+}
+
+/// Waits for the callback until `deadline`, waking every 20 ms while
+/// `starved` (every buffer held) to look for a released slot.
+fn wait(ready: &Condvar, q: MutexGuard<'_, Queue>, deadline: Option<Instant>, starved: bool) {
+    let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+    let slice = starved.then_some(STARVED_POLL);
+    let limit = match (left, slice) {
+        (Some(l), Some(s)) => Some(l.min(s)),
+        (l, s) => l.or(s),
+    };
+    drop(match limit {
+        Some(w) => {
+            ready
+                .wait_timeout(q, w)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0
+        }
+        None => ready.wait(q).unwrap_or_else(PoisonError::into_inner),
+    });
 }
 
 fn planes(config: &StreamConfig, tensor: &TensorDyn) -> Vec<PlaneLayout> {
@@ -873,67 +918,28 @@ impl Camera for MediaFoundationCamera {
             if let Some(e) = q.failed.take() {
                 break Err(e);
             }
-            if let Some(s) = slot {
-                if let Some((sample, time)) = q.samples.pop_front() {
-                    drop(q);
-                    let copied = match &self.table {
-                        Some(table) => copy_sample(&sample, table.tensor(s), self.layout()),
-                        None => Err(Error::new(ErrorKind::InvalidConfig, "no buffers")),
-                    };
-                    match copied {
-                        Ok(()) => {
-                            slot = None;
-                            self.failed_copies = 0;
-                            match self.frame(s, time) {
-                                Some(frame) => break Ok(frame),
-                                None => {
-                                    break Err(Error::new(ErrorKind::InvalidConfig, "no buffers"))
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            self.stats.errors += 1;
-                            self.failed_copies += 1;
-                            if self.failed_copies >= MAX_FAILED_COPIES {
-                                break Err(e);
-                            }
-                            tracing::warn!("{}: {e}", self.name());
-                            if deadline.is_some_and(|d| Instant::now() >= d) {
-                                self.stats.timeouts += 1;
-                                break Err(Error::new(
-                                    ErrorKind::Timeout,
-                                    format!("no frame within {timeout:?}"),
-                                ));
-                            }
-                            continue;
+            let next = slot.and_then(|_| q.samples.pop_front());
+            if let (Some(s), Some((sample, time))) = (slot, next) {
+                drop(q);
+                match self.deliver(s, &sample, time) {
+                    Ok(frame) => {
+                        slot = None;
+                        break Ok(frame);
+                    }
+                    Err(e) if self.failed_copies >= MAX_FAILED_COPIES => break Err(e),
+                    Err(e) => {
+                        tracing::warn!("{}: {e}", self.name());
+                        match self.expired(deadline, timeout) {
+                            Some(e) => break Err(e),
+                            None => continue,
                         }
                     }
                 }
             }
-            let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
-            if left.is_some_and(|l| l.is_zero()) {
-                self.stats.timeouts += 1;
-                break Err(Error::new(
-                    ErrorKind::Timeout,
-                    format!("no frame within {timeout:?}"),
-                ));
+            if let Some(e) = self.expired(deadline, timeout) {
+                break Err(e);
             }
-            // Every buffer held: wake to look for a released one.
-            let slice = slot.is_none().then_some(STARVED_POLL);
-            let wait = match (left, slice) {
-                (Some(l), Some(s)) => Some(l.min(s)),
-                (l, s) => l.or(s),
-            };
-            drop(match wait {
-                Some(w) => {
-                    shared
-                        .ready
-                        .wait_timeout(q, w)
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .0
-                }
-                None => shared.ready.wait(q).unwrap_or_else(PoisonError::into_inner),
-            });
+            wait(&shared.ready, q, deadline, slot.is_none());
         };
         if let Some(s) = slot {
             self.free.push_front(s);

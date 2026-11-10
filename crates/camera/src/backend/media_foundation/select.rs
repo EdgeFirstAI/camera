@@ -191,7 +191,8 @@ fn nearest_size(usable: &[&NativeType], asked: (u32, u32)) -> (u32, u32) {
     let area = |(w, h): (u32, u32)| u64::from(w) * u64::from(h);
     usable
         .iter()
-        .map(|t| t.size())
+        .copied()
+        .map(NativeType::size)
         .min_by_key(|&s| {
             (
                 area(s).abs_diff(area(asked)),

@@ -39,6 +39,93 @@ fn row_mut(dst: &mut [u8], stride: usize, r: usize, len: usize) -> Result<&mut [
         .ok_or_else(|| "a destination row lies outside the tensor".to_owned())
 }
 
+/// One plane of a source image: where its top row starts, and its pitch.
+#[derive(Debug, Clone, Copy)]
+struct Plane {
+    start: isize,
+    pitch: isize,
+}
+
+/// A destination whose rows are `stride` bytes apart.
+struct Dst<'a> {
+    bytes: &'a mut [u8],
+    stride: usize,
+}
+
+/// Fills destination `rows` from consecutive rows of `plane`, `len` source
+/// bytes into `out` destination bytes each, through `each`.
+fn transfer(
+    src: &Rows<'_>,
+    plane: Plane,
+    dst: &mut Dst<'_>,
+    rows: std::ops::Range<usize>,
+    (len, out): (usize, usize),
+    each: fn(&[u8], &mut [u8]),
+) -> Result<(), String> {
+    for (r, d) in rows.enumerate() {
+        each(
+            src.row(plane.start, plane.pitch, r, len)?,
+            row_mut(dst.bytes, dst.stride, d, out)?,
+        );
+    }
+    Ok(())
+}
+
+fn copy_row(from: &[u8], to: &mut [u8]) {
+    to.copy_from_slice(from);
+}
+
+/// UYVY to YUYV.
+fn swap_pairs(from: &[u8], to: &mut [u8]) {
+    for (o, i) in to.chunks_exact_mut(2).zip(from.chunks_exact(2)) {
+        o[0] = i[1];
+        o[1] = i[0];
+    }
+}
+
+/// RGB32, whose fourth byte is unused, to BGRA.
+fn opaque(from: &[u8], to: &mut [u8]) {
+    to.copy_from_slice(from);
+    to.iter_mut().skip(3).step_by(4).for_each(|a| *a = 0xff);
+}
+
+/// RGB24 to BGRA.
+fn expand(from: &[u8], to: &mut [u8]) {
+    for (o, i) in to.chunks_exact_mut(4).zip(from.chunks_exact(3)) {
+        o[..3].copy_from_slice(i);
+        o[3] = 0xff;
+    }
+}
+
+/// Interleaves the chroma planes of I420 (U first) or YV12 (V first),
+/// which follow the luma at half its pitch, into NV12 chroma rows.
+fn interleave(
+    src: &Rows<'_>,
+    luma: Plane,
+    v_first: bool,
+    dst: &mut Dst<'_>,
+    (width, height): (usize, usize),
+) -> Result<(), String> {
+    let (cw, ch) = (width.div_ceil(2), height.div_ceil(2));
+    let half = luma.pitch / 2;
+    let first = luma.start + luma.pitch * height as isize;
+    let second = first + half * ch as isize;
+    let (u, v) = if v_first {
+        (second, first)
+    } else {
+        (first, second)
+    };
+    for r in 0..ch {
+        let (us, vs) = (src.row(u, half, r, cw)?, src.row(v, half, r, cw)?);
+        let out = row_mut(dst.bytes, dst.stride, height + r, 2 * cw)?;
+        for (x, pair) in out.chunks_exact_mut(2).enumerate() {
+            pair[0] = us[x];
+            pair[1] = vs[x];
+        }
+    }
+    Ok(())
+}
+
 /// Copies a `width` x `height` image in `packing` from `src` into `dst`,
 /// whose rows are `stride` bytes apart, as the format the packing delivers:
 /// NV12 with its chroma rows after the luma rows, YUYV, or BGRA.
@@ -50,81 +137,33 @@ pub(super) fn copy(
     dst: &mut [u8],
     stride: usize,
 ) -> Result<(), String> {
-    let (top, pitch) = (src.top as isize, src.pitch);
+    let luma = Plane {
+        start: src.top as isize,
+        pitch: src.pitch,
+    };
+    let dst = &mut Dst { bytes: dst, stride };
     let (cw, ch) = (width.div_ceil(2), height.div_ceil(2));
+    let all = 0..height;
     match packing {
         Packing::Nv12 => {
-            for r in 0..height {
-                row_mut(dst, stride, r, width)?.copy_from_slice(src.row(top, pitch, r, width)?);
-            }
-            let chroma = top + pitch * height as isize;
-            for r in 0..ch {
-                row_mut(dst, stride, height + r, 2 * cw)?.copy_from_slice(src.row(
-                    chroma,
-                    pitch,
-                    r,
-                    2 * cw,
-                )?);
-            }
+            transfer(&src, luma, dst, all, (width, width), copy_row)?;
+            let chroma = Plane {
+                start: luma.start + luma.pitch * height as isize,
+                ..luma
+            };
+            let rows = height..height + ch;
+            transfer(&src, chroma, dst, rows, (2 * cw, 2 * cw), copy_row)
         }
         Packing::I420 | Packing::Yv12 => {
-            for r in 0..height {
-                row_mut(dst, stride, r, width)?.copy_from_slice(src.row(top, pitch, r, width)?);
-            }
-            let half = pitch / 2;
-            let first = top + pitch * height as isize;
-            let second = first + half * ch as isize;
-            let (u, v) = if packing == Packing::I420 {
-                (first, second)
-            } else {
-                (second, first)
-            };
-            for r in 0..ch {
-                let (us, vs) = (src.row(u, half, r, cw)?, src.row(v, half, r, cw)?);
-                let out = row_mut(dst, stride, height + r, 2 * cw)?;
-                for (x, pair) in out.chunks_exact_mut(2).enumerate() {
-                    pair[0] = us[x];
-                    pair[1] = vs[x];
-                }
-            }
+            transfer(&src, luma, dst, all, (width, width), copy_row)?;
+            interleave(&src, luma, packing == Packing::Yv12, dst, (width, height))
         }
-        Packing::Yuy2 | Packing::Uyvy => {
-            let len = 4 * cw;
-            for r in 0..height {
-                let from = src.row(top, pitch, r, len)?;
-                let out = row_mut(dst, stride, r, len)?;
-                if packing == Packing::Yuy2 {
-                    out.copy_from_slice(from);
-                } else {
-                    for (o, i) in out.chunks_exact_mut(2).zip(from.chunks_exact(2)) {
-                        o[0] = i[1];
-                        o[1] = i[0];
-                    }
-                }
-            }
-        }
-        Packing::Argb32 | Packing::Rgb32 => {
-            let len = 4 * width;
-            for r in 0..height {
-                let out = row_mut(dst, stride, r, len)?;
-                out.copy_from_slice(src.row(top, pitch, r, len)?);
-                if packing == Packing::Rgb32 {
-                    out.iter_mut().skip(3).step_by(4).for_each(|a| *a = 0xff);
-                }
-            }
-        }
-        Packing::Rgb24 => {
-            for r in 0..height {
-                let from = src.row(top, pitch, r, 3 * width)?;
-                let out = row_mut(dst, stride, r, 4 * width)?;
-                for (o, i) in out.chunks_exact_mut(4).zip(from.chunks_exact(3)) {
-                    o[..3].copy_from_slice(i);
-                    o[3] = 0xff;
-                }
-            }
-        }
+        Packing::Yuy2 => transfer(&src, luma, dst, all, (4 * cw, 4 * cw), copy_row),
+        Packing::Uyvy => transfer(&src, luma, dst, all, (4 * cw, 4 * cw), swap_pairs),
+        Packing::Argb32 => transfer(&src, luma, dst, all, (4 * width, 4 * width), copy_row),
+        Packing::Rgb32 => transfer(&src, luma, dst, all, (4 * width, 4 * width), opaque),
+        Packing::Rgb24 => transfer(&src, luma, dst, all, (3 * width, 4 * width), expand),
     }
-    Ok(())
 }
 
 #[cfg(test)]
