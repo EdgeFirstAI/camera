@@ -190,10 +190,10 @@ pub fn cma_heap() -> bool {
     std::path::Path::new("/dev/dma_heap/linux,cma").exists()
 }
 
-/// The pixel format a source captures in: NV12 from libcamera, YUYV from
-/// V4L2, as the service captures.
+/// The pixel format a source captures in: NV12 from libcamera and Media
+/// Foundation, YUYV from V4L2, as the service captures.
 pub fn capture_format(source: &str) -> edgefirst_tensor::PixelFormat {
-    if source.starts_with("libcamera") {
+    if source.starts_with("libcamera") || source.starts_with("mediafoundation") {
         edgefirst_tensor::PixelFormat::Nv12
     } else {
         edgefirst_tensor::PixelFormat::Yuyv
@@ -243,17 +243,35 @@ pub fn h264_decoder() -> bool {
 }
 
 /// The source spec from `EDGEFIRST_CAMERA_SOURCE`: a V4L2 node (default
-/// `/dev/video3`), `libcamera:<id>`, or `libcamera` for the first camera
-/// libcamera lists. `None`, after [`skip`], when it is absent.
+/// `/dev/video3`), `libcamera:<id>` or `mediafoundation:<id>`, or
+/// `libcamera` or `mediafoundation` for the first camera that backend lists.
+/// `None`, after [`skip`], when it is absent.
 pub fn source() -> Option<String> {
     let spec = std::env::var("EDGEFIRST_CAMERA_SOURCE").unwrap_or_else(|_| "/dev/video3".into());
-    let found = if spec == "libcamera" || spec.starts_with("libcamera:") {
-        edgefirst_camera::enumerate()
+    let listed = [
+        ("libcamera", Backend::Libcamera),
+        ("mediafoundation", Backend::MediaFoundation),
+    ]
+    .into_iter()
+    .find(|(scheme, _)| spec == *scheme || spec.starts_with(&format!("{scheme}:")));
+    let found = if let Some((scheme, backend)) = listed {
+        let cameras: Vec<_> = edgefirst_camera::enumerate()
             .unwrap_or_default()
             .into_iter()
-            .filter(|c| c.backend == Backend::Libcamera)
-            .map(|c| format!("libcamera:{}", c.id))
-            .find(|s| spec == "libcamera" || *s == spec)
+            .filter(|c| c.backend == backend)
+            .collect();
+        let by_index = spec
+            .strip_prefix(&format!("{scheme}:"))
+            .and_then(|i| i.parse::<usize>().ok())
+            .filter(|_| backend == Backend::MediaFoundation)
+            .and_then(|i| cameras.get(i));
+        by_index
+            .or_else(|| {
+                cameras
+                    .iter()
+                    .find(|c| spec == scheme || spec == format!("{scheme}:{}", c.id))
+            })
+            .map(|c| format!("{scheme}:{}", c.id))
     } else {
         Path::new(&spec).exists().then(|| spec.clone())
     };

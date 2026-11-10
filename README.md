@@ -197,8 +197,9 @@ edgefirst-camera \
 |---|---|---|
 | `/dev/videoN` | V4L2 | Maivin and Raivin (i.MX 8M Plus, `vvcam` ISP, camera on `/dev/video3`), the i.MX 8M Plus EVK and USB UVC cameras. Imports buffers the SDK allocates in contiguous (CMA) memory, from the system DMA-BUF heap on a machine with no CMA heap, or exports the driver's |
 | `libcamera:<id>` | libcamera 0.5 or newer | i.MX 95 through the `nxp/neo` pipeline, and Raspberry Pi 5 (`pisp`). Uses libcamera's own buffers. Loaded at run time, so a unit without libcamera runs the other backends as before |
+| `mediafoundation:<id>` | Media Foundation | Windows USB and built-in cameras. `<id>` is the camera's symbolic link, as `devices` lists it, or its index there (`mediafoundation:0`). Frames are copied into the SDK's D3D11 textures. Windows asks the user to allow camera access first; a refusal exits with 77 (`NOPERM`) and says where to allow it |
 | `file:<name>.h264` | Recording replay | A recording with its `<name>.json` sidecar, decoded by a V4L2 H.264 decoder. Linux boards with a hardware decoder |
-| `mock[:WxH@fps]` | Synthetic frames | Testing without a camera. The only backend on macOS and Windows |
+| `mock[:WxH@fps]` | Synthetic frames | Testing without a camera. The only backend on macOS |
 
 Run `edgefirst-camera devices` to list the cameras the service can open, with their `libcamera:<id>` ids, formats, sizes, rates and named modes. `edgefirst-camera info` also reports whether an H.264 encoder and decoder are available.
 
@@ -208,6 +209,7 @@ Run `edgefirst-camera devices` to list the cameras the service can open, with th
 |---|---|
 | V4L2 | YUYV, VYUY, NV12 (single-buffer or `NV12M`), NV16 (single-buffer or `NV16M`), NV24, GREY, RGB24, RGBA and BGRA |
 | libcamera | NV12, NV16, YUYV, VYUY, GREY, RGB, RGBA and BGRA. The service captures NV12. The RPi 5 `pisp` pipeline lists VYUY but aborts when asked to validate it, so it is never requested |
+| Media Foundation | NV12 (also from I420 and YV12 cameras), YUYV (also from UYVY) and BGRA (from ARGB32, RGB32 and RGB24), repacked without colour conversion. The service captures NV12, or a camera's current format when it has no NV12. MJPEG and H.264 are not captured |
 | `file:` | NV12, as decoded |
 | `mock` | YUYV (default), NV12, RGBA and GREY |
 
@@ -271,7 +273,7 @@ These are the Maivin's devices (camera `/dev/video3`, encoder `/dev/video0`), an
 
 | Variable | Flag | Purpose |
 |---|---|---|
-| `SOURCE` | `--source` | Frame source: `/dev/videoN`, `libcamera:<id>`, `file:<name>.h264` or `mock[:WxH@fps]`. Empty uses `CAMERA` |
+| `SOURCE` | `--source` | Frame source: `/dev/videoN`, `libcamera:<id>`, `mediafoundation:<id>`, `file:<name>.h264` or `mock[:WxH@fps]`. Empty uses `CAMERA` |
 | `MEMORY` | `--memory` | Capture buffer allocation: `auto` (default), `import` or `export` |
 | `CAMERA_FPS` | `--camera-fps` | Requested capture rate, or the playback rate of a `file:` source |
 | `EXPOSURE`, `GAIN`, `WHITE_BALANCE` | `--exposure`, `--gain`, `--white-balance` | `auto` or a fixed value (microseconds, multiplier, kelvin). A camera without the control logs a warning |
@@ -459,7 +461,7 @@ Every option is also an environment variable, named as in the table, so the same
 
 | Flag | Variable | Default | Description |
 |---|---|---|---|
-| `--source <SOURCE>` | `SOURCE` | unset | Frame source: `/dev/videoN`, `libcamera:<id>`, `file:<name>.h264` or `mock[:WxH@fps]`. Unset uses `--camera`. See [Backends](#backends-and-how-theyre-selected) |
+| `--source <SOURCE>` | `SOURCE` | unset | Frame source: `/dev/videoN`, `libcamera:<id>`, `mediafoundation:<id>`, `file:<name>.h264` or `mock[:WxH@fps]`. Unset uses `--camera`. See [Backends](#backends-and-how-theyre-selected) |
 | `-c, --camera <PATH>` | `CAMERA` | `/dev/video3` | V4L2 device path, used when `--source` is unset |
 | `--memory <auto\|import\|export>` | `MEMORY` | `auto` | Capture buffer allocation: `import` contiguous (CMA) buffers, `export` the driver's own, or `auto` to import and fall back to the driver's buffers when it refuses them. `auto` prefers CMA, uses the system DMA-BUF heap on a machine with no CMA heap, and uses the driver's buffers when no heap can be opened |
 | `--camera-size <W> <H>` | `CAMERA_SIZE` | unset | Requested capture size. Unset keeps the camera's current size |

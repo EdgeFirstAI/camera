@@ -59,6 +59,11 @@ pub(crate) const CAPTURE_FORMAT: PixelFormat = PixelFormat::Yuyv;
 /// produce, and what the encoders take.
 pub(crate) const LIBCAMERA_FORMAT: PixelFormat = PixelFormat::Nv12;
 
+/// The format requested from Media Foundation cameras: what the Windows
+/// encoders take. NV12, I420 and YV12 cameras deliver it; one that lacks
+/// it is captured in its current format.
+pub(crate) const MEDIA_FOUNDATION_FORMAT: PixelFormat = PixelFormat::Nv12;
+
 /// What kind of source a spec names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SourceKind {
@@ -66,6 +71,8 @@ pub(crate) enum SourceKind {
     Device,
     /// A libcamera camera.
     Libcamera,
+    /// A Media Foundation camera (Windows).
+    MediaFoundation,
     /// A recording.
     File,
     /// Synthetic frames.
@@ -75,7 +82,7 @@ pub(crate) enum SourceKind {
 impl SourceKind {
     /// Whether the source is a live camera.
     pub(crate) fn is_camera(self) -> bool {
-        matches!(self, Self::Device | Self::Libcamera)
+        matches!(self, Self::Device | Self::Libcamera | Self::MediaFoundation)
     }
 
     pub(crate) fn of(spec: &str) -> Self {
@@ -83,6 +90,8 @@ impl SourceKind {
             Self::File
         } else if spec.starts_with("libcamera:") {
             Self::Libcamera
+        } else if spec.starts_with("mediafoundation:") {
+            Self::MediaFoundation
         } else if spec == "mock" || spec.starts_with("mock:") {
             Self::Synthetic
         } else {
@@ -191,6 +200,7 @@ impl Request {
             format: match kind {
                 SourceKind::Device => Some(CAPTURE_FORMAT),
                 SourceKind::Libcamera => Some(LIBCAMERA_FORMAT),
+                SourceKind::MediaFoundation => Some(MEDIA_FOUNDATION_FORMAT),
                 _ => None,
             },
             spec,
@@ -736,6 +746,11 @@ mod tests {
             SourceKind::Libcamera
         );
         assert_eq!(SourceKind::of("file:a.h264"), SourceKind::File);
+        assert_eq!(
+            SourceKind::of("mediafoundation:0"),
+            SourceKind::MediaFoundation
+        );
+        assert!(SourceKind::MediaFoundation.is_camera());
         assert_eq!(SourceKind::of("mock"), SourceKind::Synthetic);
         assert_eq!(SourceKind::of("mock:64x64@5"), SourceKind::Synthetic);
     }

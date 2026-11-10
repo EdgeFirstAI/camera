@@ -7,10 +7,15 @@
 mod file;
 #[cfg(all(target_os = "linux", feature = "libcamera"))]
 pub(crate) mod libcamera;
+#[cfg(all(windows, feature = "media-foundation"))]
+mod media_foundation;
 #[cfg(feature = "mock")]
 pub(crate) mod mock;
 #[cfg_attr(
-    not(all(target_os = "linux", any(feature = "v4l2", feature = "libcamera"))),
+    not(any(
+        all(target_os = "linux", any(feature = "v4l2", feature = "libcamera")),
+        all(windows, feature = "media-foundation")
+    )),
     allow(dead_code, reason = "no capture backend that measures is built")
 )]
 mod rate;
@@ -41,6 +46,9 @@ pub(crate) fn open(builder: CameraBuilder) -> Result<Box<dyn Camera>> {
         Source::Libcamera(_) => libcamera::open(builder),
         #[cfg(not(all(target_os = "linux", feature = "libcamera")))]
         Source::Libcamera(_) => Err(not_compiled("libcamera")),
+        #[cfg(all(windows, feature = "media-foundation"))]
+        Source::MediaFoundation(_) => media_foundation::open(builder),
+        #[cfg(not(all(windows, feature = "media-foundation")))]
         Source::MediaFoundation(_) => Err(not_compiled("Media Foundation")),
         Source::AvFoundation(_) => Err(not_compiled("AVFoundation")),
         #[cfg(feature = "file")]
@@ -57,6 +65,8 @@ pub(crate) fn enumerate() -> Result<Vec<CameraDescriptor>> {
     cameras.extend(v4l2::enumerate()?);
     #[cfg(all(target_os = "linux", feature = "libcamera"))]
     cameras.extend(libcamera::enumerate()?);
+    #[cfg(all(windows, feature = "media-foundation"))]
+    cameras.extend(media_foundation::enumerate()?);
     #[cfg(feature = "mock")]
     cameras.extend([mock::descriptor("mock")]);
     Ok(cameras)
@@ -72,6 +82,8 @@ pub(crate) fn probe(d: &CameraDescriptor) -> Result<Vec<FormatInfo>> {
         crate::Backend::V4l2 => v4l2::probe(d),
         #[cfg(all(target_os = "linux", feature = "libcamera"))]
         crate::Backend::Libcamera => libcamera::probe(d),
+        #[cfg(all(windows, feature = "media-foundation"))]
+        crate::Backend::MediaFoundation => media_foundation::probe(d),
         #[allow(
             unreachable_patterns,
             reason = "reachable unless every backend feature is enabled"

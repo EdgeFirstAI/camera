@@ -1,0 +1,235 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Au-Zone Technologies. All Rights Reserved.
+
+//! Copying a frame out of a locked Media Foundation buffer, repacked into
+//! the format it is delivered in without colour conversion.
+
+use super::select::Packing;
+
+/// A locked image: its bytes, where its top row starts, and the signed
+/// distance from one row to the next. The pitch is negative for a bottom-up
+/// image, as Media Foundation lays out RGB in system memory. Planes follow
+/// the first at the same pitch (NV12), or at half of it (I420, YV12).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Rows<'a> {
+    pub(super) bytes: &'a [u8],
+    pub(super) top: usize,
+    pub(super) pitch: isize,
+}
+
+impl<'a> Rows<'a> {
+    /// `len` bytes of row `r` of the plane starting at `start`, `pitch`
+    /// apart.
+    fn row(&self, start: isize, pitch: isize, r: usize, len: usize) -> Result<&'a [u8], String> {
+        let at = start + r as isize * pitch;
+        usize::try_from(at)
+            .ok()
+            .and_then(|at| self.bytes.get(at..at + len))
+            .ok_or_else(|| "a source row lies outside the buffer".to_owned())
+    }
+}
+
+fn row_mut(dst: &mut [u8], stride: usize, r: usize, len: usize) -> Result<&mut [u8], String> {
+    if len > stride {
+        return Err(format!(
+            "a row of {len} bytes is longer than the destination stride {stride}"
+        ));
+    }
+    dst.get_mut(r * stride..r * stride + len)
+        .ok_or_else(|| "a destination row lies outside the tensor".to_owned())
+}
+
+/// One plane of a source image: where its top row starts, and its pitch.
+#[derive(Debug, Clone, Copy)]
+struct Plane {
+    start: isize,
+    pitch: isize,
+}
+
+/// A destination whose rows are `stride` bytes apart.
+struct Dst<'a> {
+    bytes: &'a mut [u8],
+    stride: usize,
+}
+
+/// Fills destination `rows` from consecutive rows of `plane`, `len` source
+/// bytes into `out` destination bytes each, through `each`.
+fn transfer(
+    src: &Rows<'_>,
+    plane: Plane,
+    dst: &mut Dst<'_>,
+    rows: std::ops::Range<usize>,
+    (len, out): (usize, usize),
+    each: fn(&[u8], &mut [u8]),
+) -> Result<(), String> {
+    for (r, d) in rows.enumerate() {
+        each(
+            src.row(plane.start, plane.pitch, r, len)?,
+            row_mut(dst.bytes, dst.stride, d, out)?,
+        );
+    }
+    Ok(())
+}
+
+fn copy_row(from: &[u8], to: &mut [u8]) {
+    to.copy_from_slice(from);
+}
+
+/// UYVY to YUYV.
+fn swap_pairs(from: &[u8], to: &mut [u8]) {
+    for (o, i) in to.chunks_exact_mut(2).zip(from.chunks_exact(2)) {
+        o[0] = i[1];
+        o[1] = i[0];
+    }
+}
+
+/// RGB32, whose fourth byte is unused, to BGRA.
+fn opaque(from: &[u8], to: &mut [u8]) {
+    to.copy_from_slice(from);
+    to.iter_mut().skip(3).step_by(4).for_each(|a| *a = 0xff);
+}
+
+/// RGB24 to BGRA.
+fn expand(from: &[u8], to: &mut [u8]) {
+    for (o, i) in to.chunks_exact_mut(4).zip(from.chunks_exact(3)) {
+        o[..3].copy_from_slice(i);
+        o[3] = 0xff;
+    }
+}
+
+/// Interleaves the chroma planes of I420 (U first) or YV12 (V first),
+/// which follow the luma at half its pitch, into NV12 chroma rows.
+fn interleave(
+    src: &Rows<'_>,
+    luma: Plane,
+    v_first: bool,
+    dst: &mut Dst<'_>,
+    (width, height): (usize, usize),
+) -> Result<(), String> {
+    let (cw, ch) = (width.div_ceil(2), height.div_ceil(2));
+    let half = luma.pitch / 2;
+    let first = luma.start + luma.pitch * height as isize;
+    let second = first + half * ch as isize;
+    let (u, v) = if v_first {
+        (second, first)
+    } else {
+        (first, second)
+    };
+    for r in 0..ch {
+        let (us, vs) = (src.row(u, half, r, cw)?, src.row(v, half, r, cw)?);
+        let out = row_mut(dst.bytes, dst.stride, height + r, 2 * cw)?;
+        for (x, pair) in out.chunks_exact_mut(2).enumerate() {
+            pair[0] = us[x];
+            pair[1] = vs[x];
+        }
+    }
+    Ok(())
+}
+
+/// Copies a `width` x `height` image in `packing` from `src` into `dst`,
+/// whose rows are `stride` bytes apart, as the format the packing delivers:
+/// NV12 with its chroma rows after the luma rows, YUYV, or BGRA.
+pub(super) fn copy(
+    packing: Packing,
+    width: usize,
+    height: usize,
+    src: Rows<'_>,
+    dst: &mut [u8],
+    stride: usize,
+) -> Result<(), String> {
+    let luma = Plane {
+        start: src.top as isize,
+        pitch: src.pitch,
+    };
+    let dst = &mut Dst { bytes: dst, stride };
+    let (cw, ch) = (width.div_ceil(2), height.div_ceil(2));
+    let all = 0..height;
+    match packing {
+        Packing::Nv12 => {
+            transfer(&src, luma, dst, all, (width, width), copy_row)?;
+            let chroma = Plane {
+                start: luma.start + luma.pitch * height as isize,
+                ..luma
+            };
+            let rows = height..height + ch;
+            transfer(&src, chroma, dst, rows, (2 * cw, 2 * cw), copy_row)
+        }
+        Packing::I420 | Packing::Yv12 => {
+            transfer(&src, luma, dst, all, (width, width), copy_row)?;
+            interleave(&src, luma, packing == Packing::Yv12, dst, (width, height))
+        }
+        Packing::Yuy2 => transfer(&src, luma, dst, all, (4 * cw, 4 * cw), copy_row),
+        Packing::Uyvy => transfer(&src, luma, dst, all, (4 * cw, 4 * cw), swap_pairs),
+        Packing::Argb32 => transfer(&src, luma, dst, all, (4 * width, 4 * width), copy_row),
+        Packing::Rgb32 => transfer(&src, luma, dst, all, (4 * width, 4 * width), opaque),
+        Packing::Rgb24 => transfer(&src, luma, dst, all, (3 * width, 4 * width), expand),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(bytes: &[u8], top: usize, pitch: isize) -> Rows<'_> {
+        Rows { bytes, top, pitch }
+    }
+
+    #[test]
+    fn nv12_planes_move_to_the_destination_stride() {
+        // 4x2 NV12 at a pitch of 6: two luma rows, one chroma row.
+        let src: Vec<u8> = (0..18).collect();
+        let mut dst = vec![0xff; 24];
+        copy(Packing::Nv12, 4, 2, rows(&src, 0, 6), &mut dst, 8).unwrap();
+        assert_eq!(&dst[0..4], &[0, 1, 2, 3]);
+        assert_eq!(&dst[8..12], &[6, 7, 8, 9]);
+        assert_eq!(&dst[16..20], &[12, 13, 14, 15]);
+        assert_eq!(dst[4], 0xff, "padding is left alone");
+    }
+
+    #[test]
+    fn i420_and_yv12_interleave_their_chroma_planes() {
+        // 4x2: luma at a pitch of 4, then U and V planes at a pitch of 2.
+        let mut src: Vec<u8> = (0..8).collect();
+        src.extend([20, 21, 30, 31]);
+        let mut dst = [0; 12];
+        copy(Packing::I420, 4, 2, rows(&src, 0, 4), &mut dst, 4).unwrap();
+        assert_eq!(dst, [0, 1, 2, 3, 4, 5, 6, 7, 20, 30, 21, 31]);
+        copy(Packing::Yv12, 4, 2, rows(&src, 0, 4), &mut dst, 4).unwrap();
+        assert_eq!(&dst[8..], &[30, 20, 31, 21]);
+    }
+
+    #[test]
+    fn uyvy_is_reordered_to_yuyv() {
+        let src = [1, 2, 3, 4];
+        let mut dst = [0; 4];
+        copy(Packing::Uyvy, 2, 1, rows(&src, 0, 4), &mut dst, 4).unwrap();
+        assert_eq!(dst, [2, 1, 4, 3]);
+    }
+
+    #[test]
+    fn a_bottom_up_rgb24_image_becomes_top_down_bgra() {
+        // Two rows of one pixel, padded to 4 bytes, stored bottom row first.
+        let src = [10, 11, 12, 0, 1, 2, 3, 0];
+        let mut dst = [0; 8];
+        copy(Packing::Rgb24, 1, 2, rows(&src, 4, -4), &mut dst, 4).unwrap();
+        assert_eq!(dst, [1, 2, 3, 0xff, 10, 11, 12, 0xff]);
+    }
+
+    #[test]
+    fn rgb32_gets_an_opaque_alpha() {
+        let src = [1, 2, 3, 0];
+        let mut dst = [0; 4];
+        copy(Packing::Rgb32, 1, 1, rows(&src, 0, 4), &mut dst, 4).unwrap();
+        assert_eq!(dst, [1, 2, 3, 0xff]);
+    }
+
+    #[test]
+    fn rows_outside_either_buffer_are_refused() {
+        let src = [0u8; 8];
+        let mut dst = [0u8; 64];
+        assert!(copy(Packing::Yuy2, 2, 4, rows(&src, 0, 4), &mut dst, 4).is_err());
+        let mut small = [0u8; 4];
+        assert!(copy(Packing::Yuy2, 2, 2, rows(&src, 0, 4), &mut small, 4).is_err());
+        assert!(copy(Packing::Argb32, 2, 1, rows(&src, 0, 8), &mut dst, 4).is_err());
+    }
+}
