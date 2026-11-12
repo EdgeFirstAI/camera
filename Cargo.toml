@@ -49,10 +49,10 @@ profiling = [
 clap = { version = "4.6.7", features = ["derive", "env"] }
 console-subscriber = "0.5.0"
 edgefirst-camera = { version = "3.0.0-dev", path = "crates/camera", features = ["mock", "file", "schemas"] }
-edgefirst-codec = { version = "0.39.0", default-features = false, features = ["v4l2"] }
-edgefirst-image = { version = "0.39.0", default-features = false, features = ["opengl"] }
+edgefirst-codec = { version = "0.40.0", default-features = false, features = ["v4l2"] }
+edgefirst-image = { version = "0.40.0", default-features = false, features = ["opengl"] }
 edgefirst-schemas = "4.0.0"
-edgefirst-tensor = { version = "0.39.0", default-features = false }
+edgefirst-tensor = { version = "0.40.0", default-features = false }
 kanal = { git = "https://github.com/fereidani/kanal", rev = "b6aeab2" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
