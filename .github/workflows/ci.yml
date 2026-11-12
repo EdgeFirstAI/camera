@@ -98,7 +98,7 @@ jobs:
   quick:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    uses: EdgeFirstAI/.github/.github/workflows/rust-quick.yml@c7876194b9fe9f7f72daf0efadaf32d7dff1b257
+    uses: EdgeFirstAI/.github/.github/workflows/rust-quick.yml@0cbb8f91f0d3e7d15726329f3fa651450bfdbbf0
     with:
       # vivid-setup.sh fails the lane without vivid unless the repository
       # variable CAMERA_ALLOW_NO_VIVID is true or the PR has ci:no-vivid.
@@ -122,7 +122,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7  # stable
-      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941  # v2.89.1
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39  # v2.90.3
         with:
           tool: cargo-cyclonedx
       - name: Resolve dependency graph and check NOTICE
@@ -178,7 +178,7 @@ jobs:
           shared-key: sdk-features
           cache-on-failure: true
           cache-bin: false
-      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941  # v2.89.1
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39  # v2.90.3
         with:
           tool: cargo-hack
       - name: Clippy with each SDK feature alone
@@ -196,7 +196,7 @@ jobs:
   full:
     needs: [changes, libcamera-shim]
     if: needs.changes.outputs.full == 'true' || needs.changes.outputs.hardware == 'true'
-    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@c7876194b9fe9f7f72daf0efadaf32d7dff1b257
+    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@0cbb8f91f0d3e7d15726329f3fa651450bfdbbf0
     with:
       lanes: ${{ needs.changes.outputs.full == 'true' && 'all' || 'hardware' }}
       # An i.MX 8M Plus through V4L2, and the i.MX 95 and Raspberry Pi 5

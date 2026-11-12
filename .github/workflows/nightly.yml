@@ -21,12 +21,12 @@ permissions:
 
 jobs:
   changed:
-    uses: EdgeFirstAI/.github/.github/workflows/nightly-gate.yml@c7876194b9fe9f7f72daf0efadaf32d7dff1b257
+    uses: EdgeFirstAI/.github/.github/workflows/nightly-gate.yml@0cbb8f91f0d3e7d15726329f3fa651450bfdbbf0
     with:
       force: ${{ inputs.force || false }}
 
   advisories:
-    uses: EdgeFirstAI/.github/.github/workflows/advisories.yml@c7876194b9fe9f7f72daf0efadaf32d7dff1b257
+    uses: EdgeFirstAI/.github/.github/workflows/advisories.yml@0cbb8f91f0d3e7d15726329f3fa651450bfdbbf0
 
   # The prebuilt libcamera shims the i.MX 95 board lane loads.
   libcamera-shim:
@@ -37,7 +37,7 @@ jobs:
   nightly:
     needs: [changed, libcamera-shim]
     if: needs.changed.outputs.run == 'true'
-    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@c7876194b9fe9f7f72daf0efadaf32d7dff1b257
+    uses: EdgeFirstAI/.github/.github/workflows/rust-full.yml@0cbb8f91f0d3e7d15726329f3fa651450bfdbbf0
     with:
       lanes: all
       nightly: true
